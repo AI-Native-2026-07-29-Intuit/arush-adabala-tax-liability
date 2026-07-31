@@ -1,6 +1,7 @@
 package com.uptimecrew.tax_liability.model;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Objects;
 
 public final class TaxBracket {
@@ -37,8 +38,8 @@ public final class TaxBracket {
         this.id = id;
         this.jurisdiction = jurisdiction;
         this.rate = rate;
-        this.floor = floor;
-        this.ceiling = ceiling;
+        this.floor = floor.setScale(2, RoundingMode.HALF_UP);
+        this.ceiling = ceiling == null ? null : ceiling.setScale(2, RoundingMode.HALF_UP);
     }
 
     public String getId() {
