@@ -1,6 +1,7 @@
 package com.uptimecrew.tax_liability.model;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.Objects;
 
@@ -23,7 +24,7 @@ public final class IncomeEventDraft {
             throw new IllegalArgumentException("amount must not be negative: " + amount);
         }
         this.id = id;
-        this.amount = amount;
+        this.amount = amount.setScale(2, RoundingMode.HALF_UP);
         this.source = source;
         this.occurredOn = occurredOn;
     }
