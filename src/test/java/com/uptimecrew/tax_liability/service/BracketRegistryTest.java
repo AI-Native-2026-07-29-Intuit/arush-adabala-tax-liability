@@ -79,4 +79,13 @@ class BracketRegistryTest {
 
         assertTrue(found.isEmpty());
     }
+
+    @Test
+    void findByJurisdictionAbove_returns_empty_when_floor_exceeds_every_bracket() {
+        BracketRegistry subject = new BracketRegistry(List.of(BRACKET_10, BRACKET_12, BRACKET_22));
+
+        List<TaxBracket> found = subject.findByJurisdictionAbove("FEDERAL", new BigDecimal("1000000"));
+
+        assertTrue(found.isEmpty());
+    }
 }
