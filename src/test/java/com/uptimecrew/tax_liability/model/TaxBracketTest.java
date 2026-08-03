@@ -20,11 +20,11 @@ class TaxBracketTest {
                 new BigDecimal("0"),
                 new BigDecimal("11600")
         );
-        assertEquals("fed-bracket-10", subject.getId());
-        assertEquals("FEDERAL", subject.getJurisdiction());
-        assertEquals(0, new BigDecimal("0.10").compareTo(subject.getRate()));
-        assertEquals(0, new BigDecimal("0").compareTo(subject.getFloor()));
-        assertEquals(0, new BigDecimal("11600").compareTo(subject.getCeiling()));
+        assertEquals("fed-bracket-10", subject.id());
+        assertEquals("FEDERAL", subject.jurisdiction());
+        assertEquals(0, new BigDecimal("0.10").compareTo(subject.rate()));
+        assertEquals(0, new BigDecimal("0").compareTo(subject.floor()));
+        assertEquals(0, new BigDecimal("11600").compareTo(subject.ceiling()));
     }
 
     @Test

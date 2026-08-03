@@ -37,7 +37,7 @@ class BracketRegistryTest {
         Optional<TaxBracket> found = subject.findById("fed-bracket-12");
 
         assertTrue(found.isPresent());
-        assertEquals("fed-bracket-12", found.orElseThrow().getId());
+        assertEquals("fed-bracket-12", found.orElseThrow().id());
     }
 
     @Test
@@ -68,7 +68,7 @@ class BracketRegistryTest {
 
         List<TaxBracket> found = subject.findByJurisdictionAbove("FEDERAL", new BigDecimal("11600"));
 
-        assertEquals(List.of("fed-bracket-12", "fed-bracket-22"), found.stream().map(TaxBracket::getId).toList());
+        assertEquals(List.of("fed-bracket-12", "fed-bracket-22"), found.stream().map(TaxBracket::id).toList());
     }
 
     @Test
