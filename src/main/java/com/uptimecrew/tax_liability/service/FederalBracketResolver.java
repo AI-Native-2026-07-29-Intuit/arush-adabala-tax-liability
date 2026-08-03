@@ -5,6 +5,7 @@ import com.uptimecrew.tax_liability.model.TaxBracket;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Deliberately simple decision rule: a fixed, hard-coded list of federal brackets checked
@@ -20,16 +21,16 @@ public final class FederalBracketResolver implements BracketResolver {
     );
 
     @Override
-    public TaxBracket resolve(BigDecimal taxableAmount) {
+    public Optional<TaxBracket> resolve(BigDecimal taxableAmount) {
         Objects.requireNonNull(taxableAmount, "taxableAmount must not be null");
         if (taxableAmount.signum() < 0) {
             throw new IllegalArgumentException("taxableAmount must not be negative: " + taxableAmount);
         }
         for (TaxBracket bracket : FEDERAL_BRACKETS) {
             if (bracket.covers(taxableAmount)) {
-                return bracket;
+                return Optional.of(bracket);
             }
         }
-        throw new IllegalStateException("no federal bracket covers taxable amount: " + taxableAmount);
+        return Optional.empty();
     }
 }

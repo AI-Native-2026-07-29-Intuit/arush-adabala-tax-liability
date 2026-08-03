@@ -12,7 +12,7 @@ Bootstrap the Tax-Liability Domain
 All classes live under `com.uptimecrew.tax_liability`:
 
 - `model` — domain types: `IncomeEvent`, `IncomeEventDraft`, `IncomeSource`, `Deduction`, `TaxBracket`
-- `service` — behavior over the domain model: `BracketResolver` (interface), `FederalBracketResolver` (implementation)
+- `service` — behavior over the domain model: `BracketResolver` (interface, returns `Optional<TaxBracket>`), `FederalBracketResolver` (implementation), `BracketRegistry` (queryable, immutable store of `TaxBracket` records)
 
 ## Build and Test
 
