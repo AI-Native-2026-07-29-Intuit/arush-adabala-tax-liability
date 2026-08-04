@@ -19,8 +19,8 @@ class FederalBracketResolverTest {
         Optional<TaxBracket> resolved = subject.resolve(new BigDecimal("75000.00"));
 
         assertTrue(resolved.isPresent());
-        assertEquals("fed-bracket-22", resolved.orElseThrow().getId());
-        assertEquals("FEDERAL", resolved.orElseThrow().getJurisdiction());
+        assertEquals("fed-bracket-22", resolved.orElseThrow().id());
+        assertEquals("FEDERAL", resolved.orElseThrow().jurisdiction());
     }
 
     @Test
@@ -30,6 +30,6 @@ class FederalBracketResolverTest {
         Optional<TaxBracket> resolved = subject.resolve(new BigDecimal("500000.00"));
 
         assertTrue(resolved.isPresent());
-        assertEquals("fed-bracket-24", resolved.orElseThrow().getId());
+        assertEquals("fed-bracket-24", resolved.orElseThrow().id());
     }
 }

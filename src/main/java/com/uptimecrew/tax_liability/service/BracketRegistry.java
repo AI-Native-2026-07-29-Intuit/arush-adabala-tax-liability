@@ -28,7 +28,7 @@ public final class BracketRegistry {
     public BracketRegistry(Collection<TaxBracket> brackets) {
         Objects.requireNonNull(brackets, "brackets must not be null");
         this.bracketsById = brackets.stream()
-                .collect(Collectors.toUnmodifiableMap(TaxBracket::getId, bracket -> bracket));
+                .collect(Collectors.toUnmodifiableMap(TaxBracket::id, bracket -> bracket));
     }
 
     /**
@@ -58,8 +58,8 @@ public final class BracketRegistry {
         Objects.requireNonNull(jurisdiction, "jurisdiction must not be null");
         Objects.requireNonNull(floor, "floor must not be null");
         return bracketsById.values().stream()
-                .filter(bracket -> bracket.getJurisdiction().equals(jurisdiction) && bracket.getFloor().compareTo(floor) >= 0)
-                .sorted(Comparator.comparing(TaxBracket::getFloor))
+                .filter(bracket -> bracket.jurisdiction().equals(jurisdiction) && bracket.floor().compareTo(floor) >= 0)
+                .sorted(Comparator.comparing(TaxBracket::floor))
                 .toList();
     }
 }
