@@ -17,6 +17,11 @@ class BracketResolversTest {
     }
 
     @Test
+    void federal_returns_equivalent_instances_on_repeated_calls() {
+        assertEquals(BracketResolvers.federal(), BracketResolvers.federal());
+    }
+
+    @Test
     void flatRateState_returns_equivalent_instances_on_repeated_calls() {
         assertEquals(BracketResolvers.flatRateState(), BracketResolvers.flatRateState());
     }

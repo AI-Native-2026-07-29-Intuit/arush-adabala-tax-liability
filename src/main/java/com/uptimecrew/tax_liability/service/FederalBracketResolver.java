@@ -33,4 +33,19 @@ public final class FederalBracketResolver implements BracketResolver {
         }
         return Optional.empty();
     }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof FederalBracketResolver;
+    }
+
+    @Override
+    public int hashCode() {
+        return FederalBracketResolver.class.hashCode();
+    }
+
+    @Override
+    public String toString() {
+        return "FederalBracketResolver{}";
+    }
 }
