@@ -3,6 +3,7 @@ package com.uptimecrew.tax_liability.service;
 import java.math.BigDecimal;
 import java.util.Optional;
 
+import com.uptimecrew.tax_liability.exception.BracketResolutionFailedException;
 import com.uptimecrew.tax_liability.model.TaxBracket;
 
 import org.junit.jupiter.api.Test;
@@ -35,5 +36,13 @@ class FlatStateBracketResolverTest {
         BracketResolver subject = new FlatStateBracketResolver("COLORADO", new BigDecimal("0.044"));
 
         assertThrows(IllegalArgumentException.class, () -> subject.resolve(new BigDecimal("-1")));
+    }
+
+    @Test
+    void throws_bracket_resolution_failed_exception_for_amount_requiring_extended_table() {
+        BracketResolver subject = new FlatStateBracketResolver("COLORADO", new BigDecimal("0.044"));
+
+        assertThrows(BracketResolutionFailedException.class,
+                () -> subject.resolve(new BigDecimal("1000000000")));
     }
 }

@@ -1,7 +1,9 @@
 package com.uptimecrew.tax_liability.service;
 
+import com.uptimecrew.tax_liability.exception.BracketResolutionFailedException;
 import com.uptimecrew.tax_liability.model.TaxBracket;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Objects;
 import java.util.Optional;
@@ -10,6 +12,13 @@ import java.util.Optional;
  * Strategy for a state that taxes all income at a single flat rate, with no brackets.
  */
 public final class FlatStateBracketResolver implements BracketResolver {
+
+    /**
+     * Amounts at or above this threshold require the extended bracket table page, whose
+     * synthetic load failure below demonstrates the {@link BracketResolutionFailedException}
+     * failure path.
+     */
+    private static final BigDecimal EXTENDED_TABLE_THRESHOLD = new BigDecimal("1000000000");
 
     private final String jurisdiction;
     private final BigDecimal rate;
@@ -35,6 +44,15 @@ public final class FlatStateBracketResolver implements BracketResolver {
         Objects.requireNonNull(taxableAmount, "taxableAmount must not be null");
         if (taxableAmount.signum() < 0) {
             throw new IllegalArgumentException("taxableAmount must not be negative: " + taxableAmount);
+        }
+        if (taxableAmount.compareTo(EXTENDED_TABLE_THRESHOLD) >= 0) {
+            try {
+                /* simulate a read that could fail in production */
+                throw new IOException("extended bracket table unreachable for jurisdiction " + jurisdiction);
+            } catch (IOException cause) {
+                throw new BracketResolutionFailedException(
+                        "failed loading extended bracket table for jurisdiction " + jurisdiction, cause);
+            }
         }
         return Optional.of(bracket);
     }

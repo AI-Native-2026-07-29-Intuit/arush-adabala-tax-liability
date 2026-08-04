@@ -3,11 +3,13 @@ package com.uptimecrew.tax_liability.service;
 import java.math.BigDecimal;
 import java.util.Optional;
 
+import com.uptimecrew.tax_liability.exception.InvalidIncomeException;
 import com.uptimecrew.tax_liability.model.TaxBracket;
 
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FederalBracketResolverTest {
@@ -31,5 +33,12 @@ class FederalBracketResolverTest {
 
         assertTrue(resolved.isPresent());
         assertEquals("fed-bracket-24", resolved.orElseThrow().id());
+    }
+
+    @Test
+    void throws_invalid_income_exception_for_negative_amount() {
+        BracketResolver subject = new FederalBracketResolver();
+
+        assertThrows(InvalidIncomeException.class, () -> subject.resolve(new BigDecimal("-100.00")));
     }
 }
