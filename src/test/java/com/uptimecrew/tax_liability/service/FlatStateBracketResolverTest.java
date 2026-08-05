@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.util.Optional;
 
 import com.uptimecrew.tax_liability.exception.BracketResolutionFailedException;
+import com.uptimecrew.tax_liability.exception.InvalidIncomeException;
 import com.uptimecrew.tax_liability.model.TaxBracket;
 
 import org.junit.jupiter.api.Test;
@@ -32,10 +33,10 @@ class FlatStateBracketResolverTest {
     }
 
     @Test
-    void rejects_negative_taxable_amount() {
+    void throws_invalid_income_exception_for_negative_taxable_amount() {
         BracketResolver subject = new FlatStateBracketResolver("COLORADO", new BigDecimal("0.044"));
 
-        assertThrows(IllegalArgumentException.class, () -> subject.resolve(new BigDecimal("-1")));
+        assertThrows(InvalidIncomeException.class, () -> subject.resolve(new BigDecimal("-1")));
     }
 
     @Test
