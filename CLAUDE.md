@@ -14,3 +14,7 @@
 6. Tests: only use JUnit 5 (Test, BeforeEach, assertEquals, assertTrue, assertThrows). No JUnit 4 or no third-party assertion libraries.
 
 7. Package root: all classes are grouped in the package `com.uptimecrew.tax_liability` (such as `com.uptimecrew.tax_liability.model`, `com.uptimecrew.tax_liability.service`). No com.example default package.
+
+## Day 5
+
+- Test-only additions: AssertJ fluent assertions for new tests, JaCoCo branch-coverage reporting/enforcement (70% floor) wired into `./gradlew check`, and `TaxBracketTestDataBuilder` (a public production-source fluent builder in `model`) for constructing valid `TaxBracket` test fixtures without repeating the five-argument constructor.

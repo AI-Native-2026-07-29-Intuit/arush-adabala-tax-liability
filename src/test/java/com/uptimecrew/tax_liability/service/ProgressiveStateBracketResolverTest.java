@@ -79,4 +79,68 @@ class ProgressiveStateBracketResolverTest {
                 .isInstanceOf(BracketResolutionFailedException.class)
                 .hasMessageContaining(JURISDICTION);
     }
+
+    @Test
+    @DisplayName("constructorFor_blankJurisdiction_throwsIllegalArgumentException")
+    void constructorFor_blankJurisdiction_throwsIllegalArgumentException() {
+        // Arrange: no subject yet — the constructor call itself is under test.
+
+        // Act + Assert: a blank jurisdiction is rejected as nonsensical input.
+        assertThatThrownBy(() -> new ProgressiveStateBracketResolver("   ", List.of(BRACKET_1)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("constructorFor_emptyBrackets_throwsIllegalArgumentException")
+    void constructorFor_emptyBrackets_throwsIllegalArgumentException() {
+        // Arrange: no subject yet — the constructor call itself is under test.
+
+        // Act + Assert: an empty bracket list leaves nothing to resolve against.
+        assertThatThrownBy(() -> new ProgressiveStateBracketResolver(JURISDICTION, List.of()))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("constructorFor_bracketFromAnotherJurisdiction_throwsIllegalArgumentException")
+    void constructorFor_bracketFromAnotherJurisdiction_throwsIllegalArgumentException() {
+        // Arrange: a bracket that belongs to a different jurisdiction than the resolver.
+        TaxBracket foreignBracket = new TaxBracket(
+                "ny-bracket-1", "NEW YORK", new BigDecimal("0.04"), new BigDecimal("0"), new BigDecimal("10000"));
+
+        // Act + Assert: mixing jurisdictions is rejected as nonsensical input.
+        assertThatThrownBy(() -> new ProgressiveStateBracketResolver(JURISDICTION, List.of(foreignBracket)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("resolveFor_amountInAGapBetweenBrackets_returnsEmpty")
+    void resolveFor_amountInAGapBetweenBrackets_returnsEmpty() {
+        // Arrange: a resolver missing the middle bracket, leaving a 20000-50000 gap.
+        ProgressiveStateBracketResolver subject = new ProgressiveStateBracketResolver(
+                JURISDICTION, List.of(BRACKET_1, BRACKET_3));
+
+        // Act: resolve an amount that falls inside the gap.
+        Optional<TaxBracket> resolved = subject.resolve(new BigDecimal("30000.00"));
+
+        // Assert: no bracket covers the amount, so resolution comes back empty.
+        assertThat(resolved).isEmpty();
+    }
+
+    @Test
+    @DisplayName("equalsAndHashCodeFor_resolversWithSameJurisdictionAndBrackets_areEqual")
+    void equalsAndHashCodeFor_resolversWithSameJurisdictionAndBrackets_areEqual() {
+        // Arrange: two resolvers built from identical arguments, plus one that differs.
+        ProgressiveStateBracketResolver subject = new ProgressiveStateBracketResolver(
+                JURISDICTION, List.of(BRACKET_1, BRACKET_2, BRACKET_3));
+        ProgressiveStateBracketResolver sameArguments = new ProgressiveStateBracketResolver(
+                JURISDICTION, List.of(BRACKET_1, BRACKET_2, BRACKET_3));
+        ProgressiveStateBracketResolver differentBrackets = new ProgressiveStateBracketResolver(
+                JURISDICTION, List.of(BRACKET_1));
+
+        // Act + Assert: reflexivity, value equality, and inequality against another type/value.
+        assertThat(subject).isEqualTo(subject);
+        assertThat(subject).isEqualTo(sameArguments).hasSameHashCodeAs(sameArguments);
+        assertThat(subject).isNotEqualTo(differentBrackets);
+        assertThat(subject).isNotEqualTo("not a resolver");
+    }
 }
