@@ -9,6 +9,7 @@ import com.uptimecrew.tax_liability.model.TaxBracket;
 
 import org.junit.jupiter.api.Test;
 
+import static com.uptimecrew.tax_liability.model.TaxBracketTestDataBuilder.aTaxBracket;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -16,12 +17,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BracketRegistryTest {
 
-    private static final TaxBracket BRACKET_10 = new TaxBracket(
-            "fed-bracket-10", "FEDERAL", new BigDecimal("0.10"), new BigDecimal("0"), new BigDecimal("11600"));
-    private static final TaxBracket BRACKET_12 = new TaxBracket(
-            "fed-bracket-12", "FEDERAL", new BigDecimal("0.12"), new BigDecimal("11600"), new BigDecimal("47150"));
-    private static final TaxBracket BRACKET_22 = new TaxBracket(
-            "fed-bracket-22", "FEDERAL", new BigDecimal("0.22"), new BigDecimal("47150"), new BigDecimal("100525"));
+    private static final TaxBracket BRACKET_10 = aTaxBracket()
+            .withId("fed-bracket-10").withJurisdiction("FEDERAL")
+            .withRate(new BigDecimal("0.10")).withFloor(new BigDecimal("0")).withCeiling(new BigDecimal("11600"))
+            .build();
+    private static final TaxBracket BRACKET_12 = aTaxBracket()
+            .withId("fed-bracket-12").withJurisdiction("FEDERAL")
+            .withRate(new BigDecimal("0.12")).withFloor(new BigDecimal("11600")).withCeiling(new BigDecimal("47150"))
+            .build();
+    private static final TaxBracket BRACKET_22 = aTaxBracket()
+            .withId("fed-bracket-22").withJurisdiction("FEDERAL")
+            .withRate(new BigDecimal("0.22")).withFloor(new BigDecimal("47150")).withCeiling(new BigDecimal("100525"))
+            .build();
 
     @Test
     void size_reflects_number_of_brackets_registered() {
