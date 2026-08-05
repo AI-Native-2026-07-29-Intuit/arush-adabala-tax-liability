@@ -1,6 +1,7 @@
 package com.uptimecrew.tax_liability.service;
 
 import com.uptimecrew.tax_liability.exception.BracketResolutionFailedException;
+import com.uptimecrew.tax_liability.exception.InvalidIncomeException;
 import com.uptimecrew.tax_liability.model.TaxBracket;
 
 import java.io.IOException;
@@ -43,7 +44,7 @@ public final class FlatStateBracketResolver implements BracketResolver {
     public Optional<TaxBracket> resolve(BigDecimal taxableAmount) {
         Objects.requireNonNull(taxableAmount, "taxableAmount must not be null");
         if (taxableAmount.signum() < 0) {
-            throw new IllegalArgumentException("taxableAmount must not be negative: " + taxableAmount);
+            throw new InvalidIncomeException("taxableAmount must be non-null and non-negative: " + taxableAmount);
         }
         if (taxableAmount.compareTo(EXTENDED_TABLE_THRESHOLD) >= 0) {
             try {
