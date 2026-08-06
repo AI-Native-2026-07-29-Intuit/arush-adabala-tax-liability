@@ -10,6 +10,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static com.uptimecrew.tax_liability.model.TaxBracketTestDataBuilder.aTaxBracket;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -25,8 +26,10 @@ class TaxLiabilityServiceMockitoTest {
     @Test
     void delegates_to_injected_strategy_and_applies_its_rate() {
         BigDecimal taxableAmount = new BigDecimal("75000.00");
-        TaxBracket resolvedBracket = new TaxBracket(
-                "fed-bracket-22", "FEDERAL", new BigDecimal("0.22"), new BigDecimal("47150"), new BigDecimal("100525"));
+        TaxBracket resolvedBracket = aTaxBracket()
+                .withId("fed-bracket-22").withJurisdiction("FEDERAL")
+                .withRate(new BigDecimal("0.22")).withFloor(new BigDecimal("47150")).withCeiling(new BigDecimal("100525"))
+                .build();
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
 
         TaxLiabilityService subject = new TaxLiabilityService(strategy);

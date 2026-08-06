@@ -19,6 +19,7 @@ import ch.qos.logback.core.read.ListAppender;
 
 import org.slf4j.LoggerFactory;
 
+import static com.uptimecrew.tax_liability.model.TaxBracketTestDataBuilder.aTaxBracket;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -47,8 +48,10 @@ class TaxLiabilityServiceLoggingTest {
 
     @Test
     void logs_one_info_line_before_delegating_and_one_on_a_successful_result() {
-        TaxBracket resolvedBracket = new TaxBracket(
-                "fed-bracket-22", "FEDERAL", new BigDecimal("0.22"), new BigDecimal("47150"), new BigDecimal("100525"));
+        TaxBracket resolvedBracket = aTaxBracket()
+                .withId("fed-bracket-22").withJurisdiction("FEDERAL")
+                .withRate(new BigDecimal("0.22")).withFloor(new BigDecimal("47150")).withCeiling(new BigDecimal("100525"))
+                .build();
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
 
         TaxLiabilityService subject = new TaxLiabilityService(strategy);
