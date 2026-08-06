@@ -1,7 +1,7 @@
 package com.uptimecrew.tax_liability.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.uptimecrew.tax_liability.exception.BracketResolutionFailedException;
 import com.uptimecrew.tax_liability.exception.InvalidIncomeException;
@@ -46,10 +46,11 @@ class ProgressiveStateBracketResolverTest {
         ProgressiveStateBracketResolver subject = new ProgressiveStateBracketResolver(
                 JURISDICTION, List.of(BRACKET_1, BRACKET_2, BRACKET_3));
 
-        // Act + Assert: a negative taxable amount is rejected as invalid input.
-        assertThatThrownBy(() -> subject.resolve(new BigDecimal("-1.00")))
-                .isInstanceOf(InvalidIncomeException.class)
-                .hasMessageContaining("-1.00");
+        // Act: resolve a negative taxable amount.
+        Throwable thrown = catchThrowable(() -> subject.resolve(new BigDecimal("-1.00")));
+
+        // Assert: rejected as invalid input.
+        assertThat(thrown).isInstanceOf(InvalidIncomeException.class).hasMessageContaining("-1.00");
     }
 
     @Test
@@ -73,11 +74,11 @@ class ProgressiveStateBracketResolverTest {
         ProgressiveStateBracketResolver subject = new ProgressiveStateBracketResolver(
                 JURISDICTION, List.of(BRACKET_1, BRACKET_2, BRACKET_3));
 
-        // Act + Assert: an amount beyond the extended-table threshold surfaces the
-        // synthetic upstream load failure as a domain exception.
-        assertThatThrownBy(() -> subject.resolve(new BigDecimal("1000000000")))
-                .isInstanceOf(BracketResolutionFailedException.class)
-                .hasMessageContaining(JURISDICTION);
+        // Act: resolve an amount beyond the extended-table threshold.
+        Throwable thrown = catchThrowable(() -> subject.resolve(new BigDecimal("1000000000")));
+
+        // Assert: the synthetic upstream load failure surfaces as a domain exception.
+        assertThat(thrown).isInstanceOf(BracketResolutionFailedException.class).hasMessageContaining(JURISDICTION);
     }
 
     @Test
@@ -85,9 +86,11 @@ class ProgressiveStateBracketResolverTest {
     void constructorFor_blankJurisdiction_throwsIllegalArgumentException() {
         // Arrange: no subject yet — the constructor call itself is under test.
 
-        // Act + Assert: a blank jurisdiction is rejected as nonsensical input.
-        assertThatThrownBy(() -> new ProgressiveStateBracketResolver("   ", List.of(BRACKET_1)))
-                .isInstanceOf(IllegalArgumentException.class);
+        // Act: construct a resolver with a blank jurisdiction.
+        Throwable thrown = catchThrowable(() -> new ProgressiveStateBracketResolver("   ", List.of(BRACKET_1)));
+
+        // Assert: rejected as nonsensical input.
+        assertThat(thrown).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -95,9 +98,11 @@ class ProgressiveStateBracketResolverTest {
     void constructorFor_emptyBrackets_throwsIllegalArgumentException() {
         // Arrange: no subject yet — the constructor call itself is under test.
 
-        // Act + Assert: an empty bracket list leaves nothing to resolve against.
-        assertThatThrownBy(() -> new ProgressiveStateBracketResolver(JURISDICTION, List.of()))
-                .isInstanceOf(IllegalArgumentException.class);
+        // Act: construct a resolver with an empty bracket list.
+        Throwable thrown = catchThrowable(() -> new ProgressiveStateBracketResolver(JURISDICTION, List.of()));
+
+        // Assert: rejected — there is nothing to resolve against.
+        assertThat(thrown).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -107,9 +112,12 @@ class ProgressiveStateBracketResolverTest {
         TaxBracket foreignBracket = new TaxBracket(
                 "ny-bracket-1", "NEW YORK", new BigDecimal("0.04"), new BigDecimal("0"), new BigDecimal("10000"));
 
-        // Act + Assert: mixing jurisdictions is rejected as nonsensical input.
-        assertThatThrownBy(() -> new ProgressiveStateBracketResolver(JURISDICTION, List.of(foreignBracket)))
-                .isInstanceOf(IllegalArgumentException.class);
+        // Act: construct a resolver whose brackets include one from another jurisdiction.
+        Throwable thrown =
+                catchThrowable(() -> new ProgressiveStateBracketResolver(JURISDICTION, List.of(foreignBracket)));
+
+        // Assert: mixing jurisdictions is rejected as nonsensical input.
+        assertThat(thrown).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -137,10 +145,17 @@ class ProgressiveStateBracketResolverTest {
         ProgressiveStateBracketResolver differentBrackets = new ProgressiveStateBracketResolver(
                 JURISDICTION, List.of(BRACKET_1));
 
-        // Act + Assert: reflexivity, value equality, and inequality against another type/value.
-        assertThat(subject).isEqualTo(subject);
-        assertThat(subject).isEqualTo(sameArguments).hasSameHashCodeAs(sameArguments);
-        assertThat(subject).isNotEqualTo(differentBrackets);
-        assertThat(subject).isNotEqualTo("not a resolver");
+        // Act: compare the subject against itself, an equal value, a differing value, and another type.
+        boolean equalToItself = subject.equals(subject);
+        boolean equalToSameArguments = subject.equals(sameArguments);
+        boolean equalToDifferentBrackets = subject.equals(differentBrackets);
+        boolean equalToNonResolver = subject.equals("not a resolver");
+
+        // Assert: reflexivity, value equality (with matching hashCode), and both inequalities hold.
+        assertThat(equalToItself).isTrue();
+        assertThat(equalToSameArguments).isTrue();
+        assertThat(subject).hasSameHashCodeAs(sameArguments);
+        assertThat(equalToDifferentBrackets).isFalse();
+        assertThat(equalToNonResolver).isFalse();
     }
 }
