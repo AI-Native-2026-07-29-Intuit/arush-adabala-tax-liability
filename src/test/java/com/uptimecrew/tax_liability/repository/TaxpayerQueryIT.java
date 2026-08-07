@@ -40,7 +40,7 @@ class TaxpayerQueryIT {
         List<BigDecimal> totals = new ArrayList<>();
         try (Connection conn = openConnection();
                 Statement stmt = conn.createStatement();
-                ResultSet rs = stmt.executeQuery(Files.readString(Path.of("db/queries/cte.sql")))) {
+                ResultSet rs = stmt.executeQuery(queryStatementOnly(Path.of("db/queries/cte.sql")))) {
             while (rs.next()) {
                 totals.add(rs.getBigDecimal("total_liability"));
             }
@@ -59,7 +59,7 @@ class TaxpayerQueryIT {
         List<Integer> ranks = new ArrayList<>();
         try (Connection conn = openConnection();
                 Statement stmt = conn.createStatement();
-                ResultSet rs = stmt.executeQuery(Files.readString(Path.of("db/queries/window.sql")))) {
+                ResultSet rs = stmt.executeQuery(queryStatementOnly(Path.of("db/queries/window.sql")))) {
             while (rs.next()) {
                 ranks.add(rs.getInt("amount_rank"));
             }
@@ -73,6 +73,18 @@ class TaxpayerQueryIT {
 
     private Connection openConnection() throws Exception {
         return DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+    }
+
+    // Each db/queries/*.sql file leads with a standalone "SET search_path ..." statement for
+    // psql users. executeQuery() requires the statement string to produce exactly one ResultSet,
+    // so the leading SET (which produces none) is stripped here; every query is already
+    // schema-qualified (taxcalc.*), so search_path is not needed for correctness anyway.
+    private String queryStatementOnly(Path sqlFile) throws Exception {
+        return Files.readString(sqlFile)
+                .lines()
+                .filter(line -> !line.strip().regionMatches(true, 0, "SET ", 0, 4))
+                .reduce((a, b) -> a + "\n" + b)
+                .orElse("");
     }
 
     // V2__seed.sql intentionally ends with a second transaction that violates a CHECK
