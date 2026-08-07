@@ -28,7 +28,7 @@ erDiagram
         NUMERIC ceiling_amount
     }
     LIABILITY {
-        TEXT taxpayer_id PK_FK
+        TEXT taxpayer_id PK, FK
         INTEGER tax_year PK
         TEXT bracket_id FK
         NUMERIC taxable_amount

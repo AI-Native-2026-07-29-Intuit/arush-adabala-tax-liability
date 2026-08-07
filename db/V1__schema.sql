@@ -62,3 +62,8 @@ CREATE TABLE taxcalc.liability (
     -- expresses that invariant directly instead of re-checking it in application code.
     PRIMARY KEY (taxpayer_id, tax_year)
 );
+
+-- intent: Postgres does not auto-index FK columns (only the referenced side gets one from
+-- its PK/UNIQUE); taxcalc.bracket.id is looked up via this FK on every liability-bracket
+-- join, so index it explicitly for join performance.
+CREATE INDEX idx_liability_bracket_id ON taxcalc.liability (bracket_id);
