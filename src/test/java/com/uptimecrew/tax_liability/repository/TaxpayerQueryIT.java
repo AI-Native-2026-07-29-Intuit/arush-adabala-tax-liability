@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -71,8 +72,43 @@ class TaxpayerQueryIT {
                 .contains(1, 2);
     }
 
+    @Test
+    void groupByHavingQuery_collapsesLiabilityRowsIntoOneRowPerFilingStatus() throws Exception {
+        List<String> filingStatuses = new ArrayList<>();
+        List<Integer> taxpayerCounts = new ArrayList<>();
+        try (Connection conn = openConnection();
+                Statement stmt = conn.createStatement();
+                ResultSet rs = stmt.executeQuery(queryStatementOnly(Path.of("db/queries/group_by_having.sql")))) {
+            while (rs.next()) {
+                filingStatuses.add(rs.getString("filing_status"));
+                taxpayerCounts.add(rs.getInt("taxpayer_count"));
+            }
+        }
+
+        assertThat(filingStatuses)
+                .as("GROUP BY collapses every liability row down to one row per filing_status")
+                .hasSize(4)
+                .doesNotHaveDuplicates()
+                .contains("SINGLE");
+        assertThat(taxpayerCounts)
+                .as("SINGLE has two taxpayers (tp-2026-0001, tp-2026-0004) collapsed into its one group row")
+                .contains(2);
+    }
+
+    // On some Docker backends (Lima/vz-based port forwarding), the host-side port publish
+    // can briefly lag a few seconds behind the container reporting ready, so an independently
+    // opened JDBC connection right after start() can see "connection refused" transiently.
     private Connection openConnection() throws Exception {
-        return DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+        SQLException lastFailure = null;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            try {
+                return DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+            } catch (SQLException e) {
+                lastFailure = e;
+                Thread.sleep(250);
+            }
+        }
+        throw lastFailure;
     }
 
     // Each db/queries/*.sql file leads with a standalone "SET search_path ..." statement for
