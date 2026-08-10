@@ -10,11 +10,13 @@ import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
 
 /**
  * Computes the tax owed on a taxable amount by delegating bracket lookup to an
  * injected {@link BracketResolver} strategy and applying the resolved bracket's rate.
  */
+@Service
 public final class TaxLiabilityService {
 
     private static final Logger LOG = LoggerFactory.getLogger(TaxLiabilityService.class);

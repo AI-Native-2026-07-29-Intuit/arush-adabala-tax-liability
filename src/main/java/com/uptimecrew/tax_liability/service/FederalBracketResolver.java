@@ -8,10 +8,15 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import org.springframework.context.annotation.Primary;
+import org.springframework.stereotype.Component;
+
 /**
  * Deliberately simple decision rule: a fixed, hard-coded list of federal brackets checked
  * in ascending order. Day 3 replaces this with a real Strategy-pattern implementation.
  */
+@Component
+@Primary
 public final class FederalBracketResolver implements BracketResolver {
 
     private static final List<TaxBracket> FEDERAL_BRACKETS = List.of(
