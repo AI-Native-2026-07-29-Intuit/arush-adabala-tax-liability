@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: taxcalc-service
+  profiles:
+    default: local
+  datasource:
+    url: jdbc:postgresql://localhost:5432/postgres
+    username: postgres
+    password: ${DB_PASSWORD:devpass}
+    hikari:
+      maximum-pool-size: 5
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    com.uptimecrew.tax_liability: DEBUG   # turn up your own packages in local dev
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  datasource:
+    # Testcontainers will inject a real URL at runtime; this is just a placeholder
+    # so the bean wiring doesn't fail in test contexts that don't use a DB.
+    url: jdbc:postgresql://localhost:5432/test
+    username: test
+    password: test
+
+logging:
+  level:
+    root: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
