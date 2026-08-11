@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: taxcalc-service
+  profiles:
+    default: local
+  datasource:
+    url: jdbc:postgresql://localhost:5432/postgres
+    username: postgres
+    password: ${DB_PASSWORD:devpass}
+    hikari:
+      maximum-pool-size: 5
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+
+taxcalc:
+  strategies:
+    flat-state:
+      jurisdiction: COLORADO
+      rate: 0.044
+    no-income-tax-state:
+      jurisdiction: TEXAS
+    progressive-state:
+      jurisdiction: CALIFORNIA
+      brackets:
+        - id: ca-bracket-1
+          rate: 0.01
+          floor: 0
+          ceiling: 10412
+        - id: ca-bracket-2
+          rate: 0.02
+          floor: 10412
+          ceiling: 24684
+        - id: ca-bracket-3
+          rate: 0.04
+          floor: 24684
+
+logging:
+  level:
+    root: INFO
+    com.uptimecrew.tax_liability: DEBUG   # turn up your own packages in local dev
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  datasource:
+    # Testcontainers will inject a real URL at runtime; this is just a placeholder
+    # so the bean wiring doesn't fail in test contexts that don't use a DB.
+    url: jdbc:postgresql://localhost:5432/test
+    username: test
+    password: test
+
+logging:
+  level:
+    root: INFO
+
+management:
+  health:
+    db:
+      # test's spring.datasource.url is a placeholder (see comment above) - nothing
+      # is listening on it outside a Testcontainers-backed test, so the DB health
+      # check would otherwise drag /actuator/health to DOWN in every other test.
+      enabled: false
+  endpoints:
+    web:
+      exposure:
+        include: health
