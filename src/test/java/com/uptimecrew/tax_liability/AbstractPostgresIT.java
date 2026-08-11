@@ -3,7 +3,6 @@ package com.uptimecrew.tax_liability;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.Statement;
 
 import org.junit.jupiter.api.BeforeAll;
@@ -27,7 +26,7 @@ public abstract class AbstractPostgresIT {
 
     @BeforeAll
     static void applySchema() throws Exception {
-        try (Connection conn = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        try (Connection conn = TestPostgresConnections.openWithRetry(POSTGRES);
                 Statement stmt = conn.createStatement()) {
             stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
         }

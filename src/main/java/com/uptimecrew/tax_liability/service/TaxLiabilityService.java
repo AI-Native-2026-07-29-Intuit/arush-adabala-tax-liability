@@ -20,8 +20,9 @@ import org.springframework.transaction.annotation.Transactional;
  * strategy, then records the taxpayer under the resolved bracket's jurisdiction via the
  * injected {@link TaxpayerRepository}.
  */
+// non-final: @Transactional needs Spring to CGLIB-subclass this bean for its AOP proxy.
 @Service
-public final class TaxLiabilityService {
+public class TaxLiabilityService {
 
     private static final Logger LOG = LoggerFactory.getLogger(TaxLiabilityService.class);
 

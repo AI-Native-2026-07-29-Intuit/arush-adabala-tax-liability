@@ -2,12 +2,12 @@ package com.uptimecrew.tax_liability.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.uptimecrew.tax_liability.TestPostgresConnections;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.Optional;
@@ -36,7 +36,7 @@ class TaxpayerRepositoryIT {
 
     @BeforeAll
     static void applySchema() throws Exception {
-        try (Connection conn = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+        try (Connection conn = TestPostgresConnections.openWithRetry(PG);
                 Statement stmt = conn.createStatement()) {
             stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
         }
