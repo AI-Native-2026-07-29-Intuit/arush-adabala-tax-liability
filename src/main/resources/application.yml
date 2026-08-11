@@ -63,6 +63,12 @@ logging:
     root: INFO
 
 management:
+  health:
+    db:
+      # test's spring.datasource.url is a placeholder (see comment above) - nothing
+      # is listening on it outside a Testcontainers-backed test, so the DB health
+      # check would otherwise drag /actuator/health to DOWN in every other test.
+      enabled: false
   endpoints:
     web:
       exposure:
