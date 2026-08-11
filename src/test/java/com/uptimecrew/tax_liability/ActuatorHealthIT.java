@@ -12,7 +12,7 @@ import org.springframework.test.context.ActiveProfiles;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-class ActuatorHealthIT {
+class ActuatorHealthIT extends AbstractPostgresIT {
 
     @Autowired private TestRestTemplate restTemplate;
 

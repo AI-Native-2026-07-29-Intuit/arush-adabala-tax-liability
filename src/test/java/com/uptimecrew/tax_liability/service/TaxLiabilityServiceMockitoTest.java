@@ -3,7 +3,9 @@ package com.uptimecrew.tax_liability.service;
 import java.math.BigDecimal;
 import java.util.Optional;
 
+import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -23,28 +25,36 @@ class TaxLiabilityServiceMockitoTest {
     @Mock
     BracketResolver strategy;
 
+    @Mock
+    TaxpayerRepository repository;
+
     @Test
-    void delegates_to_injected_strategy_and_applies_its_rate() {
+    void delegates_to_injected_strategy_and_saves_taxpayer_under_resolved_jurisdiction() {
         BigDecimal taxableAmount = new BigDecimal("75000.00");
         TaxBracket resolvedBracket = aTaxBracket()
                 .withId("fed-bracket-22").withJurisdiction("FEDERAL")
                 .withRate(new BigDecimal("0.22")).withFloor(new BigDecimal("47150")).withCeiling(new BigDecimal("100525"))
                 .build();
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
+        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy);
-        BigDecimal liability = subject.computeLiability(taxableAmount);
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
+        Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", taxableAmount);
 
         verify(strategy).resolve(taxableAmount);
-        assertEquals(new BigDecimal("16500.00"), liability);
+        assertEquals("taxpayer-001", saved.getId());
+        assertEquals("Ada Lovelace", saved.getDisplayName());
+        assertEquals("SINGLE", saved.getFilingStatus());
+        assertEquals("FEDERAL", saved.getHomeJurisdiction());
     }
 
     @Test
     void throws_when_injected_strategy_resolves_no_bracket() {
         when(strategy.resolve(any())).thenReturn(Optional.empty());
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy);
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
 
-        assertThrows(IllegalStateException.class, () -> subject.computeLiability(new BigDecimal("1000.00")));
+        assertThrows(IllegalStateException.class,
+                () -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("1000.00")));
     }
 }

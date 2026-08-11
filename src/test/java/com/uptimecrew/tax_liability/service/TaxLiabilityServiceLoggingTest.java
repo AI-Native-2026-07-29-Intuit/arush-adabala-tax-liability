@@ -3,7 +3,9 @@ package com.uptimecrew.tax_liability.service;
 import java.math.BigDecimal;
 import java.util.Optional;
 
+import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +32,9 @@ class TaxLiabilityServiceLoggingTest {
     @Mock
     BracketResolver strategy;
 
+    @Mock
+    TaxpayerRepository repository;
+
     private Logger logbackLogger;
     private ListAppender<ILoggingEvent> appender;
 
@@ -47,21 +52,22 @@ class TaxLiabilityServiceLoggingTest {
     }
 
     @Test
-    void logs_one_info_line_before_delegating_and_one_on_a_successful_result() {
+    void logs_one_info_line_before_delegating_and_one_on_a_successful_save() {
         TaxBracket resolvedBracket = aTaxBracket()
                 .withId("fed-bracket-22").withJurisdiction("FEDERAL")
                 .withRate(new BigDecimal("0.22")).withFloor(new BigDecimal("47150")).withCeiling(new BigDecimal("100525"))
                 .build();
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
+        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy);
-        subject.computeLiability(new BigDecimal("75000.00"));
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
+        Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("75000.00"));
 
         assertThat(appender.list)
                 .filteredOn(event -> event.getLevel() == Level.INFO)
                 .hasSize(2)
                 .extracting(ILoggingEvent::getFormattedMessage)
-                .anyMatch(message -> message.contains("invoking strategy=") && message.contains("75000.00"))
-                .anyMatch(message -> message.contains("strategy returned result=16500.00"));
+                .anyMatch(message -> message.contains("invoking strategy=") && message.contains("taxpayer-001"))
+                .anyMatch(message -> message.contains("persisted entity id=" + saved.getId()));
     }
 }

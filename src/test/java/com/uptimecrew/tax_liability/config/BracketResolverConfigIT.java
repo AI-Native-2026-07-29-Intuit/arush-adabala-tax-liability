@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
 
+import com.uptimecrew.tax_liability.AbstractPostgresIT;
 import com.uptimecrew.tax_liability.service.BracketResolver;
 
 import org.junit.jupiter.api.Test;
@@ -13,7 +14,7 @@ import org.springframework.test.context.ActiveProfiles;
 
 @SpringBootTest
 @ActiveProfiles("test")
-class BracketResolverConfigIT {
+class BracketResolverConfigIT extends AbstractPostgresIT {
 
     private final BracketResolver flatStateBracketResolver;
     private final BracketResolver noIncomeTaxStateBracketResolver;
