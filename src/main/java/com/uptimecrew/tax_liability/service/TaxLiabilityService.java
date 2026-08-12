@@ -32,7 +32,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class TaxLiabilityService {
 
-    static final String CACHE_NAME = "taxcalc.byId";
+    public static final String CACHE_NAME = "taxcalc.byId";
 
     private static final Logger LOG = LoggerFactory.getLogger(TaxLiabilityService.class);
 

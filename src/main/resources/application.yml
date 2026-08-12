@@ -79,6 +79,13 @@ spring:
     url: jdbc:postgresql://localhost:5432/test
     username: test
     password: test
+  data:
+    mongodb:
+      # auto-index-creation eagerly opens a Mongo connection while building the
+      # MongoTemplate bean during context startup, not lazily on first use - only
+      # TaxpayerPolyglotIT boots a real Mongo container, so every other
+      # @SpringBootTest (Postgres-only) would otherwise fail context refresh.
+      auto-index-creation: false
 
 logging:
   level:
