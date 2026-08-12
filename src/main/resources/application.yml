@@ -39,7 +39,7 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: when-authorized
+      show-details: always              # (7) so mongo/redis sub-health is visible over plain curl
 
 taxcalc:
   strategies:
