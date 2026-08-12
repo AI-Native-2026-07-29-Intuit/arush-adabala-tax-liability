@@ -15,9 +15,16 @@ import java.util.Objects;
 
 /**
  * Maps to {@code taxcalc.liability} (W2 D1): one computed liability per taxpayer per
- * tax year, the child side of the {@link Taxpayer} parent/child relationship. Its
- * primary key is the composite {@code (taxpayer_id, tax_year)} from the DDL, expressed
- * here via {@link LiabilityId}.
+ * tax year, the child side of the {@link Taxpayer} parent/child relationship.
+ *
+ * <p>Unlike {@link Taxpayer} and {@link Bracket}, this entity has no single {@code
+ * private String id} field: {@code taxcalc.liability} was deliberately given a composite
+ * primary key {@code (taxpayer_id, tax_year)} rather than a surrogate id (see the
+ * "Trade-offs" section of {@code db/README.md} from W2 D1 for the reasoning — a surrogate
+ * id would need an extra {@code UNIQUE (taxpayer_id, tax_year)} constraint to express the
+ * same invariant, plus a column nothing else references). This entity mirrors that DDL
+ * exactly via {@link LiabilityId} rather than introducing a surrogate id the schema
+ * doesn't have.
  */
 @Entity
 @Table(schema = "taxcalc", name = "liability")

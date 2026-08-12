@@ -9,6 +9,9 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+/**
+ * Manages {@link Bracket} entities.
+ */
 @Repository
 public interface BracketRepository extends JpaRepository<Bracket, String> {
 
