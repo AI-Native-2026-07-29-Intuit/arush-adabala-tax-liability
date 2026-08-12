@@ -5,6 +5,7 @@ import java.util.Optional;
 
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
 import org.junit.jupiter.api.AfterEach;
@@ -34,6 +35,9 @@ class TaxLiabilityServiceLoggingTest {
 
     @Mock
     TaxpayerRepository repository;
+
+    @Mock
+    TaxpayerReadModelRepository readModelRepository;
 
     private Logger logbackLogger;
     private ListAppender<ILoggingEvent> appender;
