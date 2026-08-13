@@ -5,6 +5,7 @@ import java.math.BigDecimal;
 
 import com.uptimecrew.tax_liability.exception.BracketResolutionFailedException;
 import com.uptimecrew.tax_liability.exception.InvalidIncomeException;
+import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
 import org.junit.jupiter.api.AfterEach;
@@ -35,6 +36,9 @@ class TaxLiabilityServiceExceptionPathTest {
     @Mock
     TaxpayerRepository repository;
 
+    @Mock
+    TaxpayerReadModelRepository readModelRepository;
+
     private Logger logbackLogger;
     private ListAppender<ILoggingEvent> appender;
 
@@ -56,7 +60,7 @@ class TaxLiabilityServiceExceptionPathTest {
         when(strategy.resolve(any()))
                 .thenThrow(new InvalidIncomeException("income must be non-null and non-negative"));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
 
         assertThatThrownBy(() -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("-100.00")))
                 .isInstanceOf(InvalidIncomeException.class)
@@ -69,7 +73,7 @@ class TaxLiabilityServiceExceptionPathTest {
         when(strategy.resolve(any()))
                 .thenThrow(new BracketResolutionFailedException("failed loading bracket table for jurisdiction CA", cause));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
 
         assertThatThrownBy(() -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("1000.00")))
                 .isInstanceOf(BracketResolutionFailedException.class)
@@ -81,7 +85,7 @@ class TaxLiabilityServiceExceptionPathTest {
         when(strategy.resolve(any()))
                 .thenThrow(new InvalidIncomeException("income must be non-null and non-negative"));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
 
         assertThatThrownBy(() -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("-100.00")))
                 .isInstanceOf(InvalidIncomeException.class);

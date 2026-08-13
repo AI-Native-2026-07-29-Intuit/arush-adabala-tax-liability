@@ -5,6 +5,7 @@ import java.util.Optional;
 
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
 import org.junit.jupiter.api.AfterEach;
@@ -35,6 +36,9 @@ class TaxLiabilityServiceLoggingTest {
     @Mock
     TaxpayerRepository repository;
 
+    @Mock
+    TaxpayerReadModelRepository readModelRepository;
+
     private Logger logbackLogger;
     private ListAppender<ILoggingEvent> appender;
 
@@ -60,14 +64,15 @@ class TaxLiabilityServiceLoggingTest {
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository);
+        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
         Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("75000.00"));
 
         assertThat(appender.list)
                 .filteredOn(event -> event.getLevel() == Level.INFO)
-                .hasSize(2)
+                .hasSize(3)
                 .extracting(ILoggingEvent::getFormattedMessage)
                 .anyMatch(message -> message.contains("invoking strategy=") && message.contains("taxpayer-001"))
-                .anyMatch(message -> message.contains("persisted entity id=" + saved.getId()));
+                .anyMatch(message -> message.contains("persisted entity id=" + saved.getId()))
+                .anyMatch(message -> message.contains("write-through to mongo id=" + saved.getId()));
     }
 }

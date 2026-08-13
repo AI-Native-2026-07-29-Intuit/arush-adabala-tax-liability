@@ -19,6 +19,18 @@ spring:
           time_zone: UTC
     open-in-view: false                # (2) prevent the lazy-load-in-view anti-pattern
     show-sql: false                    # flip to true for local debugging only
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/taxcalc     # (3) placeholder; tests inject via @ServiceConnection
+      auto-index-creation: true                  # (4) create @Indexed indexes on startup
+    redis:
+      host: localhost
+      port: 6379
+  cache:
+    type: redis
+    redis:
+      time-to-live: 60000                        # (5) 60s TTL - short enough to bound staleness
+      cache-null-values: false                   # (6) don't cache "not found"
 
 management:
   endpoints:
@@ -27,7 +39,7 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: when-authorized
+      show-details: always              # (7) so mongo/redis sub-health is visible over plain curl
 
 taxcalc:
   strategies:
@@ -67,6 +79,13 @@ spring:
     url: jdbc:postgresql://localhost:5432/test
     username: test
     password: test
+  data:
+    mongodb:
+      # auto-index-creation eagerly opens a Mongo connection while building the
+      # MongoTemplate bean during context startup, not lazily on first use - only
+      # TaxpayerPolyglotIT boots a real Mongo container, so every other
+      # @SpringBootTest (Postgres-only) would otherwise fail context refresh.
+      auto-index-creation: false
 
 logging:
   level:
@@ -78,6 +97,14 @@ management:
       # test's spring.datasource.url is a placeholder (see comment above) - nothing
       # is listening on it outside a Testcontainers-backed test, so the DB health
       # check would otherwise drag /actuator/health to DOWN in every other test.
+      enabled: false
+    mongo:
+      # same reasoning as db above: only TaxpayerPolyglotIT boots a real Mongo
+      # container, so the health check is disabled everywhere else.
+      enabled: false
+    redis:
+      # same reasoning as db above: only TaxpayerPolyglotIT boots a real Redis
+      # container, so the health check is disabled everywhere else.
       enabled: false
   endpoints:
     web:
