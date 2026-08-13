@@ -152,16 +152,23 @@ public class TaxpayerReadModel implements Serializable {
             return computedAt;
         }
 
+        // Unlike Taxpayer/Bracket/Liability, this is a value object embedded inline rather than
+        // an entity with its own id, so equality is on every field: (taxYear, bracketId) alone
+        // would wrongly equate two liabilities in the same year and bracket that differ in
+        // amount (e.g. before/after a recomputation).
         @Override
         public boolean equals(Object o) {
             return o instanceof EmbeddedLiability other
                     && Objects.equals(taxYear, other.taxYear)
-                    && Objects.equals(bracketId, other.bracketId);
+                    && Objects.equals(bracketId, other.bracketId)
+                    && Objects.equals(taxableAmount, other.taxableAmount)
+                    && Objects.equals(liabilityAmount, other.liabilityAmount)
+                    && Objects.equals(computedAt, other.computedAt);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(taxYear, bracketId);
+            return Objects.hash(taxYear, bracketId, taxableAmount, liabilityAmount, computedAt);
         }
 
         @Override
