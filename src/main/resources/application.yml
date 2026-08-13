@@ -74,6 +74,8 @@ logging:
   level:
     root: INFO
     com.uptimecrew.tax_liability: DEBUG   # turn up your own packages in local dev
+    org.springframework.security.web: DEBUG   # (9) surfaces "Will secure ... with [DefaultSecurityFilterChain...]"
+                                               #     on every request so the filter chain build is visible in bootRun
 
 ---
 spring:
