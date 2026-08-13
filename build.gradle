@@ -34,6 +34,13 @@ dependencies {
     implementation      'org.springframework.boot:spring-boot-starter-data-redis'
     implementation      'org.springframework.boot:spring-boot-starter-cache'
 
+    // --- Spring Security 7, Resource Server JWT & Bucket4j rate limiting (NEW for W3 D1) ---
+    implementation      'org.springframework.boot:spring-boot-starter-security'
+    implementation      'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+    implementation      'com.bucket4j:bucket4j-core:8.10.1'
+    implementation      'com.bucket4j:bucket4j-redis:8.10.1'      // reuses the W2 D5 Redis as the distributed bucket store
+    testImplementation  'org.springframework.security:spring-security-test'
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'

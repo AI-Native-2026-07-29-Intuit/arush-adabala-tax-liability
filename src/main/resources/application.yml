@@ -31,6 +31,13 @@ spring:
     redis:
       time-to-live: 60000                        # (5) 60s TTL - short enough to bound staleness
       cache-null-values: false                   # (6) don't cache "not found"
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # (7) Dummy IdP issuer for production wiring; tests override with a mock
+          #     JwkSource via spring-security-test so they don't need a real IdP.
+          issuer-uri: https://idp.example.internal/realms/uptimecrew
 
 management:
   endpoints:
@@ -39,7 +46,7 @@ management:
         include: health,info
   endpoint:
     health:
-      show-details: always              # (7) so mongo/redis sub-health is visible over plain curl
+      show-details: always              # (8) so mongo/redis sub-health is visible over plain curl
 
 taxcalc:
   strategies:
