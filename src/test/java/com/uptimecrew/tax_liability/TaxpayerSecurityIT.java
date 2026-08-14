@@ -1,5 +1,6 @@
 package com.uptimecrew.tax_liability;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -137,6 +138,41 @@ class TaxpayerSecurityIT {
                         .with(rateLimitedCaller))
                 .andExpect(status().isTooManyRequests())
                 .andExpect(header().string("Retry-After", "60"));
+    }
+
+    @Test
+    void summary_returnsIdenticalBody_onRetryWithSameIdempotencyKey() throws Exception {
+        RequestPostProcessor caller = readerJwt("idempotency-retry-user");
+        String idempotencyKey = UUID.randomUUID().toString();
+
+        String firstBody = mvc.perform(post("/api/v1/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID)
+                        .header("Idempotency-Key", idempotencyKey)
+                        .with(caller))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        String secondBody = mvc.perform(post("/api/v1/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID)
+                        .header("Idempotency-Key", idempotencyKey)
+                        .with(caller))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(secondBody).isEqualTo(firstBody);
+    }
+
+    @Test
+    void summary_returns400_whenIdempotencyKeyHeaderMissing() throws Exception {
+        mvc.perform(post("/api/v1/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID)
+                        .with(readerJwt("idempotency-missing-header-user")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void summary_returns400_whenIdempotencyKeyNotAUuid() throws Exception {
+        mvc.perform(post("/api/v1/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID)
+                        .header("Idempotency-Key", "not-a-uuid")
+                        .with(readerJwt("idempotency-bad-uuid-user")))
+                .andExpect(status().isBadRequest());
     }
 
     private static RequestPostProcessor readerJwt(String subject) {
