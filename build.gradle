@@ -18,6 +18,13 @@ repositories {
     mavenCentral()
 }
 
+// Pin the Spring Cloud release train (compatible with Spring Boot 3.3 / Java 21).
+dependencyManagement {
+    imports {
+        mavenBom 'org.springframework.cloud:spring-cloud-dependencies:2023.0.3'
+    }
+}
+
 dependencies {
     // --- Spring Boot (NEW for W2 D3) ---------------------------------------
     implementation      'org.springframework.boot:spring-boot-starter'
@@ -40,6 +47,13 @@ dependencies {
     implementation      'com.bucket4j:bucket4j-core:8.10.1'
     implementation      'com.bucket4j:bucket4j-redis:8.10.1'      // reuses the W2 D5 Redis as the distributed bucket store
     testImplementation  'org.springframework.security:spring-security-test'
+
+    // --- springdoc-openapi, OpenFeign & Resilience4j (NEW for W3 D2) ------
+    implementation      'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.6.0'
+    implementation      'org.springframework.cloud:spring-cloud-starter-openfeign'
+    implementation      'org.springframework.cloud:spring-cloud-starter-circuitbreaker-resilience4j'
+
+    testImplementation  'org.wiremock:wiremock-standalone:3.9.1'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
