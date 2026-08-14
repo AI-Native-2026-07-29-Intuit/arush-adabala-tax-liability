@@ -7,15 +7,19 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.uptimecrew.tax_liability.TestPostgresConnections;
 import com.uptimecrew.tax_liability.clients.IdentityProfile;
 import com.uptimecrew.tax_liability.clients.IdentityService;
 import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
@@ -23,18 +27,20 @@ import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.MethodOrderer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MongoDBContainer;
@@ -83,6 +89,14 @@ class IdentityClientCircuitBreakerIT {
 
     @Autowired
     private MockMvc mvc;
+
+    @BeforeAll
+    static void applyPostgresSchema() throws Exception {
+        try (Connection conn = TestPostgresConnections.openWithRetry(PG);
+                Statement stmt = conn.createStatement()) {
+            stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
+        }
+    }
 
     // The "identity" breaker is a singleton bean shared across every @Test method in this class;
     // force it back to CLOSED before each test so circuitOpens_after_repeated_5xx (which
@@ -148,7 +162,7 @@ class IdentityClientCircuitBreakerIT {
     @Test
     @Order(4)
     void openApiDoc_exposesV1Path() throws Exception {
-        mvc.perform(get("/v3/api-docs"))
+        mvc.perform(MockMvcRequestBuilders.get("/v3/api-docs"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.paths['/api/v1/taxpayers/{id}']").exists())
                 .andExpect(jsonPath("$.components.securitySchemes.bearer-jwt.scheme").value("bearer"));
