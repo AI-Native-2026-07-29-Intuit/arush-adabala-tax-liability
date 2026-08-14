@@ -62,6 +62,7 @@ resilience4j:
     instances:
       identity:
         slidingWindowSize: 10
+        minimumNumberOfCalls: 10          # (8b) must be <= slidingWindowSize or the failure-rate check never fires
         failureRateThreshold: 50
         waitDurationInOpenState: 10s
         permittedNumberOfCallsInHalfOpenState: 3

@@ -2,6 +2,7 @@ package com.uptimecrew.tax_liability;
 
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -11,6 +12,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.util.List;
+import java.util.UUID;
 
 import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
@@ -97,13 +99,13 @@ class TaxpayerSecurityIT {
 
     @Test
     void getById_returns200_whenAuthenticatedWithScopeAndRole() throws Exception {
-        mvc.perform(get("/api/taxpayers/{id}", SEEDED_TAXPAYER_ID).with(readerJwt("full-access-user")))
+        mvc.perform(get("/api/v1/taxpayers/{id}", SEEDED_TAXPAYER_ID).with(readerJwt("full-access-user")))
                 .andExpect(status().isOk());
     }
 
     @Test
     void getById_returns401_whenAnonymous() throws Exception {
-        mvc.perform(get("/api/taxpayers/{id}", SEEDED_TAXPAYER_ID))
+        mvc.perform(get("/api/v1/taxpayers/{id}", SEEDED_TAXPAYER_ID))
                 .andExpect(status().isUnauthorized());
     }
 
@@ -115,7 +117,7 @@ class TaxpayerSecurityIT {
                 .jwt(j -> j.subject("scope-only-user").claim("scope", READ_SCOPE).claim("roles", List.of()))
                 .authorities(new ScopeAndRoleAuthoritiesConverter());
 
-        mvc.perform(get("/api/taxpayers/{id}", SEEDED_TAXPAYER_ID).with(scopeOnlyNoRole))
+        mvc.perform(get("/api/v1/taxpayers/{id}", SEEDED_TAXPAYER_ID).with(scopeOnlyNoRole))
                 .andExpect(status().isForbidden());
     }
 
@@ -124,11 +126,15 @@ class TaxpayerSecurityIT {
         RequestPostProcessor rateLimitedCaller = readerJwt("rate-limit-user");
 
         for (int call = 1; call <= 10; call++) {
-            mvc.perform(get("/api/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID).with(rateLimitedCaller))
+            mvc.perform(post("/api/v1/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID)
+                            .header("Idempotency-Key", UUID.randomUUID().toString())
+                            .with(rateLimitedCaller))
                     .andExpect(status().isOk());
         }
 
-        mvc.perform(get("/api/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID).with(rateLimitedCaller))
+        mvc.perform(post("/api/v1/taxpayers/{id}/summary", SEEDED_TAXPAYER_ID)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .with(rateLimitedCaller))
                 .andExpect(status().isTooManyRequests())
                 .andExpect(header().string("Retry-After", "60"));
     }
