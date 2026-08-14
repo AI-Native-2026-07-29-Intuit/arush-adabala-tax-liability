@@ -12,6 +12,7 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.util.List;
 
+import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
 
 import org.junit.jupiter.api.BeforeAll;
@@ -21,7 +22,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
@@ -37,13 +37,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * matrix for {@link com.uptimecrew.tax_liability.api.TaxpayerController}, backed by the same
  * three-container Postgres+Mongo+Redis setup as W2 D5's {@link TaxpayerPolyglotIT}.
  *
- * <p>{@code spring-security-test}'s {@code jwt()} request post-processor builds its
- * authentication directly from a default {@code JwtGrantedAuthoritiesConverter} (which only reads
- * the standard {@code scope}/{@code scp} claim), rather than routing through the app's registered
- * {@link com.uptimecrew.tax_liability.security.SecurityConfig} converter bean. Each test therefore
- * pairs the JWT claims a real IdP would issue with an explicit {@code .authorities(...)} call so
- * the mocked token carries the same {@code SCOPE_*}/{@code ROLE_*} authorities that converter
- * would produce from those claims.
+ * <p>{@code spring-security-test}'s {@code jwt()} request post-processor derives authorities from
+ * a default {@code JwtGrantedAuthoritiesConverter} (which only reads the standard {@code
+ * scope}/{@code scp} claim) unless told otherwise, rather than routing through the app's
+ * registered {@link com.uptimecrew.tax_liability.security.SecurityConfig} converter bean. Each
+ * test therefore passes {@link ScopeAndRoleAuthoritiesConverter} itself via {@code
+ * .authorities(...)} — the exact production mapping, not a hand-restated equivalent — so the
+ * mocked token's authorities are derived from its claims the same way a real request's would be.
  */
 @Testcontainers
 @SpringBootTest
@@ -109,9 +109,11 @@ class TaxpayerSecurityIT {
 
     @Test
     void getById_returns403_whenJwtMissingRole() throws Exception {
+        // roles is an empty list, so ScopeAndRoleAuthoritiesConverter derives SCOPE_taxpayers.read
+        // but no ROLE_* authority - the same outcome a real IdP-issued token would produce.
         RequestPostProcessor scopeOnlyNoRole = jwt()
                 .jwt(j -> j.subject("scope-only-user").claim("scope", READ_SCOPE).claim("roles", List.of()))
-                .authorities(new SimpleGrantedAuthority("SCOPE_" + READ_SCOPE));
+                .authorities(new ScopeAndRoleAuthoritiesConverter());
 
         mvc.perform(get("/api/taxpayers/{id}", SEEDED_TAXPAYER_ID).with(scopeOnlyNoRole))
                 .andExpect(status().isForbidden());
@@ -134,8 +136,6 @@ class TaxpayerSecurityIT {
     private static RequestPostProcessor readerJwt(String subject) {
         return jwt()
                 .jwt(j -> j.subject(subject).claim("scope", READ_SCOPE).claim("roles", List.of(READER_ROLE)))
-                .authorities(
-                        new SimpleGrantedAuthority("SCOPE_" + READ_SCOPE),
-                        new SimpleGrantedAuthority("ROLE_" + READER_ROLE));
+                .authorities(new ScopeAndRoleAuthoritiesConverter());
     }
 }

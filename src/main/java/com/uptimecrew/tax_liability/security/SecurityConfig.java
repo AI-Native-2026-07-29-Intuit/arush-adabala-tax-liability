@@ -1,9 +1,6 @@
 package com.uptimecrew.tax_liability.security;
 
-import java.util.Collection;
-import java.util.List;
 import java.util.Objects;
-import java.util.stream.Stream;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,10 +8,7 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
-import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 
@@ -58,24 +52,13 @@ public class SecurityConfig {
     }
 
     /**
-     * Maps BOTH the standard {@code scope} claim (space-delimited, -&gt; {@code SCOPE_*}
-     * authorities via {@link JwtGrantedAuthoritiesConverter}) AND a custom {@code roles} claim
-     * (-&gt; {@code ROLE_*} authorities). {@link com.uptimecrew.tax_liability.api.TaxpayerController}'s
-     * {@code @PreAuthorize} SpEL checks both, so both must be present on the resulting token.
+     * {@link com.uptimecrew.tax_liability.api.TaxpayerController}'s {@code @PreAuthorize} SpEL
+     * checks both a {@code SCOPE_*} and a {@code ROLE_*} authority, so both must be present on the
+     * resulting token; see {@link ScopeAndRoleAuthoritiesConverter} for how they're derived.
      */
     private JwtAuthenticationConverter jwtAuthenticationConverter() {
-        JwtGrantedAuthoritiesConverter scopeAuthoritiesConverter = new JwtGrantedAuthoritiesConverter();
-        scopeAuthoritiesConverter.setAuthorityPrefix("SCOPE_");
-        scopeAuthoritiesConverter.setAuthoritiesClaimName("scope");
-
         JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
-        converter.setJwtGrantedAuthoritiesConverter(jwt -> {
-            Collection<GrantedAuthority> scopeAuthorities = scopeAuthoritiesConverter.convert(jwt);
-            List<String> roles = jwt.getClaimAsStringList("roles");
-            Stream<GrantedAuthority> roleAuthorities = (roles == null ? Stream.<String>empty() : roles.stream())
-                    .map(role -> (GrantedAuthority) new SimpleGrantedAuthority("ROLE_" + role));
-            return Stream.concat(scopeAuthorities.stream(), roleAuthorities).toList();
-        });
+        converter.setJwtGrantedAuthoritiesConverter(new ScopeAndRoleAuthoritiesConverter());
         return converter;
     }
 }
