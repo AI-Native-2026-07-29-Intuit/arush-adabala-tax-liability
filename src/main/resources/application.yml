@@ -48,6 +48,25 @@ management:
     health:
       show-details: always              # (8) so mongo/redis sub-health is visible over plain curl
 
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+identity:
+  base-url: http://localhost:8090       # (8a) WireMock stub address used by the contract test
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      identity:
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 10          # (8b) must be <= slidingWindowSize or the failure-rate check never fires
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 3
+
 taxcalc:
   strategies:
     flat-state:
