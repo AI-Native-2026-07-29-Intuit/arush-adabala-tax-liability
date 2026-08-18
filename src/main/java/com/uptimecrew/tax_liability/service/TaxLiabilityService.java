@@ -111,6 +111,10 @@ public class TaxLiabilityService {
      * @return the taxpayer's read model, or an empty {@link Optional} if no taxpayer with that
      *         id exists in either the Mongo read model or the Postgres source of truth
      */
+    // (readOnly = true): the Postgres fallback below reads Taxpayer.liabilities, a LAZY
+    // @OneToMany - with open-in-view off, that access needs an active Hibernate session of its
+    // own (toReadModel is called from inside this method, not from a web-request-scoped one).
+    @Transactional(readOnly = true)
     @Cacheable(value = CACHE_NAME, unless = "#result == null")
     public Optional<TaxpayerReadModel> findById(String id) {
         Objects.requireNonNull(id, "id must not be null");

@@ -89,6 +89,13 @@ dependencies {
     // --- Kafka outbox/consumer (NEW for W3 D3) -----------------------------
     implementation      'org.springframework.kafka:spring-kafka'
 
+    // --- Spring AI MCP server (NEW for W3 D3) -------------------------------
+    // Spring Boot 3.3 does not manage Spring AI's version - it is not in the Boot BOM - so this
+    // starter is pinned explicitly to the last 1.0.x GA release compatible with Boot 3.3
+    // (the 1.0.0-M5 milestone this curriculum step references has since been removed from
+    // the milestone repo now that Spring AI has shipped a stable 1.0 line).
+    implementation      'org.springframework.ai:spring-ai-starter-mcp-server-webmvc:1.0.0'
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'

@@ -69,6 +69,13 @@ spring:
         spring.json.trusted.packages: com.uptimecrew.tax_liability.consumer
     listener:
       ack-mode: RECORD
+  ai:
+    mcp:
+      server:
+        name: taxcalc-mcp
+        version: 1.0.0
+        type: SYNC
+        transport: SSE
 
 management:
   endpoints:
