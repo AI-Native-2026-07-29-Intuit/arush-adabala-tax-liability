@@ -9,6 +9,11 @@ spring:
     password: ${DB_PASSWORD:devpass}
     hikari:
       maximum-pool-size: 5
+  flyway:
+    connect-retries: 10               # (1a) some Docker setups (e.g. Rancher Desktop's proxy) can
+                                       #      report a container ready before its port-forward
+                                       #      actually accepts connections; retry instead of
+                                       #      failing context startup on that transient refusal
   jpa:
     hibernate:
       ddl-auto: validate               # (1) NEVER 'update' or 'create' in this curriculum
@@ -38,6 +43,39 @@ spring:
           # (7) Dummy IdP issuer for production wiring; tests override with a mock
           #     JwkSource via spring-security-test so they don't need a real IdP.
           issuer-uri: https://idp.example.internal/realms/uptimecrew
+  kafka:
+    bootstrap-servers: localhost:9092       # (7a) overridden by @ServiceConnection in tests
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # (7b) the outbox already stores a JSON string per row - StringSerializer publishes it
+      # as-is; JsonSerializer would double-encode an already-JSON string.
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    consumer:
+      group-id: taxcalc-read-model-builder
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.value.default.type: com.uptimecrew.tax_liability.consumer.TaxpayerUpdatedEvent
+        # (7c) the producer publishes plain JSON (no __TypeId__ header), so the deserializer
+        # must be told the target type instead of trying to read it from a (non-existent) header.
+        spring.json.use.type.headers: false
+        spring.json.trusted.packages: com.uptimecrew.tax_liability.consumer
+    listener:
+      ack-mode: RECORD
+  ai:
+    mcp:
+      server:
+        name: taxcalc-mcp
+        version: 1.0.0
+        type: SYNC
+        transport: SSE
 
 management:
   endpoints:
@@ -132,6 +170,10 @@ management:
       enabled: false
     redis:
       # same reasoning as db above: only TaxpayerPolyglotIT boots a real Redis
+      # container, so the health check is disabled everywhere else.
+      enabled: false
+    kafka:
+      # same reasoning as db above: only TaxpayerEventFlowIT boots a real Kafka
       # container, so the health check is disabled everywhere else.
       enabled: false
   endpoints:

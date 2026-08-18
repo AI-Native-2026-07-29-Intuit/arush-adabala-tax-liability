@@ -3,16 +3,11 @@ package com.uptimecrew.tax_liability;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.Statement;
 import java.util.Optional;
 
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
 
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -55,15 +50,6 @@ class TaxpayerPolyglotIT {
 
     @Autowired
     private CacheManager cacheManager;
-
-    @BeforeAll
-    static void applyPostgresSchema() throws Exception {
-        try (Connection conn = TestPostgresConnections.openWithRetry(PG);
-                Statement stmt = conn.createStatement()) {
-            stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
-        }
-        // Mongo and Redis are schemaless - no equivalent step is needed for them.
-    }
 
     @Test
     void write_path_populates_postgres_AND_mongo() {

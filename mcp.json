@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "taxcalc-mcp": {
+      "command": "java",
+      "args": ["-jar", "build/libs/tax_liability-0.1.0-SNAPSHOT.jar"]
+    }
+  }
+}

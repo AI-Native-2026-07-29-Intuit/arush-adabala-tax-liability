@@ -2,17 +2,11 @@ package com.uptimecrew.tax_liability.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.uptimecrew.tax_liability.TestPostgresConnections;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.Statement;
 import java.time.Instant;
 import java.util.Optional;
 
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
@@ -33,14 +27,6 @@ class TaxpayerRepositoryIT {
     @Container
     @ServiceConnection
     static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
-
-    @BeforeAll
-    static void applySchema() throws Exception {
-        try (Connection conn = TestPostgresConnections.openWithRetry(PG);
-                Statement stmt = conn.createStatement()) {
-            stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
-        }
-    }
 
     @Autowired
     TaxpayerRepository repository;
@@ -68,9 +54,12 @@ class TaxpayerRepositoryIT {
         repository.save(new Taxpayer("a", "Ada Lovelace", "SINGLE", "FEDERAL", Instant.now()));
         repository.save(new Taxpayer("b", "Grace Hopper", "MARRIED_FILING_JOINTLY", "FEDERAL", Instant.now()));
 
-        // Act + Assert.
+        // Act + Assert. Flyway's V2__seed.sql (W3 D3) also seeds SINGLE taxpayers into every
+        // Postgres-backed test's database, so this asserts "a" is included and "b" excluded
+        // rather than an exact set - proving the filter, not an empty-table assumption.
         assertThat(repository.findByFilingStatus("SINGLE"))
                 .extracting(Taxpayer::getId)
-                .containsExactlyInAnyOrder("a");
+                .contains("a")
+                .doesNotContain("b");
     }
 }

@@ -3,8 +3,10 @@ package com.uptimecrew.tax_liability.service;
 import java.math.BigDecimal;
 import java.util.Optional;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
@@ -39,6 +41,11 @@ class TaxLiabilityServiceLoggingTest {
     @Mock
     TaxpayerReadModelRepository readModelRepository;
 
+    @Mock
+    EventOutboxRepository outboxRepository;
+
+    ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+
     private Logger logbackLogger;
     private ListAppender<ILoggingEvent> appender;
 
@@ -64,7 +71,8 @@ class TaxLiabilityServiceLoggingTest {
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
+        TaxLiabilityService subject =
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
         Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("75000.00"));
 
         assertThat(appender.list)

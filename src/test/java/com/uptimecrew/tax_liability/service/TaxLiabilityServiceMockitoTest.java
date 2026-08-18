@@ -3,8 +3,10 @@ package com.uptimecrew.tax_liability.service;
 import java.math.BigDecimal;
 import java.util.Optional;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
@@ -32,6 +34,11 @@ class TaxLiabilityServiceMockitoTest {
     @Mock
     TaxpayerReadModelRepository readModelRepository;
 
+    @Mock
+    EventOutboxRepository outboxRepository;
+
+    ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+
     @Test
     void delegates_to_injected_strategy_and_saves_taxpayer_under_resolved_jurisdiction() {
         BigDecimal taxableAmount = new BigDecimal("75000.00");
@@ -42,11 +49,13 @@ class TaxLiabilityServiceMockitoTest {
         when(strategy.resolve(any())).thenReturn(Optional.of(resolvedBracket));
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
+        TaxLiabilityService subject =
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
         Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", taxableAmount);
 
         verify(strategy).resolve(taxableAmount);
         verify(readModelRepository).save(any());
+        verify(outboxRepository).save(any());
         assertEquals("taxpayer-001", saved.getId());
         assertEquals("Ada Lovelace", saved.getDisplayName());
         assertEquals("SINGLE", saved.getFilingStatus());
@@ -57,7 +66,8 @@ class TaxLiabilityServiceMockitoTest {
     void throws_when_injected_strategy_resolves_no_bracket() {
         when(strategy.resolve(any())).thenReturn(Optional.empty());
 
-        TaxLiabilityService subject = new TaxLiabilityService(strategy, repository, readModelRepository);
+        TaxLiabilityService subject =
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
 
         assertThrows(IllegalStateException.class,
                 () -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("1000.00")));

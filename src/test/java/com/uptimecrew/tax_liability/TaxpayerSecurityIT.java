@@ -8,17 +8,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
 
 import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
 
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -77,15 +72,6 @@ class TaxpayerSecurityIT {
 
     @Autowired
     private TaxLiabilityService service;
-
-    @BeforeAll
-    static void applyPostgresSchema() throws Exception {
-        try (Connection conn = TestPostgresConnections.openWithRetry(PG);
-                Statement stmt = conn.createStatement()) {
-            stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
-        }
-        // Mongo and Redis are schemaless - no equivalent step is needed for them.
-    }
 
     // Seeds once (not per-test): the id only needs to exist for the getById tests, and
     // TaxLiabilityService.computeLiability is not idempotent (it always inserts a fresh

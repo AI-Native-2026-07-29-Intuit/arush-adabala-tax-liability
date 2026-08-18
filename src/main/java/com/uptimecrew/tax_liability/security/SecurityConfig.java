@@ -41,6 +41,11 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        // (1a) Spring AI's MCP WebMVC server (W3 D3): the local-only tool surface
+                        // Claude Code connects to over SSE. Unauthenticated like the two matchers
+                        // above (a local dev/tooling entry point, not taxpayer data), and narrow by
+                        // construction - TaxpayerMcpServer exposes exactly one read-only lookup.
+                        .requestMatchers("/sse", "/mcp/message").permitAll()
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(oauth2 -> oauth2
