@@ -13,8 +13,9 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Service;
 
 /**
- * Exposes a single read-only tool over the Model Context Protocol (W3 D3): Spring AI
- * auto-discovers {@link Tool}-annotated methods on Spring beans and serves them to an LLM client
+ * Exposes a single read-only tool over the Model Context Protocol (W3 D3): the {@link Tool}
+ * -annotated method below is registered with Spring AI's MCP server via {@link McpToolConfig}
+ * (component-scanning alone does not surface it - see that class) and served to an LLM client
  * (e.g. Claude Code) registered against this server. Deliberately narrow - one read, one id, no
  * list/search/write surface - so an LLM agent can look up a taxpayer's read-model summary
  * without gaining any ability to mutate taxcalc data through this channel.
