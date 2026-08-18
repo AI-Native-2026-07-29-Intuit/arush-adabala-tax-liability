@@ -1,8 +1,10 @@
 # db/queries — Advanced SQL Catalogue
 
-Four self-contained query files against the Day 1 `taxcalc` schema (`db/V1__schema.sql`
-+ `db/V2__seed.sql`), each demonstrating one advanced-SQL idiom, plus the Testcontainers
-integration test (`TaxpayerQueryIT`) that proves one of them against a real Postgres.
+Four self-contained query files against the Day 1 `taxcalc` schema
+(`src/main/resources/db/migration/V1__schema.sql` +
+`src/main/resources/db/migration/V2__seed.sql`, applied as Flyway migrations since W3
+D3), each demonstrating one advanced-SQL idiom, plus the Testcontainers integration test
+(`TaxpayerQueryIT`) that proves one of them against a real Postgres.
 
 ## Query catalogue
 
@@ -29,8 +31,8 @@ integration test (`TaxpayerQueryIT`) that proves one of them against a real Post
 ## Running locally
 
 ```bash
-psql -h localhost -U postgres -d postgres -f db/V1__schema.sql
-psql -h localhost -U postgres -d postgres -f db/V2__seed.sql
+psql -h localhost -U postgres -d postgres -f src/main/resources/db/migration/V1__schema.sql
+psql -h localhost -U postgres -d postgres -f src/main/resources/db/migration/V2__seed.sql
 psql -h localhost -U postgres -d postgres -f db/queries/cte.sql
 ```
 

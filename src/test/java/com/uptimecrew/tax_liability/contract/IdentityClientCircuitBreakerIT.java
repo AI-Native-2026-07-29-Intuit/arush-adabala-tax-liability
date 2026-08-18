@@ -11,15 +11,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
-import com.uptimecrew.tax_liability.TestPostgresConnections;
 import com.uptimecrew.tax_liability.clients.IdentityProfile;
 import com.uptimecrew.tax_liability.clients.IdentityService;
 import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
@@ -27,7 +22,6 @@ import com.uptimecrew.tax_liability.security.ScopeAndRoleAuthoritiesConverter;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -89,14 +83,6 @@ class IdentityClientCircuitBreakerIT {
 
     @Autowired
     private MockMvc mvc;
-
-    @BeforeAll
-    static void applyPostgresSchema() throws Exception {
-        try (Connection conn = TestPostgresConnections.openWithRetry(PG);
-                Statement stmt = conn.createStatement()) {
-            stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
-        }
-    }
 
     // The "identity" breaker is a singleton bean shared across every @Test method in this class;
     // force it back to CLOSED before each test so circuitOpens_after_repeated_5xx (which

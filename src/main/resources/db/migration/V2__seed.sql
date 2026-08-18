@@ -1,7 +1,7 @@
--- Transactional seed for the taxcalc schema. Every INSERT lives inside one
--- BEGIN/COMMIT — a failure on any row rolls back every previous one.
-
-BEGIN;
+-- Seed for the taxcalc schema. Flyway runs every migration inside its own transaction by
+-- default, so a failure on any INSERT here rolls back the whole file - no explicit
+-- BEGIN/COMMIT needed (an explicit one would nest inside Flyway's own transaction and
+-- commit it prematurely).
 
 INSERT INTO taxcalc.taxpayer (id, display_name, filing_status, home_jurisdiction) VALUES
     ('tp-2026-0001', 'taxcalc.example.internal/tp-0001', 'SINGLE',                    'FEDERAL'),
@@ -23,18 +23,3 @@ INSERT INTO taxcalc.liability (taxpayer_id, tax_year, bracket_id, taxable_amount
     ('tp-2026-0003', 2026, 'ca-2026-flat',    82000.00,  7626.00),
     ('tp-2026-0004', 2026, 'tx-2026-none',    61000.00,  0.00),
     ('tp-2026-0005', 2026, 'ny-2026-topband', 310000.00, 33790.00);
-
-COMMIT;
-
--- ---------------------------------------------------------------------------
--- Intentional failure test — proves the CHECK constraint on taxcalc.bracket.rate
--- rejects out-of-range data. Run outside the seed transaction above.
---
--- Captured error when run against a fresh Postgres 16 container:
---   ERROR:  new row for relation "bracket" violates check constraint "bracket_rate_check"
---   DETAIL:  Failing row contains (bad-2026-negrate, FEDERAL, 2026, BADRATE, -0.5000, 0.00, null).
--- ---------------------------------------------------------------------------
-BEGIN;
-INSERT INTO taxcalc.bracket (id, jurisdiction, tax_year, code, rate, floor_amount, ceiling_amount)
-    VALUES ('bad-2026-negrate', 'FEDERAL', 2026, 'BADRATE', -0.5000, 0.00, NULL);
-ROLLBACK;

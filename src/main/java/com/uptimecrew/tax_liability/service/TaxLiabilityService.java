@@ -1,13 +1,21 @@
 package com.uptimecrew.tax_liability.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import com.uptimecrew.tax_liability.consumer.TaxpayerUpdatedEvent;
 import com.uptimecrew.tax_liability.entity.Liability;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.exception.TaxLiabilityException;
 import com.uptimecrew.tax_liability.model.TaxBracket;
+import com.uptimecrew.tax_liability.outbox.EventOutboxEntity;
+import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
+import com.uptimecrew.tax_liability.outbox.OutboxTopics;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -39,12 +47,17 @@ public class TaxLiabilityService {
     private final BracketResolver bracketResolver;
     private final TaxpayerRepository repository;
     private final TaxpayerReadModelRepository readModelRepository;
+    private final EventOutboxRepository outboxRepository;
+    private final ObjectMapper objectMapper;
 
     public TaxLiabilityService(BracketResolver bracketResolver, TaxpayerRepository repository,
-            TaxpayerReadModelRepository readModelRepository) {
+            TaxpayerReadModelRepository readModelRepository, EventOutboxRepository outboxRepository,
+            ObjectMapper objectMapper) {
         this.bracketResolver = Objects.requireNonNull(bracketResolver, "bracketResolver must not be null");
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
         this.readModelRepository = Objects.requireNonNull(readModelRepository, "readModelRepository must not be null");
+        this.outboxRepository = Objects.requireNonNull(outboxRepository, "outboxRepository must not be null");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
     }
 
     /**
@@ -73,6 +86,12 @@ public class TaxLiabilityService {
             Taxpayer entity = new Taxpayer(id, displayName, filingStatus, bracket.jurisdiction(), Instant.now());
             Taxpayer saved = repository.save(entity);
             LOG.info("persisted entity id={}", saved.getId());
+
+            // Transactional outbox (W3 D3): the outbox row is inserted in the SAME Postgres
+            // transaction as the domain write above, so the two can never diverge - either both
+            // commit or both roll back. OutboxPublisher asynchronously sweeps this row to Kafka.
+            outboxRepository.save(new EventOutboxEntity(saved.getId(), OutboxTopics.TAXPAYER_EVENTS,
+                    serializeEvent(toUpdatedEvent(saved))));
 
             // Write-through: project the JPA entity into a Mongo read model.
             readModelRepository.save(toReadModel(saved));
@@ -103,6 +122,21 @@ public class TaxLiabilityService {
         // Fallback: rebuild a read-model projection from the JPA entity. Optional but
         // recommended so a Mongo wipe doesn't break the read path.
         return repository.findById(id).map(this::toReadModel);
+    }
+
+    private TaxpayerUpdatedEvent toUpdatedEvent(Taxpayer taxpayer) {
+        return new TaxpayerUpdatedEvent(taxpayer.getId(), taxpayer.getDisplayName(), taxpayer.getFilingStatus(),
+                taxpayer.getHomeJurisdiction(), taxpayer.getCreatedAt());
+    }
+
+    private String serializeEvent(TaxpayerUpdatedEvent event) {
+        try {
+            return objectMapper.writeValueAsString(event);
+        } catch (JsonProcessingException ex) {
+            // A record of Strings and an Instant is always serializable; this only guards
+            // against a future field change that breaks that assumption.
+            throw new UncheckedIOException("failed to serialize outbox event for aggregateId: " + event.aggregateId(), ex);
+        }
     }
 
     private TaxpayerReadModel toReadModel(Taxpayer taxpayer) {

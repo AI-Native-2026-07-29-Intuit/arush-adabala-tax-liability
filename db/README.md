@@ -1,8 +1,11 @@
 # Week 2 Day 1 — Postgres Schema, Constraints & Transactional Seed
 
 Translates the Week 1 `TaxBracket` / `BracketResolver` domain into a durable
-Postgres schema: `db/V1__schema.sql` (DDL), `db/V2__seed.sql` (transactional
-seed + intentional-failure test), `db/verify.sql` (verification SELECTs).
+Postgres schema, applied as Flyway migrations (W3 D3 — see the top-level
+README's Week 3 Day 3 section) under
+[`src/main/resources/db/migration/`](../src/main/resources/db/migration/):
+`V1__schema.sql` (DDL) and `V2__seed.sql` (seed data). `db/verify.sql`
+(verification SELECTs, below) stays here since it isn't a migration.
 
 ## ER Diagram
 
@@ -79,7 +82,9 @@ bracket); a liability always resolves to exactly one bracket.
 
 ## Local run
 
-Recreate the schema and seed from a clean Postgres 16 container:
+Since W3 D3, the app itself applies `V1__schema.sql` and `V2__seed.sql` as Flyway
+migrations on startup (`spring.flyway.*`, default `classpath:db/migration` location) —
+`./gradlew bootRun` against a clean Postgres 16 container is the normal path:
 
 ```bash
 docker run --name uptimecrew-pg \
@@ -87,15 +92,46 @@ docker run --name uptimecrew-pg \
   -p 5432:5432 \
   -d postgres:16
 
-psql -h localhost -U postgres -f db/V1__schema.sql
-psql -h localhost -U postgres -f db/V2__seed.sql
+./gradlew bootRun
 psql -h localhost -U postgres -f db/verify.sql
+```
+
+To inspect or run the migrations without starting the app, use the Flyway Gradle plugin
+(configured in `build.gradle` against the same local datasource) or `psql` directly:
+
+```bash
+./gradlew flywayInfo      # lists applied/pending migrations
+./gradlew flywayMigrate   # applies them, same as the app does on startup
+
+# or, without Flyway bookkeeping (no flyway_schema_history row written):
+psql -h localhost -U postgres -f src/main/resources/db/migration/V1__schema.sql
+psql -h localhost -U postgres -f src/main/resources/db/migration/V2__seed.sql
 ```
 
 To re-run from scratch against an existing database, drop the schema first:
 
 ```bash
 psql -h localhost -U postgres -c "DROP SCHEMA IF EXISTS taxcalc CASCADE;"
+```
+
+## Constraint enforcement demo
+
+Not a migration — a standalone proof that `taxcalc.bracket.rate`'s `CHECK` constraint
+rejects out-of-range data, meant to be run manually against a schema that already exists
+(e.g. after `./gradlew bootRun` above):
+
+```sql
+BEGIN;
+INSERT INTO taxcalc.bracket (id, jurisdiction, tax_year, code, rate, floor_amount, ceiling_amount)
+    VALUES ('bad-2026-negrate', 'FEDERAL', 2026, 'BADRATE', -0.5000, 0.00, NULL);
+ROLLBACK;
+```
+
+Captured error when run against a fresh Postgres 16 container:
+
+```
+ERROR:  new row for relation "bracket" violates check constraint "bracket_rate_check"
+DETAIL:  Failing row contains (bad-2026-negrate, FEDERAL, 2026, BADRATE, -0.5000, 0.00, null).
 ```
 
 ## Trade-offs

@@ -23,7 +23,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaxpayerQueryIT {
 
-    private static final String INTENTIONAL_FAILURE_MARKER = "-- Intentional failure test";
+    private static final Path MIGRATION_DIR = Path.of("src/main/resources/db/migration");
 
     @Container
     private static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
@@ -31,8 +31,8 @@ class TaxpayerQueryIT {
     @BeforeAll
     void applySchemaAndSeed() throws Exception {
         try (Connection conn = openConnection(); Statement stmt = conn.createStatement()) {
-            stmt.execute(Files.readString(Path.of("db/V1__schema.sql")));
-            stmt.execute(seedSqlWithoutIntentionalFailureBlock());
+            stmt.execute(Files.readString(MIGRATION_DIR.resolve("V1__schema.sql")));
+            stmt.execute(Files.readString(MIGRATION_DIR.resolve("V2__seed.sql")));
         }
     }
 
@@ -121,14 +121,5 @@ class TaxpayerQueryIT {
                 .filter(line -> !line.strip().regionMatches(true, 0, "SET ", 0, 4))
                 .reduce((a, b) -> a + "\n" + b)
                 .orElse("");
-    }
-
-    // V2__seed.sql intentionally ends with a second transaction that violates a CHECK
-    // constraint to demonstrate constraint enforcement (see its own header comment);
-    // that block is meant to be run manually, not applied by test setup, so it is stripped here.
-    private String seedSqlWithoutIntentionalFailureBlock() throws Exception {
-        String seedSql = Files.readString(Path.of("db/V2__seed.sql"));
-        int failureBlockStart = seedSql.indexOf(INTENTIONAL_FAILURE_MARKER);
-        return failureBlockStart >= 0 ? seedSql.substring(0, failureBlockStart) : seedSql;
     }
 }
