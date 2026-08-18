@@ -84,6 +84,18 @@ public class TaxpayerReadModel implements Serializable {
         return liabilities;
     }
 
+    /**
+     * Re-projects this document from a {@code taxpayers.events} update (W3 D3): overwrites the
+     * scalar fields with the event's values. Applying the same event twice produces the same
+     * document, so at-least-once Kafka redelivery is safe.
+     */
+    public void applyEvent(String displayName, String filingStatus, String homeJurisdiction, Instant createdAt) {
+        this.displayName = Objects.requireNonNull(displayName, "displayName must not be null");
+        this.filingStatus = Objects.requireNonNull(filingStatus, "filingStatus must not be null");
+        this.homeJurisdiction = Objects.requireNonNull(homeJurisdiction, "homeJurisdiction must not be null");
+        this.createdAt = Objects.requireNonNull(createdAt, "createdAt must not be null");
+    }
+
     @Override
     public boolean equals(Object o) {
         return o instanceof TaxpayerReadModel other && Objects.equals(id, other.id);

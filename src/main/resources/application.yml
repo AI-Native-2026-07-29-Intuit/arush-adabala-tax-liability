@@ -53,6 +53,22 @@ spring:
       # (7b) the outbox already stores a JSON string per row - StringSerializer publishes it
       # as-is; JsonSerializer would double-encode an already-JSON string.
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    consumer:
+      group-id: taxcalc-read-model-builder
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.value.default.type: com.uptimecrew.tax_liability.consumer.TaxpayerUpdatedEvent
+        # (7c) the producer publishes plain JSON (no __TypeId__ header), so the deserializer
+        # must be told the target type instead of trying to read it from a (non-existent) header.
+        spring.json.use.type.headers: false
+        spring.json.trusted.packages: com.uptimecrew.tax_liability.consumer
+    listener:
+      ack-mode: RECORD
 
 management:
   endpoints:
