@@ -2,9 +2,6 @@ package com.uptimecrew.tax_liability;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -19,6 +16,8 @@ import java.util.stream.Collectors;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.uptimecrew.tax_liability.api.CreateTaxpayerRequest;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
+import com.uptimecrew.tax_liability.graphql.TaxpayerSummary;
+import com.uptimecrew.tax_liability.llm.StubChatClientFactory;
 import com.uptimecrew.tax_liability.outbox.OutboxTopics;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel.EmbeddedLiability;
@@ -40,13 +39,6 @@ import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.metadata.ChatResponseMetadata;
-import org.springframework.ai.chat.metadata.DefaultUsage;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -310,20 +302,15 @@ class TaxpayerObservabilityIT {
             return InMemorySpanExporter.create();
         }
 
-        // Same reasoning as TaxpayerGraphQlIT.StubChatModelConfig: swap in a deterministic
-        // ChatModel so summarizeTaxpayer still runs Spring AI's real call path but never reaches
-        // Anthropic, this time with an explicit non-zero Usage so the llm.tokens.* assertions
-        // above are proving real propagation, not just "the attribute happens to default to 0".
+        // Same reasoning as TaxpayerGraphQlIT.StubChatModelConfig: swap in StubChatClientFactory's
+        // deterministic ChatModel so summarizeTaxpayer still runs Spring AI's real call path but
+        // never reaches Anthropic. Its default (17 in / 42 out) non-zero usage is what the
+        // llm.tokens.* assertions above are proving real propagation of, not just "the attribute
+        // happens to default to 0".
         @Bean
         @Primary
         ChatClient.Builder stubChatClientBuilder() {
-            ChatModel stub = mock(ChatModel.class);
-            String json = "{\"filingStatus\":\"SINGLE\",\"totalLiability\":950.0,"
-                    + "\"jurisdictionCount\":1,\"riskBand\":\"HIGH\"}";
-            ChatResponse response = new ChatResponse(List.of(new Generation(new AssistantMessage(json))),
-                    ChatResponseMetadata.builder().usage(new DefaultUsage(17, 42)).build());
-            when(stub.call(any(Prompt.class))).thenReturn(response);
-            return ChatClient.builder(stub);
+            return StubChatClientFactory.builderReturning(new TaxpayerSummary("SINGLE", 950.0, 1, "HIGH"));
         }
     }
 }
