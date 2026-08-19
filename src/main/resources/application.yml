@@ -159,6 +159,9 @@ spring:
     url: jdbc:postgresql://localhost:5432/test
     username: test
     password: test
+  ai:
+    anthropic:
+      base-url: http://localhost:8092   # WireMock stub address used by LlmSummaryServiceAnthropicContractIT
   data:
     mongodb:
       # auto-index-creation eagerly opens a Mongo connection while building the
