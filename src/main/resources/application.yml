@@ -76,6 +76,14 @@ spring:
         version: 1.0.0
         type: SYNC
         transport: SSE
+  graphql:
+    path: /graphql
+    graphiql:
+      enabled: true
+      path: /graphiql
+    schema:
+      printer:
+        enabled: true             # GET /graphql/schema returns the SDL for inspection
 
 management:
   endpoints:

@@ -46,6 +46,9 @@ public class SecurityConfig {
                         // above (a local dev/tooling entry point, not taxpayer data), and narrow by
                         // construction - TaxpayerMcpServer exposes exactly one read-only lookup.
                         .requestMatchers("/sse", "/mcp/message").permitAll()
+                        // (1b) Spring for GraphQL (W3 D4): the in-browser GraphiQL UI and the SDL
+                        // introspection endpoint, unauthenticated like the tooling entry points above.
+                        .requestMatchers("/graphql", "/graphql/**", "/graphiql/**").permitAll()
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(oauth2 -> oauth2

@@ -26,6 +26,8 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -126,6 +128,22 @@ public class TaxLiabilityService {
         // Fallback: rebuild a read-model projection from the JPA entity. Optional but
         // recommended so a Mongo wipe doesn't break the read path.
         return repository.findById(id).map(this::toReadModel);
+    }
+
+    /**
+     * Powers the GraphQL {@code latestTaxpayers} query (W3 D4 Task 1).
+     *
+     * @param limit the maximum number of taxpayers to return, must be positive
+     * @return up to {@code limit} taxpayers from the Mongo read model, newest {@code createdAt} first
+     * @throws IllegalArgumentException if {@code limit} is not positive
+     */
+    public List<TaxpayerReadModel> findLatest(int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive: " + limit);
+        }
+        return readModelRepository
+                .findAll(PageRequest.of(0, limit, Sort.by(Sort.Direction.DESC, "createdAt")))
+                .getContent();
     }
 
     private TaxpayerUpdatedEvent toUpdatedEvent(Taxpayer taxpayer) {
