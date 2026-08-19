@@ -88,9 +88,16 @@ import org.testcontainers.utility.DockerImageName;
  * otel.sdk.disabled: true}, so without {@link TestOtelConfig}'s {@code @Primary} override every
  * other IT gets a no-op {@link OpenTelemetry} bean and never attempts real OTLP export. This class
  * is the only one that pays for a real (in-memory) SDK.
+ *
+ * <p>{@code webEnvironment = RANDOM_PORT} runs a real embedded server alongside the in-process
+ * {@code MockMvc} {@code @AutoConfigureMockMvc} still provides - the two aren't mutually exclusive.
+ * {@code MockMvc} stays in use for {@link #httpRequest_emitsServerSpan_withJdbcChildSpan} so the
+ * secured {@code GET} can be authenticated the same way {@link TaxpayerSecurityIT} does (a mocked
+ * {@code jwt()} principal), which a real network call couldn't do without a reachable OIDC issuer.
  */
 @Testcontainers
-@SpringBootTest(properties = "otel.sdk.disabled=false")
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "otel.sdk.disabled=false")
 @AutoConfigureMockMvc
 @AutoConfigureGraphQlTester
 @ActiveProfiles("test")
