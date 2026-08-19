@@ -10,6 +10,8 @@ import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
+import io.opentelemetry.api.OpenTelemetry;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -57,7 +59,8 @@ class TaxLiabilityServiceMockitoTest {
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         TaxLiabilityService subject =
-                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
         Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", taxableAmount);
 
         verify(strategy).resolve(taxableAmount);
@@ -74,7 +77,8 @@ class TaxLiabilityServiceMockitoTest {
         when(strategy.resolve(any())).thenReturn(Optional.empty());
 
         TaxLiabilityService subject =
-                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
 
         assertThrows(IllegalStateException.class,
                 () -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("1000.00")));

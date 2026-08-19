@@ -16,9 +16,13 @@ import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.context.Context;
+
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -54,15 +58,17 @@ public class TaxLiabilityService {
     private final TaxpayerReadModelRepository readModelRepository;
     private final EventOutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
+    private final OpenTelemetry openTelemetry;
 
     public TaxLiabilityService(BracketResolver bracketResolver, TaxpayerRepository repository,
             TaxpayerReadModelRepository readModelRepository, EventOutboxRepository outboxRepository,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper, OpenTelemetry openTelemetry) {
         this.bracketResolver = Objects.requireNonNull(bracketResolver, "bracketResolver must not be null");
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
         this.readModelRepository = Objects.requireNonNull(readModelRepository, "readModelRepository must not be null");
         this.outboxRepository = Objects.requireNonNull(outboxRepository, "outboxRepository must not be null");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
+        this.openTelemetry = Objects.requireNonNull(openTelemetry, "openTelemetry must not be null");
     }
 
     /**
@@ -95,8 +101,10 @@ public class TaxLiabilityService {
             // Transactional outbox (W3 D3): the outbox row is inserted in the SAME Postgres
             // transaction as the domain write above, so the two can never diverge - either both
             // commit or both roll back. OutboxPublisher asynchronously sweeps this row to Kafka.
+            // The captured traceParent (W3 D5) lets that later, separately-threaded sweep
+            // restore THIS request's trace instead of starting a disconnected one of its own.
             outboxRepository.save(new EventOutboxEntity(saved.getId(), OutboxTopics.TAXPAYER_EVENTS,
-                    serializeEvent(toUpdatedEvent(saved))));
+                    serializeEvent(toUpdatedEvent(saved)), captureTraceParent()));
 
             // Write-through: project the JPA entity into a Mongo read model.
             readModelRepository.save(toReadModel(saved));
@@ -187,6 +195,20 @@ public class TaxLiabilityService {
     private TaxpayerUpdatedEvent toUpdatedEvent(Taxpayer taxpayer) {
         return new TaxpayerUpdatedEvent(taxpayer.getId(), taxpayer.getDisplayName(), taxpayer.getFilingStatus(),
                 taxpayer.getHomeJurisdiction(), taxpayer.getCreatedAt());
+    }
+
+    /**
+     * Injects the calling thread's current OTel context into a W3C {@code traceparent} string
+     * (W3 D5), for {@link EventOutboxEntity} to carry across the {@code @Scheduled} thread
+     * boundary {@link com.uptimecrew.tax_liability.outbox.OutboxPublisher} sweeps on. If there is
+     * no active span (e.g. this method was called directly, outside any request), the propagator
+     * injects nothing and this returns null - {@code OutboxPublisher} treats that row as untraced.
+     */
+    private String captureTraceParent() {
+        Map<String, String> carrier = new HashMap<>();
+        openTelemetry.getPropagators().getTextMapPropagator()
+                .inject(Context.current(), carrier, Map::put);
+        return carrier.get("traceparent");
     }
 
     private String serializeEvent(TaxpayerUpdatedEvent event) {

@@ -7,18 +7,17 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.uptimecrew.tax_liability.consumer.TaxpayerUpdatedEvent;
+import com.uptimecrew.tax_liability.api.CreateTaxpayerRequest;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.outbox.OutboxTopics;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
@@ -57,7 +56,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.graphql.test.tester.GraphQlTester;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
@@ -77,11 +76,11 @@ import org.testcontainers.utility.DockerImageName;
  *
  * <p>Three legs, one assertion style each: an HTTP request to {@code GET /api/v1/taxpayers/{id}}
  * emits a server span with a JDBC child sharing its trace id ({@link #httpRequest_emitsServerSpan_withJdbcChildSpan})
- * when the read model falls back to Postgres; a raw Kafka send and the {@link
- * com.uptimecrew.tax_liability.consumer.TaxpayerUpdatedListener} that consumes it share exactly one
- * trace id via the {@code traceparent} header Task 2 wired up ({@link
- * #kafkaSendAndConsume_shareOneTraceId}); and the {@code summarizeTaxpayer} mutation's manual {@code
- * llm.summarize} span (Task 3) carries non-null token attributes ({@link
+ * when the read model falls back to Postgres; a {@code POST /api/v1/taxpayers} write walks the
+ * whole outbox -&gt; Kafka -&gt; consumer -&gt; Mongo chain in ONE trace, restoring the request's
+ * captured traceparent across the {@code @Scheduled} poll's own thread ({@link
+ * #kafkaWriteThrough_singleTraceId_endToEnd}); and the {@code summarizeTaxpayer} mutation's manual
+ * {@code llm.summarize} span (Task 3) carries non-null token attributes ({@link
  * #llmSummarize_spanHasTokenAttributes}).
  *
  * <p>{@code JAEGER} below runs alongside the other four containers but backs nothing: the {@code
@@ -107,6 +106,8 @@ class TaxpayerObservabilityIT {
 
     private static final String READ_SCOPE = "taxpayers.read";
     private static final String READER_ROLE = "TAXPAYER_READER";
+    private static final String WRITE_SCOPE = "taxpayers.write";
+    private static final String WRITER_ROLE = "TAXPAYER_WRITER";
 
     @Container
     @ServiceConnection
@@ -145,9 +146,6 @@ class TaxpayerObservabilityIT {
 
     @Autowired
     private TaxpayerReadModelRepository readModelRepository;
-
-    @Autowired
-    private KafkaTemplate<String, String> kafkaTemplate;
 
     @Autowired
     private ObjectMapper mapper;
@@ -198,32 +196,61 @@ class TaxpayerObservabilityIT {
     }
 
     @Test
-    void kafkaSendAndConsume_shareOneTraceId() throws Exception {
-        // A raw send (mirrors TaxpayerEventFlowIT.consumer_updates_mongo_read_model) rather than
-        // going through the outbox's @Scheduled poll: that poll runs continuously on its own
-        // background thread with no caller span, so it would start a fresh trace regardless of
-        // what triggered the write - this isolates the Kafka producer/consumer leg Task 2 wired
-        // traceparent propagation for.
-        String aggregateId = "observability-kafka-" + System.nanoTime();
-        TaxpayerUpdatedEvent event = new TaxpayerUpdatedEvent(aggregateId, "Trace Continuity Taxpayer", "SINGLE",
-                "FEDERAL", Instant.now());
-        kafkaTemplate.send(OutboxTopics.TAXPAYER_EVENTS, aggregateId, mapper.writeValueAsString(event))
-                .get(5, TimeUnit.SECONDS);
+    void kafkaWriteThrough_singleTraceId_endToEnd() throws Exception {
+        // POST /api/v1/taxpayers (W3 D5) triggers TaxLiabilityService.computeLiability, which
+        // writes the domain entity, the outbox row (carrying THIS request's captured
+        // traceparent), and the Mongo write-through projection, all inside the request's own
+        // trace. OutboxPublisher's later @Scheduled sweep restores that captured traceparent as
+        // the parent context around the Kafka send, so its producer span - and the consumer span
+        // that follows from it - land in the SAME trace as the original HTTP request, rather than
+        // the poll's own disconnected one.
+        String id = "observability-writethrough-" + System.nanoTime();
+        String requestBody = mapper.writeValueAsString(
+                new CreateTaxpayerRequest(id, "Write-Through Taxpayer", "SINGLE", new BigDecimal("75000.00")));
+
+        mvc.perform(post("/api/v1/taxpayers")
+                        .with(writerJwt())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isCreated());
+
+        SpanData server = spanExporter.getFinishedSpanItems().stream()
+                .filter(s -> s.getKind() == SpanKind.SERVER)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no HTTP server span emitted for the POST"));
+        String traceId = server.getTraceId();
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-            List<SpanData> messagingSpans = spanExporter.getFinishedSpanItems().stream()
-                    .filter(s -> (s.getKind() == SpanKind.PRODUCER || s.getKind() == SpanKind.CONSUMER)
-                            && s.getName().contains(OutboxTopics.TAXPAYER_EVENTS))
+            List<SpanData> traceSpans = spanExporter.getFinishedSpanItems().stream()
+                    .filter(s -> s.getTraceId().equals(traceId))
                     .collect(Collectors.toList());
 
-            Set<String> traceIds = messagingSpans.stream().map(SpanData::getTraceId).collect(Collectors.toSet());
-            assertThat(traceIds)
-                    .as("expected exactly one trace id across the Kafka producer send and consumer receive")
-                    .hasSize(1);
-            assertThat(messagingSpans)
-                    .as("expected at least a producer and a consumer span")
-                    .hasSizeGreaterThanOrEqualTo(2);
+            assertThat(traceSpans)
+                    .as("expected the write's HTTP/JDBC/Mongo spans plus the outbox's JDBC/Kafka/Mongo "
+                            + "spans to all land in the ONE trace the POST started")
+                    .hasSizeGreaterThanOrEqualTo(5);
+            assertThat(traceSpans)
+                    .as("expected a Kafka producer span in the same trace as the originating request")
+                    .anyMatch(s -> s.getKind() == SpanKind.PRODUCER);
+            assertThat(traceSpans)
+                    .as("expected a Kafka consumer span in the same trace as the originating request")
+                    .anyMatch(s -> s.getKind() == SpanKind.CONSUMER);
         });
+
+        // The trace-id filter above only proves that whatever DID emit made it into one trace -
+        // it can't by itself catch a producer/consumer span that silently emitted into a SECOND,
+        // disconnected trace instead (which is exactly the bug this whole mechanism guards
+        // against). Cross-check from the messaging side too: every producer/consumer span for
+        // THIS topic anywhere in the exporter must also carry this same trace id.
+        List<SpanData> messagingSpans = spanExporter.getFinishedSpanItems().stream()
+                .filter(s -> (s.getKind() == SpanKind.PRODUCER || s.getKind() == SpanKind.CONSUMER)
+                        && s.getName().contains(OutboxTopics.TAXPAYER_EVENTS))
+                .collect(Collectors.toList());
+        assertThat(messagingSpans).isNotEmpty();
+        assertThat(messagingSpans).allSatisfy(s -> assertThat(s.getTraceId())
+                .as("expected every Kafka producer/consumer span to share the POST's trace id, not a "
+                        + "fresh one from the outbox poll's own background thread")
+                .isEqualTo(traceId));
     }
 
     @Test
@@ -245,6 +272,12 @@ class TaxpayerObservabilityIT {
     private static RequestPostProcessor readerJwt() {
         return jwt()
                 .jwt(j -> j.subject("observability-it-user").claim("scope", READ_SCOPE).claim("roles", List.of(READER_ROLE)))
+                .authorities(new ScopeAndRoleAuthoritiesConverter());
+    }
+
+    private static RequestPostProcessor writerJwt() {
+        return jwt()
+                .jwt(j -> j.subject("observability-it-writer").claim("scope", WRITE_SCOPE).claim("roles", List.of(WRITER_ROLE)))
                 .authorities(new ScopeAndRoleAuthoritiesConverter());
     }
 

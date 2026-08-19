@@ -10,6 +10,8 @@ import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
+import io.opentelemetry.api.OpenTelemetry;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -75,7 +77,8 @@ class TaxLiabilityServiceExceptionPathTest {
                 .thenThrow(new InvalidIncomeException("income must be non-null and non-negative"));
 
         TaxLiabilityService subject =
-                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
 
         assertThatThrownBy(() -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("-100.00")))
                 .isInstanceOf(InvalidIncomeException.class)
@@ -89,7 +92,8 @@ class TaxLiabilityServiceExceptionPathTest {
                 .thenThrow(new BracketResolutionFailedException("failed loading bracket table for jurisdiction CA", cause));
 
         TaxLiabilityService subject =
-                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
 
         assertThatThrownBy(() -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("1000.00")))
                 .isInstanceOf(BracketResolutionFailedException.class)
@@ -102,7 +106,8 @@ class TaxLiabilityServiceExceptionPathTest {
                 .thenThrow(new InvalidIncomeException("income must be non-null and non-negative"));
 
         TaxLiabilityService subject =
-                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
 
         assertThatThrownBy(() -> subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("-100.00")))
                 .isInstanceOf(InvalidIncomeException.class);
