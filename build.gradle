@@ -37,6 +37,13 @@ repositories {
 dependencyManagement {
     imports {
         mavenBom 'org.springframework.cloud:spring-cloud-dependencies:2023.0.3'
+        // spring-cloud-dependencies pins io.opentelemetry:* to 1.37.0 (for its own Micrometer
+        // Tracing bridge), which is missing io.opentelemetry.api.internal.InstrumentationUtil -
+        // a class the 2.10.0 instrumentation modules (NEW for W3 D5) call at JDBC-wrap time,
+        // throwing NoClassDefFoundError. A dependencyManagement entry declared directly in this
+        // project overrides one pulled in transitively via an imported BOM, so this re-pins the
+        // whole io.opentelemetry:* family to the version the instrumentation modules actually want.
+        mavenBom 'io.opentelemetry:opentelemetry-bom:1.44.1'
     }
 }
 
@@ -111,18 +118,26 @@ dependencies {
     implementation      'com.networknt:json-schema-validator:1.5.1'   // needed at RUNTIME, not just test - LlmSummaryService validates LLM output against a hand-written schema
 
     // --- OpenTelemetry auto-instrumentation + manual spans (NEW for W3 D5) -------------------
+    // Import the instrumentation BOM as a platform so every OTel artifact below (including the
+    // OTel SDK/API those artifacts pull in transitively) resolves to the exact mutually-compatible
+    // version set for this 2.10.0 instrumentation release line, rather than each artifact's own
+    // "latest compatible" guess - hand-pinning io.opentelemetry:* artifacts to a version off that
+    // line (e.g. a newer opentelemetry-api) causes a NoClassDefFoundError at JDBC-instrumentation
+    // wrap time, since the instrumentation jars are compiled against the BOM's pinned API version.
+    implementation      platform('io.opentelemetry.instrumentation:opentelemetry-instrumentation-bom:2.10.0')
+    testImplementation  platform('io.opentelemetry.instrumentation:opentelemetry-instrumentation-bom:2.10.0')
     // opentelemetry-spring-boot-starter wires the OTel SDK + autoconfiguration for the OTLP
     // exporter, and pulls in instrumentation modules for the Spring MVC server, JDBC, and the
     // Apache HTTP client. opentelemetry-exporter-otlp ships the protobuf encoder; the starter
     // selects HTTP/protobuf or gRPC via the otel.exporter.otlp.protocol property (application.yml).
-    implementation      'io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter:2.10.0'
-    implementation      'io.opentelemetry:opentelemetry-exporter-otlp:1.44.1'
+    implementation      'io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter'
+    implementation      'io.opentelemetry:opentelemetry-exporter-otlp'
     // The spring-kafka instrumentation is the -alpha artifact for the 2.7 contract and is NOT
     // included in the boot starter - Kafka is the most common trace-continuity break.
     implementation      'io.opentelemetry.instrumentation:opentelemetry-spring-kafka-2.7:2.10.0-alpha'
-    implementation      'io.opentelemetry.instrumentation:opentelemetry-instrumentation-annotations:2.10.0'
+    implementation      'io.opentelemetry.instrumentation:opentelemetry-instrumentation-annotations'
 
-    testImplementation  'io.opentelemetry:opentelemetry-sdk-testing:1.44.1'
+    testImplementation  'io.opentelemetry:opentelemetry-sdk-testing'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
