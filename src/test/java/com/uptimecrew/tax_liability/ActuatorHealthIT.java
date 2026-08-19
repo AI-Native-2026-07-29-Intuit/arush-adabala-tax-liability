@@ -10,6 +10,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 
+/**
+ * Boots the app on a random port and hits {@code /actuator/health} over real HTTP with {@link
+ * TestRestTemplate}, proving the endpoint is reachable and reports {@code UP} - not just that the
+ * application context loads.
+ */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
 class ActuatorHealthIT extends AbstractPostgresIT {

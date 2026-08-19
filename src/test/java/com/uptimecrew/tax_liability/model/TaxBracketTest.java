@@ -9,6 +9,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Covers {@link TaxBracket}'s constructor validation, {@code covers(BigDecimal)} range check
+ * (including an unbounded top bracket with a {@code null} ceiling), and {@code equals}/{@code
+ * hashCode}.
+ */
 class TaxBracketTest {
 
     @Test

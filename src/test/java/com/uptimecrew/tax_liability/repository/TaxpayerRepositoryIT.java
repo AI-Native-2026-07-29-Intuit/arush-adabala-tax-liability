@@ -16,6 +16,11 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+/**
+ * {@code @DataJpaTest} against a real Testcontainers Postgres (rather than the in-memory H2 it
+ * defaults to), proving {@link TaxpayerRepository}'s save → {@code findById} round-trip and that
+ * its derived finder returns only matching rows.
+ */
 // @DataJpaTest by default replaces the DataSource with an in-memory H2.
 // @AutoConfigureTestDatabase(replace=NONE) keeps the real Testcontainers one.
 // @ServiceConnection wires the container's URL/user/password into Spring.

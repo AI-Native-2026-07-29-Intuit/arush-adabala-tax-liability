@@ -9,6 +9,9 @@ import org.junit.jupiter.params.provider.CsvSource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Covers {@link IncomeEventDraft}'s constructor validation and {@code equals}/{@code hashCode}.
+ */
 class IncomeEventDraftTest {
 
     @Test

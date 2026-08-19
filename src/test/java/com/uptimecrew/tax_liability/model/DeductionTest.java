@@ -8,6 +8,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Covers {@link Deduction}'s constructor validation and {@code equals}/{@code hashCode}.
+ */
 class DeductionTest {
 
     @Test

@@ -5,6 +5,11 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.Objects;
 
+/**
+ * A deduction a taxpayer has claimed against a given tax year: a kind (e.g. "STANDARD",
+ * "MORTGAGE_INTEREST"), an amount, and the date it was claimed for. Immutable value type - money
+ * is normalized to scale 2, HALF_UP, in the constructor.
+ */
 public final class Deduction {
 
     private final String id;

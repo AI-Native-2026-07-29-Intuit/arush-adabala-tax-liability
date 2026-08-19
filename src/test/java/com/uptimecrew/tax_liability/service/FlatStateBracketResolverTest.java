@@ -13,6 +13,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Covers {@link FlatStateBracketResolver}: resolving any non-negative amount to its single flat
+ * bracket, rejecting a negative constructor rate, rejecting a negative taxable amount, and the
+ * synthetic "extended bracket table" failure path for very large amounts.
+ */
 class FlatStateBracketResolverTest {
 
     @Test

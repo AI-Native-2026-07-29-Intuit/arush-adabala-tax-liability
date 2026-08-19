@@ -12,6 +12,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Covers {@link FederalBracketResolver}: resolving into the expected marginal bracket, falling
+ * into the open-ended top bracket, and rejecting a negative taxable amount.
+ */
 class FederalBracketResolverTest {
 
     @Test

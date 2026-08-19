@@ -15,6 +15,11 @@ import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.containers.MongoDBContainer;
 import org.testcontainers.junit.jupiter.Container;
 
+/**
+ * Proves the Spring context boots and its injected {@link TaxLiabilityService} bean actually
+ * delegates to the {@code @Primary} strategy and persists the resulting {@link Taxpayer} - not
+ * just that the context doesn't crash.
+ */
 @SpringBootTest
 @ActiveProfiles("test")
 class ApplicationContextLoadIT extends AbstractPostgresIT {

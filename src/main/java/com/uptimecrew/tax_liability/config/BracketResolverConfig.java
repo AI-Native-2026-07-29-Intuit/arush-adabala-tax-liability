@@ -12,6 +12,12 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+/**
+ * Wires the three state-level {@link BracketResolver} strategies as beans, each built from the
+ * jurisdiction/rate/bracket values externalized into {@code application.yml} under
+ * {@code taxcalc.strategies} (bound by {@link BracketResolverProperties}) rather than
+ * hard-coded, so a new state's tax rules are a config change, not a code change.
+ */
 @Configuration
 @EnableConfigurationProperties(BracketResolverProperties.class)
 public class BracketResolverConfig {

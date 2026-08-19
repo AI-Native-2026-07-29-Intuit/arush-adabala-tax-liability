@@ -5,6 +5,11 @@ import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+/**
+ * Binds the {@code taxcalc.strategies} block of {@code application.yml} - the jurisdiction, rate,
+ * and (for the progressive state) bracket table each of {@link BracketResolverConfig}'s three
+ * beans is built from.
+ */
 @ConfigurationProperties(prefix = "taxcalc.strategies")
 public record BracketResolverProperties(
         FlatState flatState,

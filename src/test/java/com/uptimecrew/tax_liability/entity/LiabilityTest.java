@@ -8,6 +8,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Covers {@link Liability}'s constructor validation and its {@code (taxpayerId, taxYear)}-based
+ * {@code equals}/{@code hashCode} - matching the composite primary key {@link LiabilityId} models.
+ */
 class LiabilityTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");

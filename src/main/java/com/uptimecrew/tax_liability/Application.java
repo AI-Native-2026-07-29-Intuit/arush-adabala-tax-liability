@@ -6,6 +6,11 @@ import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
+/**
+ * The Spring Boot entry point for the taxcalc service: REST + GraphQL APIs, the Kafka
+ * transactional-outbox event pipeline, and the Model Context Protocol server all boot from this
+ * one application context.
+ */
 @SpringBootApplication
 @EnableCaching
 @EnableFeignClients

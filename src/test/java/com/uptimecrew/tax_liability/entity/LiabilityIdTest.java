@@ -5,6 +5,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Covers {@link LiabilityId}'s constructor validation and its composite-key {@code equals}/{@code
+ * hashCode} (both {@code taxpayerId} and {@code taxYear} must match).
+ */
 class LiabilityIdTest {
 
     @Test
