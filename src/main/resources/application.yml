@@ -91,6 +91,21 @@ spring:
       printer:
         enabled: true             # GET /graphql/schema returns the SDL for inspection
 
+otel:
+  service:
+    name: taxcalc-service
+  exporter:
+    otlp:
+      endpoint: http://localhost:4318     # OTLP/HTTP default; matches the local Jaeger `docker run`
+      protocol: http/protobuf
+  traces:
+    sampler: always_on                    # dev default; flip to parentbased_traceidratio in prod
+  instrumentation:
+    spring-kafka:
+      enabled: true
+    kafka:
+      enabled: true
+
 management:
   endpoints:
     web:
@@ -169,6 +184,12 @@ spring:
       # TaxpayerPolyglotIT boots a real Mongo container, so every other
       # @SpringBootTest (Postgres-only) would otherwise fail context refresh.
       auto-index-creation: false
+
+otel:
+  sdk:
+    disabled: true    # no-op OpenTelemetry bean by default in tests; TaxpayerObservabilityIT
+                       # overrides it with an @Primary InMemorySpanExporter-backed bean so only
+                       # that test pays for real span export, and every other IT stays quiet.
 
 logging:
   level:

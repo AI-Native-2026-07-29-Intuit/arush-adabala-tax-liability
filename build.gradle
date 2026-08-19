@@ -110,6 +110,20 @@ dependencies {
     implementation      'org.springframework.ai:spring-ai-starter-model-anthropic:1.0.0'
     implementation      'com.networknt:json-schema-validator:1.5.1'   // needed at RUNTIME, not just test - LlmSummaryService validates LLM output against a hand-written schema
 
+    // --- OpenTelemetry auto-instrumentation + manual spans (NEW for W3 D5) -------------------
+    // opentelemetry-spring-boot-starter wires the OTel SDK + autoconfiguration for the OTLP
+    // exporter, and pulls in instrumentation modules for the Spring MVC server, JDBC, and the
+    // Apache HTTP client. opentelemetry-exporter-otlp ships the protobuf encoder; the starter
+    // selects HTTP/protobuf or gRPC via the otel.exporter.otlp.protocol property (application.yml).
+    implementation      'io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter:2.10.0'
+    implementation      'io.opentelemetry:opentelemetry-exporter-otlp:1.44.1'
+    // The spring-kafka instrumentation is the -alpha artifact for the 2.7 contract and is NOT
+    // included in the boot starter - Kafka is the most common trace-continuity break.
+    implementation      'io.opentelemetry.instrumentation:opentelemetry-spring-kafka-2.7:2.10.0-alpha'
+    implementation      'io.opentelemetry.instrumentation:opentelemetry-instrumentation-annotations:2.10.0'
+
+    testImplementation  'io.opentelemetry:opentelemetry-sdk-testing:1.44.1'
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'
