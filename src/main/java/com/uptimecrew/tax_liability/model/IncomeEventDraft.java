@@ -5,6 +5,12 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.Objects;
 
+/**
+ * An unresolved income record: an amount, a free-text {@code source}, and the date it occurred.
+ * Unlike {@link IncomeEvent}, {@code source} here is a plain {@link String} rather than a typed
+ * {@link IncomeSource}, and there is no {@code taxpayerId} - both left for a later stage to
+ * resolve. Immutable value type - money is normalized to scale 2, HALF_UP, in the constructor.
+ */
 public final class IncomeEventDraft {
 
     private final String id;

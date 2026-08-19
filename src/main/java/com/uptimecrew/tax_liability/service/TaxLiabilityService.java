@@ -7,6 +7,7 @@ import com.uptimecrew.tax_liability.consumer.TaxpayerUpdatedEvent;
 import com.uptimecrew.tax_liability.entity.Liability;
 import com.uptimecrew.tax_liability.entity.Taxpayer;
 import com.uptimecrew.tax_liability.exception.TaxLiabilityException;
+import com.uptimecrew.tax_liability.graphql.LineItem;
 import com.uptimecrew.tax_liability.model.TaxBracket;
 import com.uptimecrew.tax_liability.outbox.EventOutboxEntity;
 import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
@@ -19,13 +20,17 @@ import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -126,6 +131,46 @@ public class TaxLiabilityService {
         // Fallback: rebuild a read-model projection from the JPA entity. Optional but
         // recommended so a Mongo wipe doesn't break the read path.
         return repository.findById(id).map(this::toReadModel);
+    }
+
+    /**
+     * Powers the GraphQL {@code latestTaxpayers} query (W3 D4 Task 1).
+     *
+     * @param limit the maximum number of taxpayers to return, must be positive
+     * @return up to {@code limit} taxpayers from the Mongo read model, newest {@code createdAt} first
+     * @throws IllegalArgumentException if {@code limit} is not positive
+     */
+    public List<TaxpayerReadModel> findLatest(int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive: " + limit);
+        }
+        return readModelRepository
+                .findAll(PageRequest.of(0, limit, Sort.by(Sort.Direction.DESC, "createdAt")))
+                .getContent();
+    }
+
+    /**
+     * Batch resolver for the GraphQL {@code Taxpayer.lines} field (W3 D4 Task 2, the N+1 fix):
+     * {@link TaxpayerReadModel} already embeds its liabilities inline (the W2 D5 read-model
+     * denormalization), so grouping the batch costs no extra Mongo round-trip at all -
+     * {@code @BatchMapping} on the caller still collapses what would otherwise be one
+     * per-taxpayer field resolution into a single call regardless of how many taxpayers are in
+     * the result set.
+     *
+     * @param parents the taxpayers whose line items are being resolved in this GraphQL response
+     * @return each parent mapped to its liabilities projected as {@link LineItem}s
+     */
+    public Map<TaxpayerReadModel, List<LineItem>> loadLineItemsByParent(List<TaxpayerReadModel> parents) {
+        Objects.requireNonNull(parents, "parents must not be null");
+        return parents.stream().collect(Collectors.toMap(Function.identity(), this::toLineItems));
+    }
+
+    private List<LineItem> toLineItems(TaxpayerReadModel parent) {
+        return parent.getLiabilities().stream()
+                .map(liability -> new LineItem(parent.getId() + "-" + liability.getTaxYear(),
+                        "Tax year " + liability.getTaxYear() + " liability (" + liability.getBracketId() + ")",
+                        liability.getLiabilityAmount().doubleValue()))
+                .collect(Collectors.toList());
     }
 
     private TaxpayerUpdatedEvent toUpdatedEvent(Taxpayer taxpayer) {

@@ -15,6 +15,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Covers {@link BracketRegistry}: {@code size}, {@code findById}, defensive copying of the
+ * constructor's input collection, null-rejection, and {@code findByJurisdictionAbove}'s
+ * filter-and-sort-by-floor behavior.
+ */
 class BracketRegistryTest {
 
     private static final TaxBracket BRACKET_10 = aTaxBracket()

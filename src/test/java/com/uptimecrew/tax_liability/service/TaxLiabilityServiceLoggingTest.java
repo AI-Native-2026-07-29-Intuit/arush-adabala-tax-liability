@@ -29,6 +29,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
+/**
+ * Covers {@link TaxLiabilityService#computeLiability}'s happy-path logging: exactly one INFO line
+ * before delegating to the injected strategy, one on the successful Postgres save, and one on the
+ * Mongo write-through - proven with a Logback {@link ListAppender} attached directly to the
+ * service's logger, the same pattern {@link TaxLiabilityServiceExceptionPathTest} uses for the
+ * failure path.
+ */
 @ExtendWith(MockitoExtension.class)
 class TaxLiabilityServiceLoggingTest {
 

@@ -14,6 +14,15 @@ import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Covers {@link ProgressiveStateBracketResolver}, built test-first (Day 5): resolving into the
+ * correct marginal bracket (including the inclusive-floor and open-ended-top-bracket edge cases),
+ * a gap between brackets resolving to empty, constructor validation (blank jurisdiction, empty
+ * bracket list, a bracket from a foreign jurisdiction), the extended-bracket-table failure path,
+ * and value-based {@code equals}/{@code hashCode}. Every test is in explicit Arrange/Act/Assert
+ * form with a {@code methodUnderTest_condition_expectation} name and matching {@code
+ * @DisplayName}.
+ */
 class ProgressiveStateBracketResolverTest {
 
     private static final String JURISDICTION = "CALIFORNIA";

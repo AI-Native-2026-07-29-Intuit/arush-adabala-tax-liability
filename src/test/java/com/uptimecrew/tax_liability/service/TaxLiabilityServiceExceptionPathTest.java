@@ -29,6 +29,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
+/**
+ * Covers {@link TaxLiabilityService#computeLiability}'s exception handling when its injected
+ * {@link BracketResolver} throws a {@link com.uptimecrew.tax_liability.exception.TaxLiabilityException}:
+ * the typed exception propagates unchanged, the original cause is preserved, and exactly one WARN
+ * log line is emitted containing the exception message - proven with a Logback {@link
+ * ListAppender} attached directly to the service's logger.
+ */
 @ExtendWith(MockitoExtension.class)
 class TaxLiabilityServiceExceptionPathTest {
 

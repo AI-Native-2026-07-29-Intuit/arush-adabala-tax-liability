@@ -19,6 +19,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+/**
+ * Proves three of the {@code db/queries/*.sql} advanced-SQL files (a CTE, a window function, and
+ * a {@code GROUP BY}/{@code HAVING}) against a real Testcontainers Postgres, applying the Day 1
+ * schema and seed via raw JDBC in {@link #applySchemaAndSeed} rather than Flyway auto-run - this
+ * class boots no Spring context, so there's nothing to trigger Flyway.
+ */
 @Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TaxpayerQueryIT {

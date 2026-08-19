@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Covers {@link Bracket}'s constructor validation and its identity-on-{@code id}-only {@code
+ * equals}/{@code hashCode}.
+ */
 class BracketTest {
 
     @Test

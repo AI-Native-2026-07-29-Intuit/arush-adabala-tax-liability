@@ -76,6 +76,20 @@ spring:
         version: 1.0.0
         type: SYNC
         transport: SSE
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:dummy}   # (9a) dummy default for local smoke-testing; the test profile below stubs ChatClient entirely so it never reads this
+      chat:
+        options:
+          model: claude-sonnet-4-5
+          max-tokens: 1024
+  graphql:
+    path: /graphql
+    graphiql:
+      enabled: true
+      path: /graphiql
+    schema:
+      printer:
+        enabled: true             # GET /graphql/schema returns the SDL for inspection
 
 management:
   endpoints:
@@ -145,6 +159,9 @@ spring:
     url: jdbc:postgresql://localhost:5432/test
     username: test
     password: test
+  ai:
+    anthropic:
+      base-url: http://localhost:8092   # WireMock stub address used by LlmSummaryServiceAnthropicContractIT
   data:
     mongodb:
       # auto-index-creation eagerly opens a Mongo connection while building the

@@ -9,6 +9,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Covers {@link BracketResolvers}' static factory methods and proves the class is not
+ * instantiable (its private constructor throws {@link AssertionError} if reached via reflection).
+ */
 class BracketResolversTest {
 
     @Test

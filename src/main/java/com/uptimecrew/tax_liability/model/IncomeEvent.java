@@ -5,6 +5,11 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.Objects;
 
+/**
+ * A single recorded income event for a taxpayer: a typed {@link IncomeSource}, an amount, and the
+ * date it occurred. Immutable value type - money is normalized to scale 2, HALF_UP, in the
+ * constructor.
+ */
 public final class IncomeEvent {
 
     private final String id;

@@ -11,6 +11,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Covers {@link NoIncomeTaxStateBracketResolver}: resolving any non-negative amount to its
+ * zero-rate bracket, rejecting a blank constructor jurisdiction, and rejecting a negative taxable
+ * amount.
+ */
 class NoIncomeTaxStateBracketResolverTest {
 
     @Test

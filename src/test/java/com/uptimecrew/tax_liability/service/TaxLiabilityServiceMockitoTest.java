@@ -22,6 +22,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Proves {@link TaxLiabilityService#computeLiability} delegates to its injected {@link
+ * BracketResolver} strategy and persists the resulting {@link
+ * com.uptimecrew.tax_liability.entity.Taxpayer} under the resolved bracket's jurisdiction, using a
+ * Mockito {@code @Mock BracketResolver} rather than depending on any concrete resolver
+ * implementation.
+ */
 @ExtendWith(MockitoExtension.class)
 class TaxLiabilityServiceMockitoTest {
 

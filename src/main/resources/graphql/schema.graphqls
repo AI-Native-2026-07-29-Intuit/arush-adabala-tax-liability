@@ -1,0 +1,26 @@
+type Query {
+    taxpayer(id: ID!): Taxpayer
+    latestTaxpayers(limit: Int = 10): [Taxpayer!]!
+}
+
+type Mutation {
+    summarizeTaxpayer(id: ID!): TaxpayerSummary!
+}
+
+type Taxpayer {
+    id: ID!
+    lines: [LineItem!]!
+}
+
+type LineItem {
+    id: ID!
+    description: String!
+    amount: Float!
+}
+
+type TaxpayerSummary {
+    filingStatus: String!
+    totalLiability: Float!
+    jurisdictionCount: Int!
+    riskBand: String!
+}

@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Covers {@link Taxpayer}'s constructor validation and its identity-on-{@code id}-only {@code
+ * equals}/{@code hashCode}.
+ */
 class TaxpayerTest {
 
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");
