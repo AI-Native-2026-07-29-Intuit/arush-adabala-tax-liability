@@ -102,6 +102,7 @@ dependencies {
     // --- Spring for GraphQL (NEW for W3 D4) --------------------------------
     implementation      'org.springframework.boot:spring-boot-starter-graphql'
     implementation      'org.springframework.boot:spring-boot-starter-webflux'   // GraphiQL UI uses reactive routing under the hood; the rest of the service stays on Spring MVC
+    testImplementation  'org.springframework.graphql:spring-graphql-test'
 
     // --- Spring AI Anthropic chat model + JSON Schema re-validation (NEW for W3 D4 Task 3) ---
     // Same pin rationale as the MCP starter above: Spring AI isn't in the Boot 3.3 BOM, so this
