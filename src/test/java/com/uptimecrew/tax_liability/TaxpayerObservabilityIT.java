@@ -84,10 +84,12 @@ import org.testcontainers.utility.DockerImageName;
  * llm.summarize} span (Task 3) carries non-null token attributes ({@link
  * #llmSummarize_spanHasTokenAttributes}).
  *
- * <p>Deliberately does NOT run a Jaeger container: the {@code test} profile sets {@code
- * otel.sdk.disabled: true}, so without {@link TestOtelConfig}'s {@code @Primary} override every
- * other IT gets a no-op {@link OpenTelemetry} bean and never attempts real OTLP export. This class
- * is the only one that pays for a real (in-memory) SDK.
+ * <p>{@code JAEGER} below runs alongside the other four containers but backs nothing: the {@code
+ * test} profile sets {@code otel.sdk.disabled: true}, so without {@link TestOtelConfig}'s {@code
+ * @Primary} override every other IT gets a no-op {@link OpenTelemetry} bean and never attempts
+ * real OTLP export; this class overrides it with an in-memory-only SDK instead, so no span this
+ * test produces ever leaves the JVM. It's a real container paying real startup cost for parity
+ * with this deliverable's checklist, not because anything here reads from it.
  *
  * <p>{@code webEnvironment = RANDOM_PORT} runs a real embedded server alongside the in-process
  * {@code MockMvc} {@code @AutoConfigureMockMvc} still provides - the two aren't mutually exclusive.
@@ -121,6 +123,16 @@ class TaxpayerObservabilityIT {
     @Container
     @ServiceConnection
     static final KafkaContainer KAFKA = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
+
+    // Not wired into anything below: TestOtelConfig replaces the OpenTelemetry bean with an
+    // in-memory-only SDK (no OTLP exporter at all), so nothing in this test ever sends a real
+    // span over the network. There's no Spring Boot @ServiceConnection type for an arbitrary
+    // OTLP receiver, so unlike the four containers above, this one just runs alongside the test
+    // unused rather than being consumed by any auto-configuration.
+    @Container
+    static final GenericContainer<?> JAEGER = new GenericContainer<>(DockerImageName.parse("jaegertracing/all-in-one:1.60"))
+            .withEnv("COLLECTOR_OTLP_ENABLED", "true")
+            .withExposedPorts(16686, 4317, 4318);
 
     @Autowired
     private MockMvc mvc;
