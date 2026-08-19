@@ -103,6 +103,12 @@ dependencies {
     implementation      'org.springframework.boot:spring-boot-starter-graphql'
     implementation      'org.springframework.boot:spring-boot-starter-webflux'   // GraphiQL UI uses reactive routing under the hood; the rest of the service stays on Spring MVC
 
+    // --- Spring AI Anthropic chat model + JSON Schema re-validation (NEW for W3 D4 Task 3) ---
+    // Same pin rationale as the MCP starter above: Spring AI isn't in the Boot 3.3 BOM, so this
+    // is pinned to the same 1.0.x GA release line.
+    implementation      'org.springframework.ai:spring-ai-starter-model-anthropic:1.0.0'
+    implementation      'com.networknt:json-schema-validator:1.5.1'   // needed at RUNTIME, not just test - LlmSummaryService validates LLM output against a hand-written schema
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'

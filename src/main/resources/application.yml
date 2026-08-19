@@ -76,6 +76,12 @@ spring:
         version: 1.0.0
         type: SYNC
         transport: SSE
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:dummy}   # (9a) dummy default for local smoke-testing; the test profile below stubs ChatClient entirely so it never reads this
+      chat:
+        options:
+          model: claude-sonnet-4-5
+          max-tokens: 1024
   graphql:
     path: /graphql
     graphiql:
