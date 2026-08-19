@@ -2,6 +2,8 @@ package com.uptimecrew.tax_liability.consumer;
 
 import com.uptimecrew.tax_liability.outbox.OutboxTopics;
 
+import com.uptimecrew.tax_liability.kafka.TraceparentLoggingProducerListener;
+
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -43,10 +45,13 @@ import org.springframework.util.backoff.FixedBackOff;
 public class KafkaErrorHandlingConfig {
 
     @Bean
-    public KafkaTemplate<String, String> kafkaTemplate(ProducerFactory<Object, Object> producerFactory) {
+    public KafkaTemplate<String, String> kafkaTemplate(ProducerFactory<Object, Object> producerFactory,
+            TraceparentLoggingProducerListener traceparentLoggingProducerListener) {
         DefaultKafkaProducerFactory<String, String> stringProducerFactory = new DefaultKafkaProducerFactory<>(
                 producerFactory.getConfigurationProperties(), new StringSerializer(), new StringSerializer());
-        return new KafkaTemplate<>(stringProducerFactory);
+        KafkaTemplate<String, String> template = new KafkaTemplate<>(stringProducerFactory);
+        template.setProducerListener(traceparentLoggingProducerListener);
+        return template;
     }
 
     // (1) Only the VALUE deserializer is wrapped with ErrorHandlingDeserializer - the key
