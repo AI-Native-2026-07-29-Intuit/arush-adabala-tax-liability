@@ -43,18 +43,31 @@ public class TaxpayerReadModel implements Serializable {
 
     private List<EmbeddedLiability> liabilities;
 
+    // Defaulted (not left null): Spring Data Mongo populates fields via reflection off the
+    // no-arg constructor below, not the parameterized one, so a pre-existing document written
+    // before this field existed has no "tags" key in its BSON and this initializer is the only
+    // thing standing between that and a null tags - which the non-null GraphQL `tags: [String!]!`
+    // field would then reject with a resolution error.
+    private List<String> tags = List.of();
+
     /** Required by Spring Data Mongo. */
     public TaxpayerReadModel() {
     }
 
     public TaxpayerReadModel(String id, String displayName, String filingStatus, String homeJurisdiction,
             Instant createdAt, List<EmbeddedLiability> liabilities) {
+        this(id, displayName, filingStatus, homeJurisdiction, createdAt, liabilities, List.of());
+    }
+
+    public TaxpayerReadModel(String id, String displayName, String filingStatus, String homeJurisdiction,
+            Instant createdAt, List<EmbeddedLiability> liabilities, List<String> tags) {
         this.id = Objects.requireNonNull(id, "id must not be null");
         this.displayName = Objects.requireNonNull(displayName, "displayName must not be null");
         this.filingStatus = Objects.requireNonNull(filingStatus, "filingStatus must not be null");
         this.homeJurisdiction = Objects.requireNonNull(homeJurisdiction, "homeJurisdiction must not be null");
         this.createdAt = Objects.requireNonNull(createdAt, "createdAt must not be null");
         this.liabilities = Objects.requireNonNull(liabilities, "liabilities must not be null");
+        this.tags = Objects.requireNonNull(tags, "tags must not be null");
         if (id.isBlank()) {
             throw new IllegalArgumentException("id must not be blank");
         }
@@ -84,6 +97,10 @@ public class TaxpayerReadModel implements Serializable {
         return liabilities;
     }
 
+    public List<String> getTags() {
+        return tags;
+    }
+
     /**
      * Re-projects this document from a {@code taxpayers.events} update (W3 D3): overwrites the
      * scalar fields with the event's values. Applying the same event twice produces the same
@@ -110,7 +127,7 @@ public class TaxpayerReadModel implements Serializable {
     public String toString() {
         return "TaxpayerReadModel{id=" + id + ", displayName=" + displayName + ", filingStatus=" + filingStatus
                 + ", homeJurisdiction=" + homeJurisdiction + ", createdAt=" + createdAt
-                + ", liabilities=" + liabilities + "}";
+                + ", liabilities=" + liabilities + ", tags=" + tags + "}";
     }
 
     /**

@@ -46,6 +46,12 @@ public class TaxpayerGraphQlController {
         return service.findLatest(limit == null ? 10 : limit);
     }
 
+    @QueryMapping
+    public List<TaxpayerReadModel> taxpayersByTag(@Argument String tag) {
+        LOG.info("graphql query taxpayersByTag tag={}", tag);
+        return service.findByTag(tag);
+    }
+
     @MutationMapping
     public TaxpayerSummary summarizeTaxpayer(@Argument String id) {
         LOG.info("graphql mutation summarizeTaxpayer id={}", id);

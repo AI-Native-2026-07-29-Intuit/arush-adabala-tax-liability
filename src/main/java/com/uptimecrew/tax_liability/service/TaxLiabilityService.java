@@ -150,6 +150,17 @@ public class TaxLiabilityService {
     }
 
     /**
+     * Powers the GraphQL {@code taxpayersByTag} query (W3 D5).
+     *
+     * @param tag the tag to filter taxpayers by, must not be null
+     * @return every taxpayer from the Mongo read model whose {@code tags} contain {@code tag}
+     */
+    public List<TaxpayerReadModel> findByTag(String tag) {
+        Objects.requireNonNull(tag, "tag must not be null");
+        return readModelRepository.findByTagsContaining(tag);
+    }
+
+    /**
      * Batch resolver for the GraphQL {@code Taxpayer.lines} field (W3 D4 Task 2, the N+1 fix):
      * {@link TaxpayerReadModel} already embeds its liabilities inline (the W2 D5 read-model
      * denormalization), so grouping the batch costs no extra Mongo round-trip at all -
