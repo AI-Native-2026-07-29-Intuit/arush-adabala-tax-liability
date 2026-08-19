@@ -14,21 +14,30 @@ import com.uptimecrew.tax_liability.graphql.TaxpayerSummary;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 
+import io.opentelemetry.api.OpenTelemetry;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.DefaultUsage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
 
 /**
- * Covers {@link LlmSummaryService} (W3 D4 Task 3) without hitting Anthropic: the whole
- * {@code ChatClient} fluent chain is mocked, so these tests exercise the service's own logic -
- * looking up the read model, invoking the structured-output call, and re-validating the result
- * against the JSON Schema - deterministically.
+ * Covers {@link LlmSummaryService} (W3 D4 Task 3 / W3 D5 Task 3) without hitting Anthropic: the
+ * whole {@code ChatClient} fluent chain is mocked, so these tests exercise the service's own
+ * logic - looking up the read model, invoking the manually-spanned LLM call, and re-validating
+ * the result against the JSON Schema - deterministically.
  */
 @ExtendWith(MockitoExtension.class)
 class LlmSummaryServiceTest {
+
+    private static final String CONFIGURED_MODEL = "claude-sonnet-4-5";
 
     @Mock
     TaxpayerReadModelRepository readModelRepository;
@@ -53,14 +62,21 @@ class LlmSummaryServiceTest {
     }
 
     private LlmSummaryService subject() {
-        return new LlmSummaryService(builder, readModelRepository, mapper);
+        return new LlmSummaryService(builder, readModelRepository, mapper, OpenTelemetry.noop(), CONFIGURED_MODEL);
     }
 
     private void stubChatClientToReturn(TaxpayerSummary response) {
-        when(chatClient.prompt()).thenReturn(requestSpec);
-        when(requestSpec.user(anyString())).thenReturn(requestSpec);
-        when(requestSpec.call()).thenReturn(callResponseSpec);
-        when(callResponseSpec.entity(TaxpayerSummary.class)).thenReturn(response);
+        try {
+            String json = mapper.writeValueAsString(response);
+            ChatResponse chatResponse = new ChatResponse(List.of(new Generation(new AssistantMessage(json))),
+                    ChatResponseMetadata.builder().usage(new DefaultUsage(17, 42)).build());
+            when(chatClient.prompt()).thenReturn(requestSpec);
+            when(requestSpec.user(anyString())).thenReturn(requestSpec);
+            when(requestSpec.call()).thenReturn(callResponseSpec);
+            when(callResponseSpec.chatResponse()).thenReturn(chatResponse);
+        } catch (Exception ex) {
+            throw new AssertionError(ex);
+        }
     }
 
     @Test
