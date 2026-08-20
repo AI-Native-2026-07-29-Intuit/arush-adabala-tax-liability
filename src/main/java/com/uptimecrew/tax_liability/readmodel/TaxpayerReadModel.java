@@ -23,6 +23,10 @@ import org.springframework.data.mongodb.core.mapping.Document;
  * {@link com.uptimecrew.tax_liability.service.TaxLiabilityService}: Spring's default Redis cache
  * configuration serializes cached values with the JDK serializer, and the first cache miss would
  * otherwise fail with a {@link java.io.NotSerializableException}.
+ *
+ * <p>{@link #getTags()} (W3 D5) backs the GraphQL {@code Taxpayer.tags} field and the
+ * {@code taxpayersByTag} query - the small feature shipped that day through a 3-agent
+ * generator/tester/reviewer workflow.
  */
 @Document(collection = "taxpayers")
 public class TaxpayerReadModel implements Serializable {

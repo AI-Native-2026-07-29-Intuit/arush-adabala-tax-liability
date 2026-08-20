@@ -273,6 +273,12 @@ class TaxpayerObservabilityIT {
                 .authorities(new ScopeAndRoleAuthoritiesConverter());
     }
 
+    /**
+     * Overrides two of the app's beans for this test only: {@link OpenTelemetry} (an in-memory
+     * SDK instead of the real OTLP-exporting one) and {@link ChatClient.Builder} (a stub instead
+     * of the real Anthropic client), so every test above can assert on finished spans directly
+     * and never needs network access to either a collector or Anthropic.
+     */
     @TestConfiguration
     static class TestOtelConfig {
 

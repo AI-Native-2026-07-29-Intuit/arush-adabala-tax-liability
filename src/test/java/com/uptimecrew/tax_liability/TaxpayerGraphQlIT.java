@@ -115,6 +115,7 @@ class TaxpayerGraphQlIT extends AbstractPostgresIT {
         }
     }
 
+    /** Overrides the app's real Anthropic-backed {@link ChatClient.Builder} with a stub for this test. */
     @TestConfiguration
     static class StubChatModelConfig {
 

@@ -44,6 +44,12 @@ import org.springframework.transaction.annotation.Transactional;
  * injected {@link TaxpayerRepository}. Every write is also projected write-through into
  * MongoDB via the injected {@link TaxpayerReadModelRepository} (W2 D5), and {@link #findById}
  * serves reads from a Redis-backed cache in front of that Mongo read model.
+ *
+ * <p>{@link #findByTag} (W3 D5) backs the GraphQL {@code taxpayersByTag} query - the small
+ * feature shipped that day through a 3-agent generator/tester/reviewer workflow.
+ * {@link #computeLiability} also now captures the calling request's OTel trace context onto the
+ * outbox row it writes (see {@link #captureTraceParent}), so {@link
+ * com.uptimecrew.tax_liability.outbox.OutboxPublisher}'s later async sweep can restore it.
  */
 // non-final: @Transactional needs Spring to CGLIB-subclass this bean for its AOP proxy.
 @Service

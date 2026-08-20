@@ -18,6 +18,10 @@ import org.hibernate.type.SqlTypes;
  * here in the SAME {@code @Transactional} method that writes the domain entity, and
  * {@link OutboxPublisher} later sweeps unpublished rows and marks {@link #markPublished}
  * once the corresponding Kafka send completes.
+ *
+ * <p>{@link #getTraceParent()} (W3 D5) carries the writing request's W3C traceparent across that
+ * later sweep's own {@code @Scheduled} thread, so {@link OutboxPublisher} can restore it as the
+ * parent context around the Kafka send instead of always starting a disconnected trace.
  */
 @Entity
 @Table(schema = "taxcalc", name = "event_outbox")
