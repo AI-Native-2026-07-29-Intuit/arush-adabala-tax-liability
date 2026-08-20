@@ -2,10 +2,14 @@ package com.uptimecrew.tax_liability.consumer;
 
 import com.uptimecrew.tax_liability.outbox.OutboxTopics;
 
+import com.uptimecrew.tax_liability.kafka.TraceparentLoggingProducerListener;
+
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.kafka.DefaultKafkaProducerFactoryCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
@@ -37,16 +41,29 @@ import org.springframework.util.backoff.FixedBackOff;
  * {@link ProducerFactory}'s connection properties (rather than re-reading {@code application.yml}
  * directly) so they still pick up the real broker address Testcontainers' {@code @ServiceConnection}
  * substitutes in tests, only overriding the (de)serializers each one needs.
+ *
+ * <p>Manually applies every {@link DefaultKafkaProducerFactoryCustomizer} bean in the context to
+ * both factories below (W3 D5): Spring Boot's {@code KafkaAutoConfiguration} only runs those
+ * customizers - which is how the OTel spring-kafka-2.7 instrumentation injects its producer
+ * interceptor - against the {@code ProducerFactory} bean IT creates. Building a fresh {@link
+ * DefaultKafkaProducerFactory} here (rather than reusing that bean directly) bypasses that
+ * auto-configuration path entirely, so without this, records published through either template
+ * would carry no {@code traceparent} header at all.
  */
 @Configuration
 @EnableKafka
 public class KafkaErrorHandlingConfig {
 
     @Bean
-    public KafkaTemplate<String, String> kafkaTemplate(ProducerFactory<Object, Object> producerFactory) {
+    public KafkaTemplate<String, String> kafkaTemplate(ProducerFactory<Object, Object> producerFactory,
+            TraceparentLoggingProducerListener traceparentLoggingProducerListener,
+            ObjectProvider<DefaultKafkaProducerFactoryCustomizer> customizers) {
         DefaultKafkaProducerFactory<String, String> stringProducerFactory = new DefaultKafkaProducerFactory<>(
                 producerFactory.getConfigurationProperties(), new StringSerializer(), new StringSerializer());
-        return new KafkaTemplate<>(stringProducerFactory);
+        customizers.orderedStream().forEach(customizer -> customizer.customize(stringProducerFactory));
+        KafkaTemplate<String, String> template = new KafkaTemplate<>(stringProducerFactory);
+        template.setProducerListener(traceparentLoggingProducerListener);
+        return template;
     }
 
     // (1) Only the VALUE deserializer is wrapped with ErrorHandlingDeserializer - the key
@@ -58,9 +75,11 @@ public class KafkaErrorHandlingConfig {
     // raw bytes as a String - this dedicated template pairs StringSerializer (key) with
     // ByteArraySerializer (value) to match what recovery actually republishes.
     @Bean
-    public KafkaTemplate<String, byte[]> deadLetterKafkaTemplate(ProducerFactory<Object, Object> producerFactory) {
+    public KafkaTemplate<String, byte[]> deadLetterKafkaTemplate(ProducerFactory<Object, Object> producerFactory,
+            ObjectProvider<DefaultKafkaProducerFactoryCustomizer> customizers) {
         DefaultKafkaProducerFactory<String, byte[]> byteArrayProducerFactory = new DefaultKafkaProducerFactory<>(
                 producerFactory.getConfigurationProperties(), new StringSerializer(), new ByteArraySerializer());
+        customizers.orderedStream().forEach(customizer -> customizer.customize(byteArrayProducerFactory));
         return new KafkaTemplate<>(byteArrayProducerFactory);
     }
 

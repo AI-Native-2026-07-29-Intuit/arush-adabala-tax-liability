@@ -21,6 +21,10 @@ import org.springframework.stereotype.Controller;
  * / {@code @MutationMapping} bind to top-level {@code Query} / {@code Mutation} fields by method
  * name; {@code @BatchMapping} resolves {@code Taxpayer.lines} once per generation instead of once
  * per taxpayer, fixing the N+1 that a naive per-parent resolver would otherwise cause.
+ *
+ * <p>{@link #taxpayersByTag} (W3 D5) is the small feature shipped through the 3-agent
+ * generator/tester/reviewer workflow that day: filters the Mongo read model by the new
+ * {@code Taxpayer.tags} field via {@link TaxLiabilityService#findByTag}.
  */
 @Controller
 public class TaxpayerGraphQlController {
@@ -44,6 +48,12 @@ public class TaxpayerGraphQlController {
     @QueryMapping
     public List<TaxpayerReadModel> latestTaxpayers(@Argument Integer limit) {
         return service.findLatest(limit == null ? 10 : limit);
+    }
+
+    @QueryMapping
+    public List<TaxpayerReadModel> taxpayersByTag(@Argument String tag) {
+        LOG.info("graphql query taxpayersByTag tag={}", tag);
+        return service.findByTag(tag);
     }
 
     @MutationMapping

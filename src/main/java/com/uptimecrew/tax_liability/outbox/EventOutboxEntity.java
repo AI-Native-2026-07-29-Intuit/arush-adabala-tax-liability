@@ -18,6 +18,10 @@ import org.hibernate.type.SqlTypes;
  * here in the SAME {@code @Transactional} method that writes the domain entity, and
  * {@link OutboxPublisher} later sweeps unpublished rows and marks {@link #markPublished}
  * once the corresponding Kafka send completes.
+ *
+ * <p>{@link #getTraceParent()} (W3 D5) carries the writing request's W3C traceparent across that
+ * later sweep's own {@code @Scheduled} thread, so {@link OutboxPublisher} can restore it as the
+ * parent context around the Kafka send instead of always starting a disconnected trace.
  */
 @Entity
 @Table(schema = "taxcalc", name = "event_outbox")
@@ -43,11 +47,21 @@ public class EventOutboxEntity {
     @Column(name = "published_at")
     private Instant publishedAt;
 
+    // Nullable by design (W3 D5): only present when the write happened inside an active span -
+    // see TaxLiabilityService#captureTraceParent. OutboxPublisher restores it as the parent
+    // context for the Kafka send; a row with no traceParent is published untraced.
+    @Column(name = "trace_parent")
+    private String traceParent;
+
     /** Required by JPA. */
     protected EventOutboxEntity() {
     }
 
     public EventOutboxEntity(String aggregateId, String topic, String payload) {
+        this(aggregateId, topic, payload, null);
+    }
+
+    public EventOutboxEntity(String aggregateId, String topic, String payload, String traceParent) {
         this.aggregateId = Objects.requireNonNull(aggregateId, "aggregateId must not be null");
         this.topic = Objects.requireNonNull(topic, "topic must not be null");
         this.payload = Objects.requireNonNull(payload, "payload must not be null");
@@ -60,6 +74,7 @@ public class EventOutboxEntity {
         if (payload.isBlank()) {
             throw new IllegalArgumentException("payload must not be blank");
         }
+        this.traceParent = traceParent;
         this.id = UUID.randomUUID().toString();
         this.occurredAt = Instant.now();
     }
@@ -86,6 +101,10 @@ public class EventOutboxEntity {
 
     public Instant getPublishedAt() {
         return publishedAt;
+    }
+
+    public String getTraceParent() {
+        return traceParent;
     }
 
     public void markPublished(Instant when) {

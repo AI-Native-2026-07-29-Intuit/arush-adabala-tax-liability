@@ -1,9 +1,6 @@
 package com.uptimecrew.tax_liability;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -17,6 +14,7 @@ import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
 import com.networknt.schema.ValidationMessage;
 import com.uptimecrew.tax_liability.graphql.TaxpayerSummary;
+import com.uptimecrew.tax_liability.llm.StubChatClientFactory;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel.EmbeddedLiability;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
@@ -25,11 +23,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -48,8 +41,8 @@ import org.testcontainers.junit.jupiter.Container;
  * Proves the W3 D4 GraphQL deliverable end to end against a real Spring for GraphQL server: a
  * plain query (Task 1), the {@code @BatchMapping} N+1 fix (Task 2), and the structured-output
  * mutation re-validated against the JSON Schema (Task 3). {@link StubChatModelConfig} below swaps
- * in a deterministic {@link ChatModel} so {@code summarizeTaxpayer} still runs Spring AI's real
- * structured-output conversion but never calls Anthropic.
+ * in {@link StubChatClientFactory}'s deterministic {@code ChatModel} so {@code summarizeTaxpayer}
+ * still runs Spring AI's real structured-output conversion but never calls Anthropic.
  */
 @SpringBootTest
 @AutoConfigureGraphQlTester
@@ -122,18 +115,14 @@ class TaxpayerGraphQlIT extends AbstractPostgresIT {
         }
     }
 
+    /** Overrides the app's real Anthropic-backed {@link ChatClient.Builder} with a stub for this test. */
     @TestConfiguration
     static class StubChatModelConfig {
 
         @Bean
         @Primary
         ChatClient.Builder chatClientBuilder() {
-            ChatModel stub = mock(ChatModel.class);
-            String json = "{\"filingStatus\":\"SINGLE\",\"totalLiability\":950.0,"
-                    + "\"jurisdictionCount\":1,\"riskBand\":\"LOW\"}";
-            ChatResponse response = new ChatResponse(List.of(new Generation(new AssistantMessage(json))));
-            when(stub.call(any(Prompt.class))).thenReturn(response);
-            return ChatClient.builder(stub);
+            return StubChatClientFactory.builderReturning(new TaxpayerSummary("SINGLE", 950.0, 1, "LOW"));
         }
     }
 }

@@ -1,6 +1,7 @@
 type Query {
     taxpayer(id: ID!): Taxpayer
     latestTaxpayers(limit: Int = 10): [Taxpayer!]!
+    taxpayersByTag(tag: String!): [Taxpayer!]!
 }
 
 type Mutation {
@@ -10,6 +11,7 @@ type Mutation {
 type Taxpayer {
     id: ID!
     lines: [LineItem!]!
+    tags: [String!]!
 }
 
 type LineItem {

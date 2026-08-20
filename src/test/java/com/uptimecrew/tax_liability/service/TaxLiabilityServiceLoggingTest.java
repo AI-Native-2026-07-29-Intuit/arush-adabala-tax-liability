@@ -10,6 +10,8 @@ import com.uptimecrew.tax_liability.outbox.EventOutboxRepository;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
+import io.opentelemetry.api.OpenTelemetry;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -79,7 +81,8 @@ class TaxLiabilityServiceLoggingTest {
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         TaxLiabilityService subject =
-                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+                new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
         Taxpayer saved = subject.computeLiability("taxpayer-001", "Ada Lovelace", "SINGLE", new BigDecimal("75000.00"));
 
         assertThat(appender.list)

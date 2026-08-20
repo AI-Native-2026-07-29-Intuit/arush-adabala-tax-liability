@@ -25,8 +25,8 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.ai.retry.NonTransientAiException;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.web.client.RestClientException;
 import org.testcontainers.containers.MongoDBContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -116,7 +116,10 @@ class LlmSummaryServiceAnthropicContractIT extends AbstractPostgresIT {
                                 }
                                 """)));
 
+        // Spring AI 1.0.0 GA's retry autoconfiguration reclassifies a 401 as a
+        // NonTransientAiException (not worth retrying) rather than surfacing the raw
+        // RestClientException an older milestone build would have thrown.
         assertThatThrownBy(() -> llmSummaryService.summarize("anthropic-contract-1"))
-                .isInstanceOf(RestClientException.class);
+                .isInstanceOf(NonTransientAiException.class);
     }
 }

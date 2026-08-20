@@ -19,6 +19,8 @@ import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel.EmbeddedLiabilit
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModelRepository;
 import com.uptimecrew.tax_liability.repository.TaxpayerRepository;
 
+import io.opentelemetry.api.OpenTelemetry;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -51,7 +53,8 @@ class TaxLiabilityServiceGraphQlTest {
     ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
 
     private TaxLiabilityService subject() {
-        return new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper);
+        return new TaxLiabilityService(strategy, repository, readModelRepository, outboxRepository, objectMapper,
+                OpenTelemetry.noop());
     }
 
     @Test

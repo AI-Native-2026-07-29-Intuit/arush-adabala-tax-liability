@@ -11,4 +11,7 @@ public interface TaxpayerReadModelRepository extends MongoRepository<TaxpayerRea
 
     // Derived query - Spring Data generates the Mongo query from the method name.
     List<TaxpayerReadModel> findByFilingStatus(String filingStatus);
+
+    // Derived query - matches documents whose tags array contains the given tag.
+    List<TaxpayerReadModel> findByTagsContaining(String tag);
 }
