@@ -212,7 +212,11 @@ class TaxpayerObservabilityIT {
                 .orElseThrow(() -> new AssertionError("no HTTP server span emitted for the POST"));
         String traceId = server.getTraceId();
 
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        // 30s, not 15: a freshly-started Testcontainers Kafka broker needs to auto-create the
+        // topic and let the consumer group complete its initial join/sync handshake before the
+        // first record is even eligible for delivery - on a cold broker that alone can eat
+        // several seconds before the outbox's 1s poll interval ever gets a chance to matter.
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             List<SpanData> traceSpans = spanExporter.getFinishedSpanItems().stream()
                     .filter(s -> s.getTraceId().equals(traceId))
                     .collect(Collectors.toList());
