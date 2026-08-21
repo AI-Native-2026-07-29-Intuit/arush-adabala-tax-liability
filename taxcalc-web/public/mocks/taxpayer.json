@@ -1,0 +1,10 @@
+{
+  "id": "stub-id-1",
+  "filingStatus": "SINGLE",
+  "jurisdictionCount": 3,
+  "totalLiability": "8420.00",
+  "lines": [
+    { "id": "line-1", "amount": "100.00" },
+    { "id": "line-2", "amount": "250.00" }
+  ]
+}
