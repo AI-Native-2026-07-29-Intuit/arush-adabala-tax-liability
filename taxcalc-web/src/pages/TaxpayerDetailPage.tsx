@@ -1,5 +1,5 @@
 // src/pages/TaxpayerDetailPage.tsx
-import { useEffect, useReducer } from 'react';
+import { useEffect, useReducer, useState } from 'react';
 import type { Taxpayer } from '../types/taxpayer';
 import { detailReducer, INITIAL_DETAIL_STATE, type DetailState } from './TaxpayerDetailPage.reducer';
 import { useDebouncedSearch } from '../hooks/useDebouncedSearch';
@@ -24,6 +24,15 @@ export function TaxpayerDetailPage(): React.ReactElement {
   // ThresholdSlider and ThresholdReadout each read/write their own slice
   // directly, so no value/onChange props are threaded through here.
   const debouncedSearchText = useDebouncedSearch();
+
+  // React error boundaries only catch errors thrown during rendering, not
+  // from event handlers - so the dev-only trigger button sets state and
+  // lets the resulting re-render do the throwing, rather than throwing
+  // directly in its onClick.
+  const [shouldThrow, setShouldThrow] = useState(false);
+  if (shouldThrow) {
+    throw new Error('Manually triggered error (dev-only "Trigger error" button)');
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +61,12 @@ export function TaxpayerDetailPage(): React.ReactElement {
       <p>filtering for: &apos;{debouncedSearchText}&apos;</p>
 
       <DetailCard state={state}></DetailCard>
+
+      {import.meta.env.DEV && (
+        <button type="button" onClick={() => setShouldThrow(true)}>
+          Trigger error
+        </button>
+      )}
     </main>
   );
 }
