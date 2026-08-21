@@ -1,15 +1,14 @@
 // src/pages/TaxpayerDetailPage.tsx
-import { useState } from 'react';
 import { useTaxpayer } from '../hooks/useTaxpayer';
+import { FilterStrip } from '../components/FilterStrip';
 import { ThresholdSlider } from '../components/ThresholdSlider';
 import { ThresholdReadout } from '../components/ThresholdReadout';
 
 export function TaxpayerDetailPage(): React.ReactElement {
-  // (1) `threshold` is owned HERE - the page is the source of truth.
-  //     ThresholdSlider mutates it via the onChange prop; ThresholdReadout
-  //     reads it via the value prop. Two siblings, one source.
-  const [threshold, setThreshold] = useState<number>(50);
-
+  // `threshold` (and the other filter fields) now live in
+  // useTaxpayerFilterStore (W4 D2) instead of a page-owned useState;
+  // ThresholdSlider and ThresholdReadout each read/write their own slice
+  // directly, so no value/onChange props are threaded through here.
   const { data, loading, error } = useTaxpayer('stub-id-1');
 
   if (loading) return <p>Loading…</p>;
@@ -18,6 +17,8 @@ export function TaxpayerDetailPage(): React.ReactElement {
 
   return (
     <main aria-labelledby="taxpayer-heading">
+      <FilterStrip></FilterStrip>
+
       <h1 id="taxpayer-heading">Taxpayer {data.id}</h1>
       <dl>
         <dt>filingStatus</dt>              <dd>{data.filingStatus}</dd>
@@ -26,8 +27,8 @@ export function TaxpayerDetailPage(): React.ReactElement {
       </dl>
 
       <section aria-label="Threshold control">
-        <ThresholdSlider value={threshold} onChange={setThreshold}></ThresholdSlider>
-        <ThresholdReadout value={threshold}></ThresholdReadout>
+        <ThresholdSlider></ThresholdSlider>
+        <ThresholdReadout></ThresholdReadout>
       </section>
     </main>
   );

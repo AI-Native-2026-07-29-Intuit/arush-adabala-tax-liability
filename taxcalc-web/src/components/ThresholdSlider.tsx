@@ -1,10 +1,15 @@
 // src/components/ThresholdSlider.tsx
-type Props = {
-  readonly value: number; // 0..100
-  readonly onChange: (next: number) => void;
-};
+import { useTaxpayerFilterStore } from '../stores/useTaxpayerFilterStore';
 
-export function ThresholdSlider({ value, onChange }: Props): React.ReactElement {
+/**
+ * Controlled by `useTaxpayerFilterStore`'s `threshold` slice (W4 D2) rather
+ * than a `value`/`onChange` prop pair, so a sibling elsewhere in the tree
+ * can read or drive the same value without prop drilling.
+ */
+export function ThresholdSlider(): React.ReactElement {
+  const threshold = useTaxpayerFilterStore((s) => s.threshold);
+  const setThreshold = useTaxpayerFilterStore((s) => s.setThreshold);
+
   return (
     <label>
       Threshold
@@ -12,8 +17,8 @@ export function ThresholdSlider({ value, onChange }: Props): React.ReactElement 
         type="range"
         min={0}
         max={100}
-        value={value}
-        onChange={(e) => onChange(Number(e.currentTarget.value))}
+        value={threshold}
+        onChange={(e) => setThreshold(Number(e.currentTarget.value))}
       />
     </label>
   );
