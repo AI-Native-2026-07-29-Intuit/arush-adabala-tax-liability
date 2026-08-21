@@ -82,11 +82,7 @@ export const useTaxpayerFilterStore = create<FilterState & FilterActions>()(
       {
         name: 'taxcalc-web:filters',
         storage: createJSONStorage(() => safeLocalStorage),
-        // Only `threshold` survives a reload. Search text persisted across
-        // reloads would be a UX bug: an engineer types "foo" for an
-        // unrelated reason, returns next week, and sees results still
-        // filtered by "foo" — the filter chips and date range are session
-        // state, not saved preferences.
+        // Only `threshold` persists — a saved `searchText` would silently refilter results on a later, unrelated visit.
         partialize: (s) => ({ threshold: s.threshold }),
       },
     ),
