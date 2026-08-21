@@ -9,6 +9,12 @@ import { ThresholdReadout } from '../components/ThresholdReadout';
 
 const MOCK_TAXPAYER_URL = '/mocks/taxpayer.json';
 
+/**
+ * Detail page for a single taxpayer. Fetch progress is a useReducer state
+ * machine (see {@link detailReducer}); cross-cutting filter/threshold
+ * fields live in `useTaxpayerFilterStore` rather than local state. Wrapped
+ * in an `ErrorBoundary` by `App.tsx`.
+ */
 export function TaxpayerDetailPage(): React.ReactElement {
   // The W4 D1 useTaxpayer(id) hook's data|loading|error shape is replaced
   // by a useReducer state machine (idle|loading|success|error|empty) so
@@ -71,6 +77,7 @@ export function TaxpayerDetailPage(): React.ReactElement {
   );
 }
 
+/** Renders the branch of {@link DetailState} the fetch has reached. */
 function DetailCard({ state }: { readonly state: DetailState }): React.ReactElement {
   switch (state.status) {
     case 'idle':

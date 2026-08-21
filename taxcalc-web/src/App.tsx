@@ -1,13 +1,16 @@
 // src/App.tsx
 //
 // TanStack Router replaces this hash check on W4 D3; for D1 the only route
-// this app knows is #/taxpayers/stub-id-1.
+// this app knows is #/taxpayers/stub-id-1. W4 D2 wraps that route's page in
+// an ErrorBoundary so a render-time throw anywhere below it shows a retry
+// card instead of a blank screen.
 import { useEffect, useState } from 'react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { TaxpayerDetailPage } from './pages/TaxpayerDetailPage';
 
 const STUB_ROUTE = '#/taxpayers/stub-id-1';
 
+/** App root: hash-routes to {@link TaxpayerDetailPage}, wrapped in an {@link ErrorBoundary}. */
 export function App(): React.ReactElement {
   const [hash, setHash] = useState<string>(window.location.hash);
 

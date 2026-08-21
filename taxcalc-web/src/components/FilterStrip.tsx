@@ -31,6 +31,7 @@ export function FilterStrip(): React.ReactElement {
   );
 }
 
+/** Checkbox group over the `filingStatusFilter` slice; toggling one code updates the array. */
 function FilingStatusChips(): React.ReactElement {
   const filingStatusFilter = useTaxpayerFilterStore((s) => s.filingStatusFilter);
   const setFilingStatusFilter = useTaxpayerFilterStore((s) => s.setFilingStatusFilter);
@@ -59,6 +60,7 @@ function FilingStatusChips(): React.ReactElement {
   );
 }
 
+/** Read-only view of the `dateRange` slice; no setter ships in the Task 1 store. */
 function DateRangeInputs(): React.ReactElement {
   const dateRange = useTaxpayerFilterStore((s) => s.dateRange);
 
@@ -74,6 +76,7 @@ function DateRangeInputs(): React.ReactElement {
   );
 }
 
+/** Text input bound to the `searchText` slice (consumed debounced via {@link useDebouncedSearch}). */
 function SearchTextInput(): React.ReactElement {
   const searchText = useTaxpayerFilterStore((s) => s.searchText);
   const setSearchText = useTaxpayerFilterStore((s) => s.setSearchText);
@@ -90,6 +93,7 @@ function SearchTextInput(): React.ReactElement {
   );
 }
 
+/** Checkbox bound to the `includeArchived` slice. */
 function IncludeArchivedToggle(): React.ReactElement {
   const includeArchived = useTaxpayerFilterStore((s) => s.includeArchived);
   const setIncludeArchived = useTaxpayerFilterStore((s) => s.setIncludeArchived);
