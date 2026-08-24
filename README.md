@@ -132,6 +132,71 @@ Also ships one small feature — a `tags: [String!]!` field on `Taxpayer` plus a
 
 **Known, deliberate gap:** `taxcalc-web/`'s files were hand-authored to the required shape rather than left as raw `pnpm create vite@latest` output — checked `create-vite` versions 4.0 through 9.x and no version ever ships both a single `tsconfig.json` and an ESLint 9 flat config together (the tsconfig split at 5.3 predates flat config's introduction at 5.5), so the two Task 1/Task 2 instructions can only both be satisfied by editing past the scaffold, not by leaving it untouched.
 
+## Week 4 Day 2 — React Hooks, Zustand & Error Boundaries
+
+Cross-cutting state moves out of `TaxpayerDetailPage`'s local `useState`
+into `stores.useTaxpayerFilterStore` (`taxcalc-web/src/stores/`): a typed
+Zustand store holding `filingStatusFilter`, `dateRange`, `searchText`,
+`includeArchived`, and the W4 D1 `threshold` field, plus four setters and a
+`reset` action. Every `set()` call carries a named action string
+(`'filters/setSearchText'`, etc.) via `devtools`, so the Redux DevTools
+timeline reads like a log instead of an anonymous diff; `persist`'s
+`partialize` keeps only `threshold` across reloads — persisting `searchText`
+would silently re-filter results the next time the page loads for an
+unrelated reason. The store binds to a small `safeLocalStorage` wrapper
+(try/catch around `window.localStorage`, falling back to an in-memory
+`Map`) rather than the bare `localStorage` global directly: Safari private
+browsing throws `SecurityError` on `setItem`, and — hit live while building
+this — Node 20+'s own experimental `localStorage` global can shadow jsdom's
+working implementation under Vitest, leaving `window.localStorage`
+`undefined`. `components.ThresholdSlider` and `components.ThresholdReadout`
+now read/write the `threshold` slice directly instead of taking
+`value`/`onChange` props, and a new `components.FilterStrip` renders one
+control per filter field above the detail card, each subscribing to its own
+slice so an edit to one field doesn't re-render the others.
+
+`pages.TaxpayerDetailPage`'s W4 D1 `useTaxpayer`-derived `data`/`loading`/
+`error` shape is replaced by `useReducer` over a pure, separately-testable
+reducer in `pages.TaxpayerDetailPage.reducer`: a five-state discriminated
+union (`idle | loading | success | error | empty`) with a
+`const _exhaustive: never = action` guard on the reducer's default branch,
+so a future action variant added without a matching `case` fails to
+compile rather than silently falling through. The page's own effect drives
+it — dispatching `fetch/start` up front, then `fetch/success` or
+`fetch/error` on resolution — deliberately shaped to match 1:1 with the
+`data`/`error` result Apollo Client's query hook returns once it replaces
+this stub fetch on W4 D3. (`hooks.useTaxpayer` from W4 D1 is left unchanged
+and is no longer imported by the page — dead code today, removed rather
+than resurrected once Apollo lands.) A new `hooks.useDebouncedSearch` reads
+the store's `searchText` slice, lags it by a configurable `delayMs` behind
+a `useEffect`-owned `setTimeout`, and returns a cleanup that clears the
+pending timer — without that cleanup, a stale timer from a superseded
+keystroke would still fire after the component (or the next keystroke)
+moved on. The page wires it into a "filtering for: '...'" readout.
+
+`components.ErrorBoundary` is a class component (React 19 still has no
+hook-based equivalent) implementing `static getDerivedStateFromError` +
+`componentDidCatch`, taking a `(error, reset) => ReactNode` fallback render
+prop rather than fixed markup. `App.tsx` wraps `TaxpayerDetailPage` in it;
+the fallback renders a `role="alert"` error card with the message in a
+`<pre>` and a retry button calling `reset()`, which re-mounts the
+descendants. The page also gets a dev-only "Trigger error" button, gated on
+`import.meta.env.DEV` (backed by a new `src/vite-env.d.ts` for the
+`ImportMeta` typing) — it sets state and lets the following render do the
+throwing, since error boundaries only catch errors thrown during rendering,
+not ones thrown from inside an event handler.
+
+Thirteen Vitest tests now pass (the two W4 D1 smoke tests, unchanged, plus
+eleven new): `TaxpayerDetailPage.reducer.test.ts` drives the reducer as a
+pure function through all five states and `reset`; `useTaxpayerFilterStore.test.ts`
+resets the store via `setState(getInitialState(), true)` in `beforeEach` so
+tests don't bleed into each other, covering each setter (including
+last-write-wins on `setFilingStatusFilter`) and `reset()`;
+`useDebouncedSearch.test.tsx` uses `vi.useFakeTimers()` to prove the lag and
+that a mid-stream `searchText` change cancels the prior pending timer
+instead of racing it. `pnpm typecheck && pnpm lint && pnpm test && pnpm build`
+all pass locally, and the W4 D1 GitHub Action re-runs unmodified.
+
 ## Build and Test
 
 ```bash
