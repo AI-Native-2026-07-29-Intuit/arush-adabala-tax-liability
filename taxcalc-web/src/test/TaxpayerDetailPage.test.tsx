@@ -49,4 +49,10 @@ describe('TaxpayerDetailPage', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent(/Threshold:\s*51%/);
   });
+
+  it('renders the empty state on a 404 (useGetTaxLiabilityRest resolves null)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    renderAtDetailRoute();
+    await waitFor(() => expect(screen.getByText('Not found.')).toBeInTheDocument());
+  });
 });

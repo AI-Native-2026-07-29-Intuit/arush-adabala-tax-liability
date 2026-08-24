@@ -5,28 +5,36 @@ import { SummarizeTaxpayerDocument } from '../gql/generated/graphql';
 
 const PENDING_PLACEHOLDER = 'PENDING';
 
+const PLACEHOLDER_SUMMARY = {
+  filingStatus: PENDING_PLACEHOLDER,
+  totalLiability: 0,
+  jurisdictionCount: 0,
+  riskBand: PENDING_PLACEHOLDER,
+};
+
 /**
  * Triggers the `summarizeTaxpayer` mutation for the route's `:id` and
- * renders an instant placeholder card via `optimisticResponse` while the
- * real request is in flight - the placeholder carries `__typename:
- * 'TaxpayerSummary'` so Apollo's cache can normalize it the same way as
- * the eventual server result, and swaps the placeholder out automatically
- * once that result lands.
+ * renders an instant placeholder card while the real request is in
+ * flight. `useMutation`'s own `data` only ever reflects the *server*
+ * result - `optimisticResponse` writes straight into Apollo's cache for
+ * any `useQuery` observing the same fields, which `TaxpayerSummary` has
+ * none of (it's reachable only via this mutation, not any query), so the
+ * placeholder shown here is driven off `loading` instead. The mutation
+ * still carries `optimisticResponse` (with `__typename: 'TaxpayerSummary'`
+ * so Apollo's cache can normalize the write) because that's what a
+ * consuming query elsewhere in the app would need to see the same instant
+ * update - this page just isn't that consumer.
  */
 export function TaxpayerSummaryPage(): React.ReactElement {
   const { id = '' } = useParams<{ id: string }>();
   const [summarize, { loading, data, error }] = useMutation(SummarizeTaxpayerDocument, {
     variables: { id },
     optimisticResponse: {
-      summarizeTaxpayer: {
-        __typename: 'TaxpayerSummary',
-        filingStatus: PENDING_PLACEHOLDER,
-        totalLiability: 0,
-        jurisdictionCount: 0,
-        riskBand: PENDING_PLACEHOLDER,
-      },
+      summarizeTaxpayer: { __typename: 'TaxpayerSummary', ...PLACEHOLDER_SUMMARY },
     },
   });
+
+  const summary = data?.summarizeTaxpayer ?? (loading ? PLACEHOLDER_SUMMARY : null);
 
   return (
     <section aria-label="taxpayer-summary">
@@ -34,12 +42,12 @@ export function TaxpayerSummaryPage(): React.ReactElement {
         Summarize
       </button>
       {error && <p role="alert">Error: {error.message}</p>}
-      {data && (
+      {summary && (
         <dl>
-          <dt>filingStatus</dt> <dd>{data.summarizeTaxpayer.filingStatus}</dd>
-          <dt>totalLiability</dt> <dd>{data.summarizeTaxpayer.totalLiability}</dd>
-          <dt>jurisdictionCount</dt> <dd>{data.summarizeTaxpayer.jurisdictionCount}</dd>
-          <dt>riskBand</dt> <dd>{data.summarizeTaxpayer.riskBand}</dd>
+          <dt>filingStatus</dt> <dd>{summary.filingStatus}</dd>
+          <dt>totalLiability</dt> <dd>{summary.totalLiability}</dd>
+          <dt>jurisdictionCount</dt> <dd>{summary.jurisdictionCount}</dd>
+          <dt>riskBand</dt> <dd>{summary.riskBand}</dd>
         </dl>
       )}
     </section>
