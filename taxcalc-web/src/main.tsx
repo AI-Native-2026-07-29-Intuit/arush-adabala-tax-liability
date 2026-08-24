@@ -1,5 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ApolloProvider } from '@apollo/client';
+import { apolloClient } from './apollo/client';
 import { App } from './App';
 
 const rootElement = document.getElementById('root');
@@ -9,6 +11,8 @@ if (rootElement === null) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <ApolloProvider client={apolloClient}>
+      <App />
+    </ApolloProvider>
   </StrictMode>,
 );

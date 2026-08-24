@@ -1,0 +1,16 @@
+# src/queries/LatestTaxpayers.graphql
+#
+# Backs TaxpayerListPage. Selects every scalar/list field the schema's
+# `Taxpayer` type exposes (id, tags, lines) - there is no `name` or
+# `updatedAt` on this type, unlike the read-model's REST projection.
+query LatestTaxpayers($limit: Int) {
+  latestTaxpayers(limit: $limit) {
+    id
+    tags
+    lines {
+      id
+      description
+      amount
+    }
+  }
+}
