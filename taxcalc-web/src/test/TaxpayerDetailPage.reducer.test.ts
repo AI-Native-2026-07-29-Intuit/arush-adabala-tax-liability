@@ -8,10 +8,12 @@ import {
 
 const SAMPLE = {
   id: 'stub-id-1',
+  displayName: 'Jane Doe',
   filingStatus: 'SINGLE',
-  jurisdictionCount: 3,
-  totalLiability: '8420.00',
-  lines: [],
+  homeJurisdiction: 'COLORADO',
+  createdAt: '2025-01-01T00:00:00Z',
+  liabilities: [],
+  tags: [],
 } as const;
 
 describe('TaxpayerDetailPage.reducer', () => {

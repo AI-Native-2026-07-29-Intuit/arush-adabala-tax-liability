@@ -1,17 +1,16 @@
 // src/apollo/client.ts
 import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
 import { setContext } from '@apollo/client/link/context';
+import { getStoredJwt } from '../lib/jwtStorage';
 
 // THREAT MODEL: storing the JWT in localStorage exposes it to any XSS that
 // runs on the page. Accepted for now because the W6 cookie story (HttpOnly,
 // SameSite=Strict, server-set) isn't built yet - see the router's
-// ProtectedLayout, which reads the same key.
-const JWT_STORAGE_KEY = 'uc:jwt';
-
+// ProtectedLayout, which reads the same key via jwtStorage.ts.
 const httpLink = new HttpLink({ uri: 'http://localhost:8080/graphql' });
 
 const authLink = setContext((_operation, { headers }) => {
-  const token = localStorage.getItem(JWT_STORAGE_KEY);
+  const token = getStoredJwt();
   return {
     headers: {
       ...headers,

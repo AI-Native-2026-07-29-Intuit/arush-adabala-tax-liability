@@ -1,7 +1,9 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ApolloProvider } from '@apollo/client';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { apolloClient } from './apollo/client';
+import { queryClient } from './queryClient';
 import { App } from './App';
 
 const rootElement = document.getElementById('root');
@@ -12,7 +14,9 @@ if (rootElement === null) {
 createRoot(rootElement).render(
   <StrictMode>
     <ApolloProvider client={apolloClient}>
-      <App />
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
     </ApolloProvider>
   </StrictMode>,
 );

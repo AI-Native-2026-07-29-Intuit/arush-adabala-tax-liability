@@ -1,17 +1,17 @@
 // src/pages/TaxpayerDetailPage.reducer.ts
-import type { Taxpayer } from '../types/taxpayer';
+import type { TaxpayerRest } from '../hooks/useGetTaxLiabilityRest';
 
 /** Discriminated-union state machine for {@link TaxpayerDetailPage}'s fetch lifecycle. */
 export type DetailState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'success'; data: Taxpayer }
+  | { status: 'success'; data: TaxpayerRest }
   | { status: 'error'; error: string }
   | { status: 'empty' };
 
 export type DetailAction =
   | { type: 'fetch/start' }
-  | { type: 'fetch/success'; payload: Taxpayer | null }
+  | { type: 'fetch/success'; payload: TaxpayerRest | null }
   | { type: 'fetch/error'; error: string }
   | { type: 'reset' };
 

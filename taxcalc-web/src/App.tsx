@@ -1,29 +1,10 @@
 // src/App.tsx
-//
-// TanStack Router replaces this hash check on W4 D3; for D1 the only route
-// this app knows is #/taxpayers/stub-id-1. W4 D2 wraps that route's page in
-// an ErrorBoundary so a render-time throw anywhere below it shows a retry
-// card instead of a blank screen.
-import { useEffect, useState } from 'react';
+import { RouterProvider } from 'react-router-dom';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { TaxpayerDetailPage } from './pages/TaxpayerDetailPage';
+import { router } from './router';
 
-const STUB_ROUTE = '#/taxpayers/stub-id-1';
-
-/** App root: hash-routes to {@link TaxpayerDetailPage}, wrapped in an {@link ErrorBoundary}. */
+/** App root: renders the {@link router} route table, wrapped in an {@link ErrorBoundary}. */
 export function App(): React.ReactElement {
-  const [hash, setHash] = useState<string>(window.location.hash);
-
-  useEffect(() => {
-    const onHashChange = (): void => setHash(window.location.hash);
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
-
-  if (hash !== STUB_ROUTE) {
-    return <p>go to {STUB_ROUTE}</p>;
-  }
-
   return (
     <ErrorBoundary
       fallback={(error, reset) => (
@@ -34,7 +15,7 @@ export function App(): React.ReactElement {
         </div>
       )}
     >
-      <TaxpayerDetailPage></TaxpayerDetailPage>
+      <RouterProvider router={router}></RouterProvider>
     </ErrorBoundary>
   );
 }
