@@ -11,6 +11,7 @@
 // consumer already has a not-authenticated code path.
 export const JWT_STORAGE_KEY = 'uc:jwt';
 
+/** Reads the stored JWT, or `null` if absent or `localStorage` is unavailable. */
 export function getStoredJwt(): string | null {
   try {
     return window.localStorage.getItem(JWT_STORAGE_KEY);
@@ -19,6 +20,7 @@ export function getStoredJwt(): string | null {
   }
 }
 
+/** Persists `token` as the stored JWT; a no-op if `localStorage` is unavailable. */
 export function setStoredJwt(token: string): void {
   try {
     window.localStorage.setItem(JWT_STORAGE_KEY, token);

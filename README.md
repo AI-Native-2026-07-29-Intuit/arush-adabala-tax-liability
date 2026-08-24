@@ -197,6 +197,96 @@ that a mid-stream `searchText` change cancels the prior pending timer
 instead of racing it. `pnpm typecheck && pnpm lint && pnpm test && pnpm build`
 all pass locally, and the W4 D1 GitHub Action re-runs unmodified.
 
+## Week 4 Day 3 — Apollo Client, TanStack Query, React Router v7 & MSW
+
+`taxcalc-web/` cuts over from the W4 D1/D2 mock-JSON stub to the two live
+backends. `apollo/client.ts` builds an `ApolloClient` (pinned to `^3.11`,
+not the newly-released v4, to stay on the APIs this deliverable's spec
+assumes) with a typed `InMemoryCache` (`Taxpayer: { keyFields: ['id'] }`)
+and a `setContext` auth link that attaches `Authorization: Bearer <jwt>`
+from `localStorage`. `codegen.ts` (`@graphql-codegen/client-preset`, with
+`config: { useTypeImports: true }` so its output satisfies
+`verbatimModuleSyntax`) points its `schema` at the backend's own checked-in
+`src/main/resources/graphql/schema.graphqls` rather than introspecting a
+running `/graphql` server — Docker wasn't available while building this —
+and generates typed `TypedDocumentNode`s for two new documents,
+`queries/LatestTaxpayers.graphql` and `queries/SummarizeTaxpayer.graphql`,
+consumed directly by `useQuery`/`useMutation`'s own generic inference
+rather than through a separate generated-hooks layer.
+
+`pages.TaxpayerListPage` renders the `latestTaxpayers` query's
+loading/error/data branches (the schema's `Taxpayer` type only has
+`id`/`tags`/`lines` — no `name` or `updatedAt`, unlike the generic
+deliverable spec's reference shape). `pages.TaxpayerSummaryPage` calls the
+`summarizeTaxpayer` mutation with an `optimisticResponse` tagged
+`__typename: 'TaxpayerSummary'` so Apollo's cache can normalize the
+eventual server write — but empirically, `useMutation`'s own `data` never
+reflects that optimistic value; `optimisticResponse` only updates cache
+entries a `useQuery` elsewhere is watching, and `TaxpayerSummary` has no
+such query (it's reachable only via this mutation). The page's "instant
+placeholder" is keyed off `loading` (which *does* flip synchronously)
+instead, with `optimisticResponse` left in place for whichever future
+consumer actually queries this data.
+
+`hooks.useGetTaxLiabilityRest` is a TanStack Query hook (`queryKey:
+['taxcalc', id]`, `enabled: Boolean(id)`, one-minute `staleTime` matching
+the backend's Redis cache TTL) against the real `GET
+/api/v1/taxpayers/{id}`. Its `TaxpayerRest` type mirrors
+`TaxpayerReadModel`'s actual JSON shape (`id`/`displayName`/`filingStatus`/
+`homeJurisdiction`/`createdAt`/`liabilities`/`tags`), not the deliverable
+spec's generic placeholder fields — and its `taxableAmount`/
+`liabilityAmount` are typed `number`, not the BigDecimal-as-string
+convention the rest of this codebase uses, because no `@JsonFormat` is
+configured on the backend and Jackson serializes `BigDecimal` as a JSON
+number by default. A 404 resolves to `null` data instead of throwing, so
+`pages.TaxpayerDetailPage`'s W4 D2 `useReducer` state machine keeps
+treating "not found" as its own `empty` state rather than folding it into
+`error` — the page now reads `:id` via `useParams` and drives that same
+reducer off the query's `data`/`isLoading`/`isError` instead of its own
+fetch effect. `router.tsx` (`createBrowserRouter`) replaces the W4 D1/D2
+hash-routing placeholder: a `ProtectedLayout` redirects to `/login` when
+`uc:jwt` is absent from `localStorage`, otherwise renders its children via
+`Outlet`; `pages.LoginPage` is a stub that writes a fake token and
+navigates to `/taxpayers` — real validation happens at the backend's own
+OAuth2 resource server, not this client-side presence check.
+
+Reading/writing `uc:jwt` moved into a shared `lib/jwtStorage.ts`
+(`getStoredJwt`/`setStoredJwt`) used by the Apollo auth link, the REST
+hook, `ProtectedLayout`, and `LoginPage` — extracted after discovering
+`window.localStorage` is genuinely `undefined` under this Node 20+/jsdom/
+Vitest combination (the same issue `useTaxpayerFilterStore.ts`'s
+`safeLocalStorage` already worked around), so every read/write goes
+through one try/catch instead of four ad-hoc ones. `hooks/useTaxpayer.ts`,
+`types/taxpayer.ts`, and `public/mocks/taxpayer.json` are deleted: dead
+code once `TaxpayerDetailPage` fetches live data, exactly as the W4 D2
+notes above flagged they would be.
+
+`test/handlers.ts` + `test/server.ts` add MSW as the network seam for
+Vitest: `graphql.query`/`graphql.mutation` handlers back the two Apollo
+operations (matched by operation name, independent of endpoint URL) and
+an `http.get` handler backs the REST endpoint, all installed via
+`setupServer(...).listen({ onUnhandledRequest: 'error' })` so an
+un-mocked call fails the test instead of hanging. Getting this working
+under jsdom took one real fix: jsdom ships its own `AbortController`/
+`AbortSignal` (the DOM spec requires them), distinct from the class
+Node's native `fetch` — which MSW's node interceptor patches — validates
+a `signal` against internally; Apollo's `HttpLink` builds an
+`AbortController` per request for cancellation, and passing its `.signal`
+through tripped "Expected signal to be an instance of AbortSignal" on
+every Apollo-backed test. `server.ts`'s `beforeAll` wraps the
+interceptor's already-patched `fetch` to strip an incompatible `signal`
+before it reaches the real request — no test here exercises cancellation,
+so this is simpler than faking it across two `AbortSignal` realms. New
+specs cover `TaxpayerListPage`, `TaxpayerSummaryPage` (including the
+loading-placeholder timing, using a deliberate MSW `delay(200)` so the
+test has a real window to observe it before the mocked response resolves),
+`ProtectedLayout` (redirect vs. pass-through, using a local
+`vi.stubGlobal('localStorage', ...)` polyfill for the same jsdom-undefined
+reason), and `useGetTaxLiabilityRest` (success, `enabled: Boolean(id)`,
+and the 404→`null` case) — plus a matching 404 case in
+`TaxpayerDetailPage.test.tsx`. 21 Vitest tests now pass, up from 13.
+`pnpm typecheck && pnpm lint && pnpm test && pnpm build` all pass locally.
+
 ## Build and Test
 
 ```bash
