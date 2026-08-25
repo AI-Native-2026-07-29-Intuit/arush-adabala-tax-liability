@@ -297,6 +297,97 @@ and the 404→`null` case) — plus a matching 404 case in
 `TaxpayerDetailPage.test.tsx`. 21 Vitest tests now pass, up from 13.
 `pnpm typecheck && pnpm lint && pnpm test && pnpm build` all pass locally.
 
+## Week 4 Day 4 — Vercel AI SDK, Streaming Responses, Streamed Tool Calls & MSW SSE Tests
+
+`taxcalc-web` replaces W4 D3's blocking `summarizeTaxpayer` mutation with a
+streaming chat assistant. `server/` is new: a thin Hono app (`pnpm server`,
+`:3001`) whose one route, `server/api/chat.ts`, holds the only code in this
+app that talks to an LLM. It calls `streamText` against
+`createOpenAICompatible({ baseURL: 'http://localhost:8080/ai' })` — the W3
+D4 Spring AI backend's OpenAI-compatible endpoint, never a real provider —
+and returns `result.toDataStreamResponse()` with explicit
+`text/event-stream` / `no-cache, no-transform` / `X-Accel-Buffering: no`
+headers, forwarding the incoming request's `AbortSignal` so a client
+disconnect cancels the upstream call too. `vite.config.ts`'s `server.proxy`
+forwards the browser's `/api/chat` to that Hono port, so `TaxpayerChatPanel`
+(mounted at `/taxpayers/:id/chat`) never needs its own base URL.
+
+`ai`/`@ai-sdk/react`/`@ai-sdk/openai-compatible` are pinned to the `4.x`/
+`1.x`/`0.x` line respectively — `pnpm add` without a version resolved `ai`
+7.0.79, whose `useChat` is a rewritten `Chat`-class API with no
+`input`/`handleSubmit`/`isLoading`/`toolInvocations`, none of which match
+this deliverable's spec; same pinning rationale W4 D3's README section gave
+for Apollo Client. `@hono/node-server` (needed for `serve()` to actually
+listen under Node — Hono itself is runtime-agnostic and the lesson's
+package list omitted it) and `tsx` (`pnpm server` runs `tsx watch
+server/index.ts`) round out the new dependencies.
+
+Task 2 wires `TaxpayerChatPanel`'s Stop (`stop()`, disabled unless
+`isLoading`), Regenerate (`reload()`), a `role="status"` spinner, a
+`role="alert"` error pane, and scroll-to-bottom on every `messages` change.
+`chat.ts` pairs this with a `getErrorMessage` handler: `toDataStreamResponse`
+already turns a stream-time failure into a clean SSE error frame rather
+than a torn connection, but its default message is the generic "An error
+occurred." — `getErrorMessage` logs the real cause (a `RetryError` wrapping
+three `ECONNREFUSED` attempts, in dev, since no Spring AI container is
+running or checked into this repo) server-side and returns a client-safe
+message instead, verified with `curl` against the bare proxy before the
+first `TaxpayerChatPanel` test existed.
+
+Task 3 adds `server/api/chat-tools.ts`: `lookupTaxpayer`/`estimateLiability`,
+zod-typed `ai` tools executed server-side against the W3 D2 REST backend
+(the browser never calls that backend through this path), wired into
+`streamText` via `tools`/`maxSteps: 3`, with the system prompt taught when
+to call each rather than let the model fabricate taxpayer data.
+`estimateLiability`'s `GET /api/v1/taxpayers?year=` target doesn't exist on
+the current `TaxpayerController` (only `GET /{id}` does) — the same
+"prerequisite piece isn't actually built yet" situation the W3 D4 Spring AI
+`/ai/chat` endpoint and a docker-compose for it are in; neither exists
+anywhere in this repo's history, so today's work targets them as documented
+contracts rather than a live integration. `ToolCallCard` renders one
+`ToolInvocation`'s name/args/result inline, mapped from each message's
+`toolInvocations`. `useTaxpayerChatStore` (Zustand + `persist`, key
+`uc:taxpayer-chat`) seeds `useChat`'s `initialMessages` on mount and is
+written to only from `onFinish` — never from a per-token callback, which
+would both tank streaming FPS and let a reload mid-stream rehydrate a
+message that never finished; confirmed against the `@ai-sdk/ui-utils`
+source that an aborted request never reaches `onFinish` at all, so Stop
+can't leak a partial message into storage by construction. Wiring this up
+surfaced a real bug: `useTaxpayerChatStore`'s `persist` initially wrote
+nowhere, because `window.localStorage` is genuinely `undefined` under this
+Node/jsdom/Vitest combination (confirmed by direct probe) — the exact
+failure `useTaxpayerFilterStore`'s local `safeLocalStorage` fallback
+already worked around. Extracted that fallback into `src/lib/
+safeLocalStorage.ts` and pointed both stores at it, rather than leaving the
+new one silently broken.
+
+Task 4's `src/test/sse-handlers.ts` hand-encodes the Vercel AI SDK's
+data-stream protocol (`0` text delta, `9`/`a` tool call/result, `d` finish
+message — read directly from `@ai-sdk/ui-utils`'s own parser rather than
+guessed, since a wrong prefix fails silently client-side instead of raising
+a test error) so the whole chat UI is testable with no Hono process and no
+Spring AI backend running; spread into `test/handlers.ts` alongside the
+existing REST/GraphQL handlers. Four new spec files add 10 tests:
+`TaxpayerChatPanel.test.tsx` (streamed-token rendering, Regenerate firing a
+second POST, Stop's button wiring), `TaxpayerChatPanel.error.test.tsx` (a
+`server.use` 500 override rendering the `role="alert"` pane),
+`ToolCallCard.test.tsx` (all three `ToolInvocation` states), and
+`useTaxpayerChatStore.test.ts` (a real persist round-trip: append a
+message, build a second store against the same storage, assert it
+rehydrates). Genuinely verifying that Stop interrupts an in-flight stream
+turned out not to be possible here: it hits the identical jsdom
+`AbortController`/`AbortSignal` cross-realm gap the W4 D3 section above
+documents for Apollo's `HttpLink`, and `test/server.ts`'s existing fetch
+wrapper — needed so MSW's interceptor doesn't reject the incompatible
+signal outright — strips `init.signal` from every request before it
+reaches the network, `useChat`'s included. That's a test-environment
+limitation, not a product bug (a real browser has one `AbortController`
+class), so it's documented in the test file rather than covered by a
+flaky, timing-dependent assertion. `Element.scrollIntoView` also needed a
+one-line stub in `test/setup.ts` — jsdom does no layout, so it's simply
+unimplemented. 32 Vitest tests now pass, up from 22. `pnpm typecheck &&
+pnpm lint && pnpm test && pnpm build` all pass locally.
+
 ## Build and Test
 
 ```bash
