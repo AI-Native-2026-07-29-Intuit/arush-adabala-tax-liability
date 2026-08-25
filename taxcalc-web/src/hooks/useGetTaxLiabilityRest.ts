@@ -8,9 +8,8 @@ export type EmbeddedLiabilityRest = {
   readonly bracketId: string;
   // Backend BigDecimal fields serialize as JSON numbers (no
   // @JsonFormat(shape = STRING) is configured), so these are `number`
-  // here rather than the string-per-BigDecimal convention the rest of
-  // this codebase otherwise follows - see types/taxpayer.ts for the
-  // string-typed version used by the still-mocked TaxpayerDetailPage data.
+  // rather than the string-per-BigDecimal convention this project's
+  // CLAUDE.md establishes for the Java side.
   readonly taxableAmount: number;
   readonly liabilityAmount: number;
   readonly computedAt: string; // Instant, ISO-8601
