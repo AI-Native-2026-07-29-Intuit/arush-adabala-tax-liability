@@ -55,7 +55,7 @@ src/pages/TaxpayerListPage.tsx      Apollo useQuery over latestTaxpayers
 src/pages/TaxpayerSummaryPage.tsx   Apollo useMutation over summarizeTaxpayer, optimistic placeholder
 src/pages/TaxpayerDetailPage.tsx        detail page, driven by a useReducer state machine
 src/pages/TaxpayerDetailPage.reducer.ts pure reducer + discriminated-union DetailState
-src/App.tsx                         RouterProvider + ErrorBoundary wiring
+src/main.tsx                        entry point: Apollo/Query providers wrap ErrorBoundary + RouterProvider
 src/test/handlers.ts, server.ts     MSW request handlers + setupServer lifecycle
 src/test/                           Vitest setup + unit/smoke tests
 ```
