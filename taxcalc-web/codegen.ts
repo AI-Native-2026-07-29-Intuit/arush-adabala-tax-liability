@@ -19,6 +19,16 @@ const config: CodegenConfig = {
       // `tsc` rejects them.
       config: { useTypeImports: true },
     },
+    // The client preset above deliberately doesn't generate named hooks
+    // (Apollo's own useQuery/useMutation infer everything they need from
+    // a TypedDocumentNode) - but pages here call useLatestTaxpayersQuery
+    // and useSummarizeTaxpayerMutation directly, so a second output using
+    // the classic typescript/typescript-operations/typescript-react-apollo
+    // plugin trio generates those alongside the client preset's own files.
+    'src/gql/generated/hooks.ts': {
+      plugins: ['typescript', 'typescript-operations', 'typescript-react-apollo'],
+      config: { useTypeImports: true, withHooks: true },
+    },
   },
 };
 

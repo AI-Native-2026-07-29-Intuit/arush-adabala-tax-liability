@@ -1,7 +1,6 @@
 // src/pages/TaxpayerSummaryPage.tsx
-import { useMutation } from '@apollo/client';
 import { useParams } from 'react-router-dom';
-import { SummarizeTaxpayerDocument } from '../gql/generated/graphql';
+import { useSummarizeTaxpayerMutation } from '../gql/generated/hooks';
 
 const PENDING_PLACEHOLDER = 'PENDING';
 
@@ -27,7 +26,7 @@ const PLACEHOLDER_SUMMARY = {
  */
 export function TaxpayerSummaryPage(): React.ReactElement {
   const { id = '' } = useParams<{ id: string }>();
-  const [summarize, { loading, data, error }] = useMutation(SummarizeTaxpayerDocument, {
+  const [summarize, { loading, data, error }] = useSummarizeTaxpayerMutation({
     variables: { id },
     optimisticResponse: {
       summarizeTaxpayer: { __typename: 'TaxpayerSummary', ...PLACEHOLDER_SUMMARY },

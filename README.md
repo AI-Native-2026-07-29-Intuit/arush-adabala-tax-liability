@@ -204,29 +204,39 @@ backends. `apollo/client.ts` builds an `ApolloClient` (pinned to `^3.11`,
 not the newly-released v4, to stay on the APIs this deliverable's spec
 assumes) with a typed `InMemoryCache` (`Taxpayer: { keyFields: ['id'] }`)
 and a `setContext` auth link that attaches `Authorization: Bearer <jwt>`
-from `localStorage`. `codegen.ts` (`@graphql-codegen/client-preset`, with
-`config: { useTypeImports: true }` so its output satisfies
-`verbatimModuleSyntax`) points its `schema` at the backend's own checked-in
+from `localStorage`. `codegen.ts` (`config: { useTypeImports: true }` on
+both outputs below, so generated code satisfies `verbatimModuleSyntax`)
+points its `schema` at the backend's own checked-in
 `src/main/resources/graphql/schema.graphqls` rather than introspecting a
-running `/graphql` server — Docker wasn't available while building this —
-and generates typed `TypedDocumentNode`s for two new documents,
-`queries/LatestTaxpayers.graphql` and `queries/SummarizeTaxpayer.graphql`,
-consumed directly by `useQuery`/`useMutation`'s own generic inference
-rather than through a separate generated-hooks layer.
+running `/graphql` server — Docker wasn't available while building this.
+It writes two outputs from the same two documents
+(`queries/LatestTaxpayers.graphql`, `queries/SummarizeTaxpayer.graphql`):
+`src/gql/generated/` via `@graphql-codegen/client-preset` (typed
+`TypedDocumentNode`s + fragment masking), and `src/gql/generated/hooks.ts`
+via the classic `typescript`/`typescript-operations`/
+`typescript-react-apollo` plugin trio, which generates the named
+`useLatestTaxpayersQuery`/`useSummarizeTaxpayerMutation` hooks the pages
+below actually call — the client preset alone doesn't generate hooks by
+design (Apollo's own `useQuery`/`useMutation` are meant to infer
+everything from a `TypedDocumentNode` directly), so the second output
+exists specifically to get named-hook call sites instead of that pattern.
 
 `pages.TaxpayerListPage` renders the `latestTaxpayers` query's
 loading/error/data branches (the schema's `Taxpayer` type only has
 `id`/`tags`/`lines` — no `name` or `updatedAt`, unlike the generic
-deliverable spec's reference shape). `pages.TaxpayerSummaryPage` calls the
+deliverable spec's reference shape) as `<a href="/taxpayers/{id}">`
+anchors, matching the deliverable's literal markup rather than a
+React-Router `<Link>` (a full page reload on click, traded for hitting
+the spec exactly). `pages.TaxpayerSummaryPage` calls the
 `summarizeTaxpayer` mutation with an `optimisticResponse` tagged
 `__typename: 'TaxpayerSummary'` so Apollo's cache can normalize the
-eventual server write — but empirically, `useMutation`'s own `data` never
-reflects that optimistic value; `optimisticResponse` only updates cache
-entries a `useQuery` elsewhere is watching, and `TaxpayerSummary` has no
-such query (it's reachable only via this mutation). The page's "instant
-placeholder" is keyed off `loading` (which *does* flip synchronously)
-instead, with `optimisticResponse` left in place for whichever future
-consumer actually queries this data.
+eventual server write — but empirically, the mutation hook's own `data`
+never reflects that optimistic value; `optimisticResponse` only updates
+cache entries a `useQuery` elsewhere is watching, and `TaxpayerSummary`
+has no such query (it's reachable only via this mutation). The page's
+"instant placeholder" is keyed off `loading` (which *does* flip
+synchronously) instead, with `optimisticResponse` left in place for
+whichever future consumer actually queries this data.
 
 `hooks.useGetTaxLiabilityRest` is a TanStack Query hook (`queryKey:
 ['taxcalc', id]`, `enabled: Boolean(id)`, one-minute `staleTime` matching

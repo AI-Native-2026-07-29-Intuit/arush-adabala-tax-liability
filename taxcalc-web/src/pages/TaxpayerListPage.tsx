@@ -1,16 +1,9 @@
 // src/pages/TaxpayerListPage.tsx
-import { useQuery } from '@apollo/client';
-import { Link } from 'react-router-dom';
-import { LatestTaxpayersDocument } from '../gql/generated/graphql';
+import { useLatestTaxpayersQuery } from '../gql/generated/hooks';
 
-/**
- * Lists the most recently updated taxpayers via the `latestTaxpayers`
- * GraphQL query. `LatestTaxpayersDocument` is a `TypedDocumentNode`, so
- * `useQuery` infers its `data`/variables shape without a separate
- * generated hook - the same pattern `TaxpayerSummaryPage`'s mutation uses.
- */
+/** Lists the most recently updated taxpayers via the `latestTaxpayers` GraphQL query. */
 export function TaxpayerListPage(): React.ReactElement {
-  const { loading, error, data } = useQuery(LatestTaxpayersDocument, {
+  const { loading, error, data } = useLatestTaxpayersQuery({
     variables: { limit: 20 },
   });
 
@@ -24,7 +17,7 @@ export function TaxpayerListPage(): React.ReactElement {
     <ul aria-label="taxpayer-list">
       {rows.map((r) => (
         <li key={r.id}>
-          <Link to={`/taxpayers/${r.id}`}>{r.id}</Link>
+          <a href={`/taxpayers/${r.id}`}>{r.id}</a>
           {r.tags.length > 0 && <span> ({r.tags.join(', ')})</span>}
         </li>
       ))}

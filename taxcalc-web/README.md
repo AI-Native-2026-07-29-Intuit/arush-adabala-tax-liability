@@ -41,7 +41,7 @@ resolve to network errors, which is expected outside a full backend setup.
 ```
 codegen.ts                          GraphQL Codegen config (schema: the backend's checked-in .graphqls file)
 src/queries/*.graphql               GraphQL documents codegen turns into typed documents
-src/gql/generated/                  codegen output (generated - do not hand-edit)
+src/gql/generated/                  codegen output (generated - do not hand-edit; hooks.ts has useLatestTaxpayersQuery/useSummarizeTaxpayerMutation)
 src/apollo/client.ts                ApolloClient: typed InMemoryCache + JWT setContext auth link
 src/queryClient.ts                  TanStack QueryClient for REST traffic
 src/lib/jwtStorage.ts               shared getStoredJwt/setStoredJwt (localStorage, try/catch)
