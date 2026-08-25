@@ -1,7 +1,8 @@
 // src/stores/useTaxpayerChatStore.ts
 import type { Message } from 'ai';
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
+import { safeLocalStorage } from '../lib/safeLocalStorage';
 
 interface TaxpayerChatStoreState {
   readonly messages: readonly Message[];
@@ -18,6 +19,13 @@ interface TaxpayerChatStoreState {
  * `persist` middleware dozens of times a second, tanking render FPS while
  * streaming, and would let a page reload mid-stream rehydrate a message
  * that never actually finished.
+ *
+ * Uses `safeLocalStorage` (not `persist`'s own `window.localStorage`
+ * default) for the same reason `useTaxpayerFilterStore` does: under this
+ * Node/jsdom/Vitest combination `window.localStorage` is genuinely
+ * `undefined`, which would otherwise leave `persist` silently unable to
+ * write - not merely untested, but genuinely broken in dev too, since
+ * nothing else here would surface the gap.
  */
 export const useTaxpayerChatStore = create<TaxpayerChatStoreState>()(
   persist(
@@ -27,6 +35,6 @@ export const useTaxpayerChatStore = create<TaxpayerChatStoreState>()(
         set((state) => ({ messages: [...state.messages, message] })),
       clear: () => set({ messages: [] }),
     }),
-    { name: 'uc:taxpayer-chat' },
+    { name: 'uc:taxpayer-chat', storage: createJSONStorage(() => safeLocalStorage) },
   ),
 );

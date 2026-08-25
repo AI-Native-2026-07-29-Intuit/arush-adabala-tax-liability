@@ -1,7 +1,7 @@
 // src/stores/useTaxpayerFilterStore.ts
 import { create } from 'zustand';
 import { createJSONStorage, devtools, persist } from 'zustand/middleware';
-import type { StateStorage } from 'zustand/middleware';
+import { safeLocalStorage } from '../lib/safeLocalStorage';
 
 type FilterState = {
   readonly filingStatusFilter: ReadonlyArray<string>;
@@ -17,40 +17,6 @@ type FilterActions = {
   readonly setThreshold: (next: number) => void;
   readonly setIncludeArchived: (next: boolean) => void;
   readonly reset: () => void;
-};
-
-const memoryFallback = new Map<string, string>();
-
-/**
- * Falls back to an in-memory Map when `window.localStorage` is missing or
- * throws — Safari private browsing raises `SecurityError` on `setItem`,
- * and (hit while building this store) Node 20+'s experimental global
- * `localStorage` can shadow jsdom's working implementation under Vitest,
- * leaving `window.localStorage` `undefined`. Either way the filter state
- * should degrade to session-only rather than crash the app.
- */
-const safeLocalStorage: StateStorage = {
-  getItem: (name) => {
-    try {
-      return window.localStorage.getItem(name);
-    } catch {
-      return memoryFallback.get(name) ?? null;
-    }
-  },
-  setItem: (name, value) => {
-    try {
-      window.localStorage.setItem(name, value);
-    } catch {
-      memoryFallback.set(name, value);
-    }
-  },
-  removeItem: (name) => {
-    try {
-      window.localStorage.removeItem(name);
-    } catch {
-      memoryFallback.delete(name);
-    }
-  },
 };
 
 const INITIAL: FilterState = {
