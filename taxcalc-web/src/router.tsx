@@ -5,6 +5,7 @@ import { LoginPage } from './pages/LoginPage';
 import { TaxpayerListPage } from './pages/TaxpayerListPage';
 import { TaxpayerDetailPage } from './pages/TaxpayerDetailPage';
 import { TaxpayerSummaryPage } from './pages/TaxpayerSummaryPage';
+import { TaxpayerChatPanel } from './pages/TaxpayerChatPanel';
 
 /**
  * Client-side route guard: redirects to `/login` when `uc:jwt` is absent
@@ -32,6 +33,7 @@ export const router = createBrowserRouter([
       { path: '/taxpayers', element: <TaxpayerListPage /> },
       { path: '/taxpayers/:id', element: <TaxpayerDetailPage /> },
       { path: '/taxpayers/:id/summary', element: <TaxpayerSummaryPage /> },
+      { path: '/taxpayers/:id/chat', element: <TaxpayerChatPanel /> },
     ],
   },
 ]);
