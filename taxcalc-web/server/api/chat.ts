@@ -24,6 +24,22 @@ const SYSTEM_PROMPT =
   'tool instead of guessing - never fabricate an id, amount, or filing status.';
 
 /**
+ * Maps any failure from the upstream Spring AI call - connection refused
+ * because the container isn't running, a 4xx/5xx status, a malformed
+ * response - onto one client-safe SSE error frame instead of a torn
+ * connection. `toDataStreamResponse` already catches stream-time failures
+ * and emits an error data-stream chunk (`useChat`'s `error` field), but its
+ * default `getErrorMessage` returns the generic "An error occurred." and
+ * swallows the real cause; this logs that cause server-side and returns a
+ * message that's actually useful in the `role="alert"` pane the client
+ * renders it in.
+ */
+function toClientErrorMessage(error: unknown): string {
+  console.error('chat proxy: upstream call failed', error);
+  return 'The tax assistant is temporarily unavailable. Please try again in a moment.';
+}
+
+/**
  * `POST /api/chat` (mounted at that prefix by `server/index.ts`; this
  * sub-app itself only defines `/`). Reads `{ messages }` from the request
  * body, streams the model's reply back as Server-Sent Events via
@@ -47,6 +63,7 @@ export const chat = new Hono().post('/', async (c) => {
   });
 
   return result.toDataStreamResponse({
+    getErrorMessage: toClientErrorMessage,
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
