@@ -30,11 +30,14 @@ describe('TaxpayerSummaryPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Summarize' }));
 
-    // The MSW handler delays its response (see handlers.ts) precisely so
-    // this optimistic placeholder has a real window to be observed before
-    // the server result replaces it. filingStatus and riskBand both carry
-    // the same placeholder text.
-    await waitFor(() => expect(screen.getAllByText('PENDING')).toHaveLength(2));
+    // `loading` flips true synchronously inside useMutation's execute(),
+    // before the network call is even made - so the placeholder is
+    // already in the DOM the instant fireEvent.click returns, with no
+    // waitFor needed. filingStatus and riskBand both carry the same
+    // placeholder text. The MSW handler still delays its response (see
+    // handlers.ts) so the two waitFor calls below have a real window
+    // between this synchronous placeholder and the real result landing.
+    expect(screen.getAllByText('PENDING')).toHaveLength(2);
 
     await waitFor(() => expect(screen.getByText('SINGLE')).toBeInTheDocument());
     expect(screen.getByText('LOW')).toBeInTheDocument();
