@@ -1,0 +1,16 @@
+# src/queries/SummarizeTaxpayer.graphql
+#
+# Backs TaxpayerSummaryPage's optimistic-update mutation. `TaxpayerSummary`
+# has no `id` field in the schema, so Apollo's cache normalizes the result
+# by embedding it under the parent `summarizeTaxpayer` field rather than by
+# a top-level cache key - `__typename` is still selected so the optimistic
+# placeholder and the eventual server result normalize as the same type.
+mutation SummarizeTaxpayer($id: ID!) {
+  summarizeTaxpayer(id: $id) {
+    __typename
+    filingStatus
+    totalLiability
+    jurisdictionCount
+    riskBand
+  }
+}
