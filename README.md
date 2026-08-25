@@ -286,7 +286,9 @@ through tripped "Expected signal to be an instance of AbortSignal" on
 every Apollo-backed test. `server.ts`'s `beforeAll` wraps the
 interceptor's already-patched `fetch` to strip an incompatible `signal`
 before it reaches the real request — no test here exercises cancellation,
-so this is simpler than faking it across two `AbortSignal` realms. New
+so this is simpler than faking it across two `AbortSignal` realms. (W4 D4
+later replaces the strip-and-drop with a real fix once a test needs
+genuine cancellation - see that section.) New
 specs cover `TaxpayerListPage`, `TaxpayerSummaryPage` (including the
 loading-placeholder timing, using a deliberate MSW `delay(200)` so the
 test has a real window to observe it before the mocked response resolves),
@@ -379,28 +381,56 @@ Task 4's `src/test/sse-handlers.ts` hand-encodes the Vercel AI SDK's
 data-stream protocol (`0` text delta, `9`/`a` tool call/result, `d` finish
 message — read directly from `@ai-sdk/ui-utils`'s own parser rather than
 guessed, since a wrong prefix fails silently client-side instead of raising
-a test error) so the whole chat UI is testable with no Hono process and no
-Spring AI backend running; spread into `test/handlers.ts` alongside the
-existing REST/GraphQL handlers. Four new spec files add 10 tests:
-`TaxpayerChatPanel.test.tsx` (streamed-token rendering, Regenerate firing a
-second POST, Stop's button wiring), `TaxpayerChatPanel.error.test.tsx` (a
-`server.use` 500 override rendering the `role="alert"` pane),
-`ToolCallCard.test.tsx` (all three `ToolInvocation` states), and
-`useTaxpayerChatStore.test.ts` (a real persist round-trip: append a
+a test error, and encoded with one shared `TextEncoder` reused per frame)
+so the whole chat UI is testable with no Hono process and no Spring AI
+backend running; spread into `test/handlers.ts` alongside the existing
+REST/GraphQL handlers. Four spec files cover: `TaxpayerChatPanel.test.tsx`
+(streamed-token rendering with an explicit `data-role="assistant"` check,
+Stop mid-stream, Regenerate firing a second POST, a tool-call turn
+rendering a `ToolCallCard` through `partial-call → call → result`, reload
+rehydration, Send/Regenerate disabled-state wiring, and the
+`scrollIntoView` effect), `TaxpayerChatPanel.error.test.tsx` (both a `5xx`
+`server.use` override and a network-level `HttpResponse.error()` override,
+each rendering the `role="alert"` pane), `ToolCallCard.test.tsx` (all three
+`ToolInvocation` states), and `useTaxpayerChatStore.test.ts` (insertion
+order across multiple appends, plus a real persist round-trip: append a
 message, build a second store against the same storage, assert it
-rehydrates). Genuinely verifying that Stop interrupts an in-flight stream
-turned out not to be possible here: it hits the identical jsdom
-`AbortController`/`AbortSignal` cross-realm gap the W4 D3 section above
-documents for Apollo's `HttpLink`, and `test/server.ts`'s existing fetch
-wrapper — needed so MSW's interceptor doesn't reject the incompatible
-signal outright — strips `init.signal` from every request before it
-reaches the network, `useChat`'s included. That's a test-environment
-limitation, not a product bug (a real browser has one `AbortController`
-class), so it's documented in the test file rather than covered by a
-flaky, timing-dependent assertion. `Element.scrollIntoView` also needed a
-one-line stub in `test/setup.ts` — jsdom does no layout, so it's simply
-unimplemented. 32 Vitest tests now pass, up from 22. `pnpm typecheck &&
-pnpm lint && pnpm test && pnpm build` all pass locally.
+rehydrates). `Element.scrollIntoView` needed a one-line stub in
+`test/setup.ts` — jsdom does no layout, so it's simply unimplemented.
+
+Genuinely verifying that Stop interrupts an in-flight stream looked
+impossible at first: it hits the identical jsdom `AbortController`/
+`AbortSignal` cross-realm gap the W4 D3 section above documents for
+Apollo's `HttpLink`, and `test/server.ts`'s existing fetch wrapper —
+needed so MSW's interceptor doesn't reject the incompatible signal
+outright — stripped `init.signal` from every request before it reached the
+network, disabling cancellation entirely rather than just working around
+the crash. Tracing the actual error (undici's webidl `AbortSignal`
+converter, `MakeTypeAssertion`, doing a strict `instanceof` check against
+its own module-scoped reference — read from `undici/lib/web/webidl/
+index.js`, not assumed) confirmed the two classes can never be unified
+from test code: vitest's jsdom environment setup hardcodes
+`AbortController`/`AbortSignal` into the fixed list of globals it copies
+from `window`, unconditionally overwriting Node's native ones for every
+test file, with no supported opt-out. So `server.ts`'s wrapper now does
+something different: strip the incompatible signal before the real fetch
+call as before, but reimplement cancellation itself at the response
+body-stream level — once the caller's real signal fires, the wrapped
+stream errors with a plain `Error` named `'AbortError'`, the only thing
+`@ai-sdk/provider-utils`'s `isAbortError` actually checks
+(`error instanceof Error && error.name === 'AbortError'`, no class-identity
+check at all). That's enough for `useChat`'s `stop()` — and Apollo's own
+cancellation, retroactively — to genuinely interrupt an in-flight request
+under test, not just document that it can't be verified. Confirmed
+deterministic across repeated runs and, since the fix touches shared test
+infrastructure rather than anything Node-version-specific, re-verified
+under Node 20.20.2 (installed locally via `brew install node@20`,
+keg-only) to match `.github/workflows/web-ci.yml`'s pinned version exactly
+rather than only the newer Node this was developed against. 40 Vitest
+tests now pass, up from 22, hitting the deliverable's "≥ 40" target.
+`pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm
+test && pnpm build` — the exact sequence `.github/workflows/web-ci.yml`
+runs — all pass locally, under both Node versions.
 
 ## Build and Test
 

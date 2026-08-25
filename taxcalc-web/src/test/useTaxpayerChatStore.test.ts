@@ -27,6 +27,13 @@ describe('useTaxpayerChatStore', () => {
     expect(useTaxpayerChatStore.getState().messages).toEqual([ASSISTANT_MESSAGE]);
   });
 
+  it('appendAssistantMessage preserves insertion order across multiple calls', () => {
+    const second: Message = { id: 'msg-2', role: 'assistant', content: 'second reply.' };
+    useTaxpayerChatStore.getState().appendAssistantMessage(ASSISTANT_MESSAGE);
+    useTaxpayerChatStore.getState().appendAssistantMessage(second);
+    expect(useTaxpayerChatStore.getState().messages).toEqual([ASSISTANT_MESSAGE, second]);
+  });
+
   it('clear() empties the messages array', () => {
     useTaxpayerChatStore.getState().appendAssistantMessage(ASSISTANT_MESSAGE);
     useTaxpayerChatStore.getState().clear();

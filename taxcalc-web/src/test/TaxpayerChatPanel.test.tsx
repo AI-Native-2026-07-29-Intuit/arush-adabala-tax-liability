@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { Message } from 'ai';
 import { http, HttpResponse } from 'msw';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TaxpayerChatPanel } from '../pages/TaxpayerChatPanel';
 import { useTaxpayerChatStore } from '../stores/useTaxpayerChatStore';
 import { server } from './server';
@@ -45,34 +45,58 @@ describe('TaxpayerChatPanel', () => {
     await waitFor(() => expect(screen.getByText(/stub taxpayer reply\./)).toBeInTheDocument());
     await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
 
+    const assistantItem = screen.getByText(/stub taxpayer reply\./).closest('li');
+    expect(assistantItem).toHaveAttribute('data-role', 'assistant');
+
     await waitFor(() => expect(useTaxpayerChatStore.getState().messages).toHaveLength(1));
     expect(useTaxpayerChatStore.getState().messages[0]?.content).toBe('stub taxpayer reply.');
   });
 
   /**
    * Genuinely verifying that Stop interrupts an in-flight network stream
-   * isn't possible under this Node/jsdom/MSW combination: jsdom's
-   * AbortController/AbortSignal are a separate, JS-implemented class from
-   * the one Node's native `Request` constructor validates `init.signal`
-   * against, and once jsdom's test environment overwrites
-   * `globalThis.AbortController`, there is no way to recover Node's
-   * original class reference from test code - which is exactly why
-   * `test/server.ts`'s `beforeAll` strips `init.signal` from every fetch
-   * call before it reaches MSW's interceptor (otherwise MSW rejects it
-   * outright with "Expected signal to be an instance of AbortSignal").
-   * With the signal never reaching the real fetch call, aborting can't
-   * interrupt an already-issued request in this test environment - a
-   * test-infra gap, not a product bug (a real browser has one
-   * AbortController class, so this problem doesn't exist there).
-   *
-   * What's still genuinely verifiable here: the button wiring itself
-   * (disabled until a request is in flight, calling `stop()` doesn't
-   * throw), and - at the unit level, in useTaxpayerChatStore.test.ts plus
-   * by inspection of TaxpayerChatPanel.tsx - that `appendAssistantMessage`
-   * has exactly one call site, `onFinish`, which the ui-utils source
-   * confirms never fires for an aborted request.
+   * requires the caller's real `AbortSignal` to actually reach the network
+   * layer. Under this Node/jsdom/Vitest combination it can't by default:
+   * jsdom's `AbortController`/`AbortSignal` are a separate class from the
+   * one Node's native `fetch`/`Request` (built on undici) validates
+   * `init.signal` against internally via a webidl `instanceof` check
+   * against undici's own module-scoped reference - confirmed by reading
+   * undici's `webidl/index.js`, not assumed - and vitest's jsdom
+   * environment setup hardcodes `AbortController`/`AbortSignal` into the
+   * fixed list of globals it copies from `window`, unconditionally
+   * overwriting Node's native ones for every test file. `test/server.ts`'s
+   * `beforeAll` works around this: it strips the incompatible signal
+   * before the real fetch call (avoiding that crash), then reimplements
+   * cancellation itself at the response body-stream level, erroring the
+   * stream with a plain `Error` named `'AbortError'` once the caller's
+   * signal aborts - the only thing `@ai-sdk/provider-utils`'s
+   * `isAbortError` actually checks. That's what makes `stop()` genuinely
+   * interrupt the stream below, not a timing coincidence.
    */
-  it('Stop is disabled until a request is in flight, and clicking it does not throw', async () => {
+  it('Stop mid-stream flips isLoading false and freezes the message shorter than the full stub', async () => {
+    server.use(
+      http.post('/api/chat', async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(new TextEncoder().encode('0:"stub "\n'));
+            // Long enough that clicking Stop right after "stub " appears
+            // has a comfortable margin before the next frame would arrive.
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            controller.enqueue(new TextEncoder().encode('0:"taxpayer "\n'));
+            controller.enqueue(new TextEncoder().encode('0:"reply."\n'));
+            controller.enqueue(
+              new TextEncoder().encode(
+                'd:{"finishReason":"stop","usage":{"promptTokens":1,"completionTokens":3}}\n',
+              ),
+            );
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { 'Content-Type': 'text/event-stream', 'X-Vercel-AI-Data-Stream': 'v1' },
+        });
+      }),
+    );
+
     renderAtChatRoute('stub-2');
     expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
 
@@ -80,16 +104,28 @@ describe('TaxpayerChatPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(screen.getByRole('button', { name: 'Stop' })).not.toBeDisabled();
 
+    await waitFor(() => expect(screen.getByText('stub')).toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Stop' }));
 
-    // Because Stop can't genuinely cancel the request here (see the doc
-    // comment above), the background stream this test started keeps
-    // running regardless and will call onFinish on its own schedule -
-    // draining it (waiting it out, then clearing the shared, global-
-    // singleton store it writes to) before this test returns is what
-    // stops that from landing mid-assertion in whichever test runs next.
-    await waitFor(() => expect(useTaxpayerChatStore.getState().messages.length).toBeGreaterThan(0));
-    useTaxpayerChatStore.getState().clear();
+    // isLoading flips false.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled());
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+    // The message text is shorter than the full stub reply - frozen at
+    // whatever had streamed in by the time Stop fired.
+    const assistantItem = screen.getByText(/stub/).closest('li');
+    expect(assistantItem).toHaveAttribute('data-role', 'assistant');
+    const fullStubReply = 'stub taxpayer reply.';
+    expect(assistantItem?.textContent).not.toContain('reply.');
+    expect(assistantItem?.textContent?.length ?? Infinity).toBeLessThan(fullStubReply.length);
+
+    // onFinish never fires for a genuinely aborted request, so nothing was
+    // persisted for this turn - confirmed by waiting past the point where
+    // the un-aborted continuation would have arrived (the 500ms delay
+    // above) and finding the store still empty, not just checking
+    // immediately after Stop.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(useTaxpayerChatStore.getState().messages).toHaveLength(0);
   });
 
   it('Regenerate re-submits and fires a second POST to /api/chat', async () => {
@@ -179,27 +215,10 @@ describe('TaxpayerChatPanel', () => {
     expect(screen.getByText('stub taxpayer reply.')).toBeInTheDocument();
   });
 
-  /**
-   * As documented on the "Stop is disabled..." test above, Stop can't
-   * genuinely cancel a request in this jsdom/MSW environment, so the
-   * assertion right after clicking it (`messages` still empty) is real but
-   * time-window-dependent - true because the background stream hasn't
-   * resolved yet, not because it was actually cancelled. The
-   * onFinish-never-fires-on-abort guarantee this "Done when" bullet is
-   * really about is covered where it's actually verifiable:
-   * useTaxpayerChatStore.test.ts's persist round-trip, plus
-   * TaxpayerChatPanel.tsx's onFinish being appendAssistantMessage's only
-   * call site. What this test adds on top of that: once the background
-   * stream is drained and the store cleared (representing what a *real*
-   * cancelled request leaves behind - nothing), a reload with that empty
-   * store correctly renders an empty transcript.
-   */
   it('a turn stopped mid-stream leaves the store empty, so a reload rehydrates nothing for it', async () => {
-    // A dedicated handler that withholds its first frame long enough that
-    // the "still empty right after Stop" assertion below is reliably true
-    // rather than a race against the default sseHandlers' 20ms inter-frame
-    // delay, which real (non-fake) timers don't leave a safe margin
-    // against three sequential userEvent calls.
+    // A dedicated handler that withholds its first frame long enough to
+    // click Stop with a comfortable margin before any content would
+    // otherwise arrive.
     server.use(
       http.post('/api/chat', async () => {
         const stream = new ReadableStream<Uint8Array>({
@@ -228,15 +247,13 @@ describe('TaxpayerChatPanel', () => {
 
     expect(useTaxpayerChatStore.getState().messages).toHaveLength(0);
 
-    // Drain the background stream Stop couldn't actually cancel, then
-    // clear the store - both purely to prevent this test's own leftover
-    // async work from corrupting a later test's shared global-singleton
-    // store state, same as the "Stop is disabled..." test above.
-    await waitFor(
-      () => expect(useTaxpayerChatStore.getState().messages.length).toBeGreaterThan(0),
-      { timeout: 2000 },
-    );
-    useTaxpayerChatStore.getState().clear();
+    // Stop now genuinely cancels the request (see test/server.ts), so the
+    // withheld frame above never arrives and onFinish never fires -
+    // waiting out that same 500ms window and re-checking confirms nothing
+    // shows up later either, not just that the store hadn't been written
+    // to yet at the moment Stop was clicked.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(useTaxpayerChatStore.getState().messages).toHaveLength(0);
 
     // Unmount before "reloading" - a real reload tears down the whole page,
     // and leaving this render's DOM in place would leak its own <li>
@@ -250,5 +267,57 @@ describe('TaxpayerChatPanel', () => {
     const reloadedMount = renderAtChatRoute('stub-6-reloaded');
     const transcript = within(reloadedMount.getByLabelText('chat-transcript'));
     expect(transcript.queryAllByRole('listitem')).toHaveLength(0);
+  });
+
+  it('Send is disabled when the input is empty or whitespace-only', async () => {
+    renderAtChatRoute('stub-7');
+    const input = screen.getByLabelText('chat-input');
+    const sendButton = screen.getByRole('button', { name: 'Send' });
+
+    expect(sendButton).toBeDisabled();
+
+    await userEvent.type(input, '   ');
+    expect(sendButton).toBeDisabled();
+
+    await userEvent.type(input, 'hi');
+    expect(sendButton).not.toBeDisabled();
+  });
+
+  it('Regenerate is disabled while a request is in flight', async () => {
+    renderAtChatRoute('stub-8');
+    const regenerateButton = screen.getByRole('button', { name: 'Regenerate' });
+    expect(regenerateButton).not.toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText('chat-input'), 'hello');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(regenerateButton).toBeDisabled();
+
+    await waitFor(() => expect(screen.getByText(/stub taxpayer reply\./)).toBeInTheDocument());
+    // isLoading only flips false once the finish frame is processed, a
+    // moment after the last text frame renders - wait for that instead of
+    // checking immediately after the text appears.
+    await waitFor(() => expect(regenerateButton).not.toBeDisabled());
+    await waitFor(() => expect(useTaxpayerChatStore.getState().messages).toHaveLength(1));
+  });
+
+  it('auto-scrolls the transcript on every messages change', async () => {
+    const scrollIntoViewSpy = vi.spyOn(Element.prototype, 'scrollIntoView');
+    renderAtChatRoute('stub-9');
+
+    // One call on mount (the initial, empty `messages` still triggers the
+    // effect once), then at least one more once the user's own message is
+    // appended to the transcript.
+    const callsBeforeSend = scrollIntoViewSpy.mock.calls.length;
+    await userEvent.type(screen.getByLabelText('chat-input'), 'hello');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() =>
+      expect(scrollIntoViewSpy.mock.calls.length).toBeGreaterThan(callsBeforeSend),
+    );
+    expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: 'smooth' });
+
+    await waitFor(() => expect(screen.getByText(/stub taxpayer reply\./)).toBeInTheDocument());
+    await waitFor(() => expect(useTaxpayerChatStore.getState().messages).toHaveLength(1));
+    scrollIntoViewSpy.mockRestore();
   });
 });

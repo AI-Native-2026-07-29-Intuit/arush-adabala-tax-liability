@@ -6,6 +6,12 @@ interface ChatRequestBody {
 }
 
 /**
+ * One `TextEncoder`, reused for every frame this file emits - encoding is
+ * stateless, so there's no reason to allocate a fresh instance per call.
+ */
+const encoder = new TextEncoder();
+
+/**
  * Encodes one line of the Vercel AI SDK's data-stream protocol
  * (`{prefix}:{JSON}\n`) - `0` for a text delta, `9`/`a` for a tool call and
  * its result, `d` for the terminating finish-message frame. Verified
@@ -16,7 +22,7 @@ interface ChatRequestBody {
  */
 function encodeFrame(prefix: string, payload: unknown): Uint8Array {
   const line = `${prefix}:${JSON.stringify(payload)}\n`;
-  return new TextEncoder().encode(line);
+  return encoder.encode(line);
 }
 
 const STREAM_HEADERS = {

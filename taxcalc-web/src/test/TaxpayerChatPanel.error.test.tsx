@@ -37,4 +37,26 @@ describe('TaxpayerChatPanel error path', () => {
     // The failed turn was never persisted - onFinish only fires on success.
     expect(useTaxpayerChatStore.getState().messages).toHaveLength(0);
   });
+
+  it('renders a role="alert" pane on a network-level failure too, not just an HTTP error status', async () => {
+    // HttpResponse.error() simulates a request that never got a response
+    // at all (connection refused, DNS failure) - a different failure mode
+    // than the 5xx above, going through useChat's plain catch/onError path
+    // rather than a parsed error status.
+    server.use(http.post('/api/chat', () => HttpResponse.error()));
+
+    render(
+      <MemoryRouter initialEntries={['/taxpayers/stub-network-error/chat']}>
+        <Routes>
+          <Route path="/taxpayers/:id/chat" element={<TaxpayerChatPanel />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(screen.getByLabelText('chat-input'), 'hello');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(useTaxpayerChatStore.getState().messages).toHaveLength(0);
+  });
 });
