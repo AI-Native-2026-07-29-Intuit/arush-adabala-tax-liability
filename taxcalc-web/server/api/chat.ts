@@ -2,6 +2,10 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { streamText } from 'ai';
 import { Hono } from 'hono';
+import { taxpayerTools } from './chat-tools';
+
+/** Maximum sequential LLM calls per turn: one tool call plus its follow-up reply. */
+const MAX_STEPS = 3;
 
 /**
  * THREAT MODEL: this proxy holds the upstream API key (via
@@ -20,8 +24,10 @@ const upstream = createOpenAICompatible({
 const SYSTEM_PROMPT =
   "You are an assistant that helps engineers reason about a taxpayer's federal and state tax " +
   'liability. Answer from the conversation and your own knowledge by default. When a question ' +
-  "needs a specific taxpayer's current record or a fresh liability estimate, call the matching " +
-  'tool instead of guessing - never fabricate an id, amount, or filing status.';
+  "needs a specific taxpayer's current record, call lookupTaxpayer with that taxpayer's id. " +
+  'When a question needs a fresh liability figure for a given tax year, call estimateLiability ' +
+  'with that year. Never fabricate an id, amount, or filing status - call the matching tool ' +
+  "instead of guessing, and if a tool call fails, say so rather than inventing a result.";
 
 /**
  * Maps any failure from the upstream Spring AI call - connection refused
@@ -59,6 +65,8 @@ export const chat = new Hono().post('/', async (c) => {
     model: upstream.chatModel('uptime-crew-assistant'),
     system: SYSTEM_PROMPT,
     messages,
+    tools: taxpayerTools,
+    maxSteps: MAX_STEPS,
     abortSignal: c.req.raw.signal,
   });
 
