@@ -325,14 +325,28 @@ server/index.ts`) round out the new dependencies.
 Task 2 wires `TaxpayerChatPanel`'s Stop (`stop()`, disabled unless
 `isLoading`), Regenerate (`reload()`), a `role="status"` spinner, a
 `role="alert"` error pane, and scroll-to-bottom on every `messages` change.
-`chat.ts` pairs this with a `getErrorMessage` handler: `toDataStreamResponse`
-already turns a stream-time failure into a clean SSE error frame rather
-than a torn connection, but its default message is the generic "An error
-occurred." — `getErrorMessage` logs the real cause (a `RetryError` wrapping
-three `ECONNREFUSED` attempts, in dev, since no Spring AI container is
-running or checked into this repo) server-side and returns a client-safe
-message instead, verified with `curl` against the bare proxy before the
-first `TaxpayerChatPanel` test existed.
+`chat.ts` pairs this with two layers of error handling. The 5xx-mapping
+piece is `mapUpstreamErrors`, a custom `fetch` passed to
+`createOpenAICompatible({ fetch })` — the AI SDK's own doc comment on that
+option calls it out as exactly this: "a custom fetch implementation you can
+use as a middleware to intercept requests." It inspects every response from
+the Spring AI backend before the SDK's stream decoder ever sees it; a
+4xx/5xx becomes one well-typed `UpstreamStatusError` instead of an opaque
+parse failure, logged server-side with the real status/body and re-thrown
+with an already-client-safe message. `toClientErrorMessage` (passed as
+`toDataStreamResponse`'s `getErrorMessage`) is the layer beneath that: it
+uses `UpstreamStatusError`'s message verbatim when present, and falls back
+to the same generic message for anything the fetch middleware never saw at
+all — a connection refused because no Spring AI container is running or
+checked into this repo, DNS failure, timeout — cases where `fetch()` itself
+rejects before there's a `Response` to inspect, so they fall through to
+`streamText`'s own retry/error handling instead. Both paths were verified
+against a hand-rolled Node `http` stub standing in for the backend: a
+genuine `500` with a JSON error body reaches `mapUpstreamErrors` in exactly
+one request (no retries, since a thrown `UpstreamStatusError` isn't the
+`APICallError` shape the SDK's retry logic re-attempts), while killing the
+stub entirely reproduces the original `ECONNREFUSED`-after-three-attempts
+path unchanged.
 
 Task 3 adds `server/api/chat-tools.ts`: `lookupTaxpayer`/`estimateLiability`,
 zod-typed `ai` tools executed server-side against the W3 D2 REST backend
