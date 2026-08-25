@@ -1,4 +1,5 @@
 // src/pages/TaxpayerListPage.tsx
+import { Link } from 'react-router-dom';
 import { useLatestTaxpayersQuery } from '../gql/generated/hooks';
 
 /** Lists the most recently updated taxpayers via the `latestTaxpayers` GraphQL query. */
@@ -17,7 +18,7 @@ export function TaxpayerListPage(): React.ReactElement {
     <ul aria-label="taxpayer-list">
       {rows.map((r) => (
         <li key={r.id}>
-          <a href={`/taxpayers/${r.id}`}>{r.id}</a>
+          <Link to={`/taxpayers/${r.id}`}>{r.id}</Link>
           {r.tags.length > 0 && <span> ({r.tags.join(', ')})</span>}
         </li>
       ))}
