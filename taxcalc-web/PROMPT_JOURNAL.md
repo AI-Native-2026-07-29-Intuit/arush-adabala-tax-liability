@@ -1,7 +1,4 @@
 # Prompt Journal — W4 D4
-
-Five prompts from this deliverable's AI-assisted session that produced shipped code, each with what the model produced and the verdict on whether it was accepted as-is, accepted with changes, or reworked.
-
 ---
 
 ## 1. `server/api/chat.ts` — the streaming proxy route
