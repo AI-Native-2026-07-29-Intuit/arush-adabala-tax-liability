@@ -286,7 +286,9 @@ through tripped "Expected signal to be an instance of AbortSignal" on
 every Apollo-backed test. `server.ts`'s `beforeAll` wraps the
 interceptor's already-patched `fetch` to strip an incompatible `signal`
 before it reaches the real request — no test here exercises cancellation,
-so this is simpler than faking it across two `AbortSignal` realms. New
+so this is simpler than faking it across two `AbortSignal` realms. (W4 D4
+later replaces the strip-and-drop with a real fix once a test needs
+genuine cancellation - see that section.) New
 specs cover `TaxpayerListPage`, `TaxpayerSummaryPage` (including the
 loading-placeholder timing, using a deliberate MSW `delay(200)` so the
 test has a real window to observe it before the mocked response resolves),
@@ -296,6 +298,197 @@ reason), and `useGetTaxLiabilityRest` (success, `enabled: Boolean(id)`,
 and the 404→`null` case) — plus a matching 404 case in
 `TaxpayerDetailPage.test.tsx`. 21 Vitest tests now pass, up from 13.
 `pnpm typecheck && pnpm lint && pnpm test && pnpm build` all pass locally.
+
+## Week 4 Day 4 — Vercel AI SDK, Streaming Responses, Streamed Tool Calls & MSW SSE Tests
+
+`taxcalc-web` replaces W4 D3's blocking `summarizeTaxpayer` mutation with a
+streaming chat assistant. `server/` is new: a thin Hono app (`pnpm server`,
+`:3001`) whose one route, `server/api/chat.ts`, holds the only code in this
+app that talks to an LLM. It calls `streamText` against
+`createOpenAICompatible({ baseURL: 'http://localhost:8080/ai' })` — the W3
+D4 Spring AI backend's OpenAI-compatible endpoint, never a real provider —
+and returns `result.toDataStreamResponse()` with explicit
+`text/event-stream` / `no-cache, no-transform` / `X-Accel-Buffering: no`
+headers, forwarding the incoming request's `AbortSignal` so a client
+disconnect cancels the upstream call too. `vite.config.ts`'s `server.proxy`
+forwards the browser's `/api/chat` to that Hono port, so `TaxpayerChatPanel`
+(mounted at `/taxpayers/:id/chat`) never needs its own base URL.
+
+`ai`/`@ai-sdk/react`/`@ai-sdk/openai-compatible` are pinned to the `4.x`/
+`1.x`/`0.x` line respectively — `pnpm add` without a version resolved `ai`
+7.0.79, whose `useChat` is a rewritten `Chat`-class API with no
+`input`/`handleSubmit`/`isLoading`/`toolInvocations`, none of which match
+this deliverable's spec; same pinning rationale W4 D3's README section gave
+for Apollo Client. `@hono/node-server` (needed for `serve()` to actually
+listen under Node — Hono itself is runtime-agnostic and the lesson's
+package list omitted it) and `tsx` (`pnpm server` runs `tsx watch
+server/index.ts`) round out the new dependencies.
+
+Task 2 wires `TaxpayerChatPanel`'s Stop (`stop()`, disabled unless
+`isLoading`), Regenerate (`reload()`), a `role="status"` spinner, a
+`role="alert"` error pane, and scroll-to-bottom on every `messages` change.
+`chat.ts` pairs this with two layers of error handling. The 5xx-mapping
+piece is `mapUpstreamErrors`, a custom `fetch` passed to
+`createOpenAICompatible({ fetch })` — the AI SDK's own doc comment on that
+option calls it out as exactly this: "a custom fetch implementation you can
+use as a middleware to intercept requests." It inspects every response from
+the Spring AI backend before the SDK's stream decoder ever sees it; a
+4xx/5xx becomes one well-typed `UpstreamStatusError` instead of an opaque
+parse failure, logged server-side with the real status/body and re-thrown
+with an already-client-safe message. `toClientErrorMessage` (passed as
+`toDataStreamResponse`'s `getErrorMessage`) is the layer beneath that: it
+uses `UpstreamStatusError`'s message verbatim when present, and falls back
+to the same generic message for anything the fetch middleware never saw at
+all — a connection refused because no Spring AI container is running or
+checked into this repo, DNS failure, timeout — cases where `fetch()` itself
+rejects before there's a `Response` to inspect, so they fall through to
+`streamText`'s own retry/error handling instead. Both paths were verified
+against a hand-rolled Node `http` stub standing in for the backend: a
+genuine `500` with a JSON error body reaches `mapUpstreamErrors` in exactly
+one request (no retries, since a thrown `UpstreamStatusError` isn't the
+`APICallError` shape the SDK's retry logic re-attempts), while killing the
+stub entirely reproduces the original `ECONNREFUSED`-after-three-attempts
+path unchanged.
+
+Task 3 adds `server/api/chat-tools.ts`: `lookupTaxpayer`/`estimateLiability`,
+zod-typed `ai` tools executed server-side against the W3 D2 REST backend
+(the browser never calls that backend through this path), wired into
+`streamText` via `tools`/`maxSteps: 3`, with the system prompt taught when
+to call each rather than let the model fabricate taxpayer data.
+`estimateLiability`'s `GET /api/v1/taxpayers?year=` target doesn't exist on
+the current `TaxpayerController` (only `GET /{id}` does) — the same
+"prerequisite piece isn't actually built yet" situation the W3 D4 Spring AI
+`/ai/chat` endpoint and a docker-compose for it are in; neither exists
+anywhere in this repo's history, so today's work targets them as documented
+contracts rather than a live integration. `ToolCallCard` renders one
+`ToolInvocation`'s name/args/result inline, mapped from each message's
+`toolInvocations`. `useTaxpayerChatStore` (Zustand + `persist`, key
+`uc:taxpayer-chat`) seeds `useChat`'s `initialMessages` on mount and is
+written to only from `onFinish` — never from a per-token callback, which
+would both tank streaming FPS and let a reload mid-stream rehydrate a
+message that never finished; confirmed against the `@ai-sdk/ui-utils`
+source that an aborted request never reaches `onFinish` at all, so Stop
+can't leak a partial message into storage by construction. Wiring this up
+surfaced a real bug: `useTaxpayerChatStore`'s `persist` initially wrote
+nowhere, because `window.localStorage` is genuinely `undefined` under this
+Node/jsdom/Vitest combination (confirmed by direct probe) — the exact
+failure `useTaxpayerFilterStore`'s local `safeLocalStorage` fallback
+already worked around. Extracted that fallback into `src/lib/
+safeLocalStorage.ts` and pointed both stores at it, rather than leaving the
+new one silently broken.
+
+Task 4's `src/test/sse-handlers.ts` hand-encodes the Vercel AI SDK's
+data-stream protocol (`0` text delta, `9`/`a` tool call/result, `d` finish
+message — read directly from `@ai-sdk/ui-utils`'s own parser rather than
+guessed, since a wrong prefix fails silently client-side instead of raising
+a test error, and encoded with one shared `TextEncoder` reused per frame)
+so the whole chat UI is testable with no Hono process and no Spring AI
+backend running; spread into `test/handlers.ts` alongside the existing
+REST/GraphQL handlers. Four spec files cover: `TaxpayerChatPanel.test.tsx`
+(streamed-token rendering with an explicit `data-role="assistant"` check,
+Stop mid-stream, Regenerate firing a second POST, a tool-call turn
+rendering a `ToolCallCard` through `partial-call → call → result`, reload
+rehydration, Send/Regenerate disabled-state wiring, and the
+`scrollIntoView` effect), `TaxpayerChatPanel.error.test.tsx` (both a `5xx`
+`server.use` override and a network-level `HttpResponse.error()` override,
+each rendering the `role="alert"` pane), `ToolCallCard.test.tsx` (all three
+`ToolInvocation` states), and `useTaxpayerChatStore.test.ts` (insertion
+order across multiple appends, plus a real persist round-trip: append a
+message, build a second store against the same storage, assert it
+rehydrates). `Element.scrollIntoView` needed a one-line stub in
+`test/setup.ts` — jsdom does no layout, so it's simply unimplemented.
+
+Genuinely verifying that Stop interrupts an in-flight stream looked
+impossible at first: it hits the identical jsdom `AbortController`/
+`AbortSignal` cross-realm gap the W4 D3 section above documents for
+Apollo's `HttpLink`, and `test/server.ts`'s existing fetch wrapper —
+needed so MSW's interceptor doesn't reject the incompatible signal
+outright — stripped `init.signal` from every request before it reached the
+network, disabling cancellation entirely rather than just working around
+the crash. Tracing the actual error (undici's webidl `AbortSignal`
+converter, `MakeTypeAssertion`, doing a strict `instanceof` check against
+its own module-scoped reference — read from `undici/lib/web/webidl/
+index.js`, not assumed) confirmed the two classes can never be unified
+from test code: vitest's jsdom environment setup hardcodes
+`AbortController`/`AbortSignal` into the fixed list of globals it copies
+from `window`, unconditionally overwriting Node's native ones for every
+test file, with no supported opt-out. So `server.ts`'s wrapper now does
+something different: strip the incompatible signal before the real fetch
+call as before, but reimplement cancellation itself at the response
+body-stream level — once the caller's real signal fires, the wrapped
+stream errors with a plain `Error` named `'AbortError'`, the only thing
+`@ai-sdk/provider-utils`'s `isAbortError` actually checks
+(`error instanceof Error && error.name === 'AbortError'`, no class-identity
+check at all). That's enough for `useChat`'s `stop()` — and Apollo's own
+cancellation, retroactively — to genuinely interrupt an in-flight request
+under test, not just document that it can't be verified. Confirmed
+deterministic across repeated runs and, since the fix touches shared test
+infrastructure rather than anything Node-version-specific, re-verified
+under Node 20.20.2 (installed locally via `brew install node@20`,
+keg-only) to match `.github/workflows/web-ci.yml`'s pinned version exactly
+rather than only the newer Node this was developed against. 40 Vitest
+tests now pass, up from 22, hitting the deliverable's "≥ 40" target.
+`pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm
+test && pnpm build` — the exact sequence `.github/workflows/web-ci.yml`
+runs — all pass locally, under both Node versions.
+
+**Follow-up: `dev/stub-spring-ai.ts`.** Everything above verifies the chat
+proxy's plumbing, but none of it demonstrates the actual happy path in a
+browser, since no Spring AI backend or docker-compose for it exists
+anywhere in this repo. Added a dev-only, hand-rolled stand-in (`pnpm
+stub-backend`, `:8080`, not committed as any kind of real backend
+implementation) that speaks the genuine OpenAI-compatible chat-completions
+wire format `@ai-sdk/openai-compatible` expects — not the Vercel
+data-stream protocol the browser sees, one level further upstream, so
+`streamText`'s real parsing path runs end-to-end rather than being
+bypassed by a mock. It detects a `role: "tool"` message in the incoming
+request (step two of a tool-calling exchange) versus a fresh user message
+mentioning "lookup" (triggering a canned `lookupTaxpayer` tool call) and
+streams a plain-text reply either way; `GET /api/v1/taxpayers/:id` and
+`GET /api/v1/taxpayers?year=` return canned JSON for the two tools'
+`execute()` calls. Driven through a real Chromium session (`pnpm dev` +
+`pnpm server` + `pnpm stub-backend`): typing a plain message renders real
+streamed tokens ("Hello from the stub tax assistant.") word by word, and
+a message containing "lookup" renders a genuine two-step exchange -
+`ToolCallCard` shows `lookupTaxpayer` with its args, then the REST result,
+then a real follow-up reply ("Found stub taxpayer stub-1.") - all through
+the actual production code path, not MSW. (One side effect worth noting:
+`useTaxpayerChatStore`'s single flat, non-taxpayer-scoped `messages` array
+means a second taxpayer's chat panel shows the first taxpayer's completed
+turns too on first mount, in the same browser session — the exact design
+question raised separately about whether that store should be keyed by
+taxpayer id.)
+
+**Follow-up: request/response validation.** Neither `chat.ts` nor
+`chat-tools.ts` validated its input before this - the former took `{
+messages }` straight off the wire (and `:3001` has no auth or origin
+restriction, so anything that can reach it directly could POST arbitrary
+JSON), the latter returned a REST response's body untouched regardless of
+shape. Fixed with the same two-layer, log-the-real-cause pattern the
+5xx-mapping middleware already established, but split into two genuinely
+different failure classes rather than one shared path: `chat.ts`'s new
+`chatRequestBodySchema` (zod, `.passthrough()` so `id`/`toolInvocations`/
+etc. survive untouched) rejects a malformed request with a plain `400`
+before any stream opens - there's nothing to layer an SSE sentinel frame
+onto yet, so reusing that machinery here would have been the wrong shape
+for the failure. `chat-tools.ts`'s two new schemas (`taxpayerRestSchema`,
+mirroring `useGetTaxLiabilityRest.ts`'s already-established `TaxpayerRest`
+type field-for-field; `liabilityEstimateListSchema`, formalizing
+`dev/stub-spring-ai.ts`'s own shape since no real backend exists to check
+it against) validate each tool's REST response before returning it as the
+tool's result. A failure there throws `ToolResponseValidationError`,
+which the AI SDK wraps in `ToolExecutionError` and re-throws (confirmed by
+reading `ai`'s `executeTools`: there's no separate "let the model see a
+tool failure and react" path in this SDK version), so it still reaches
+`toClientErrorMessage` the same way an upstream connectivity failure
+does - unwrapped there via `.cause` so the log stays specific even though
+both end up behind the same generic client-facing message. 11 new tests
+(`chat.test.ts`, exercising the Hono route directly via its own
+`.request()` helper; `chat-tools.test.ts`, covering both tools' happy and
+malformed-response paths via MSW) bring the project to 51 Vitest tests;
+verified live end-to-end too, including that a well-formed body still
+reaches a real tool call through the running proxy + stub backend
+unaffected.
 
 ## Build and Test
 

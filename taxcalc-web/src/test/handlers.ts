@@ -1,13 +1,17 @@
 // src/test/handlers.ts
 //
-// MSW request handlers standing in for the W3 D2 REST backend and the W3
-// D4 GraphQL backend. `graphql.query`/`graphql.mutation` match by
-// operation name regardless of endpoint URL, so these work against
-// whatever host `apollo/client.ts` is configured with. `http.get` matches
-// the literal REST URL `useGetTaxLiabilityRest` calls.
+// MSW request handlers standing in for the W3 D2 REST backend, the W3 D4
+// GraphQL backend, and (via sseHandlers, spread in below) the W4 D4 /api/chat
+// streaming proxy. `graphql.query`/`graphql.mutation` match by operation
+// name regardless of endpoint URL, so these work against whatever host
+// `apollo/client.ts` is configured with. `http.get` matches the literal
+// REST URL `useGetTaxLiabilityRest` calls.
 import { delay, graphql, http, HttpResponse } from 'msw';
+import { sseHandlers } from './sse-handlers';
 
 export const handlers = [
+  ...sseHandlers,
+
   graphql.query('LatestTaxpayers', () =>
     HttpResponse.json({
       data: {
