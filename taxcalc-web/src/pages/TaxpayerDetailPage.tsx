@@ -1,6 +1,6 @@
 // src/pages/TaxpayerDetailPage.tsx
 import { useEffect, useReducer, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { useGetTaxLiabilityRest } from '../hooks/useGetTaxLiabilityRest';
 import { detailReducer, INITIAL_DETAIL_STATE, type DetailState } from './TaxpayerDetailPage.reducer';
 import { useDebouncedSearch } from '../hooks/useDebouncedSearch';
@@ -100,6 +100,8 @@ function DetailCard({ state }: { readonly state: DetailState }): React.ReactElem
             <ThresholdSlider></ThresholdSlider>
             <ThresholdReadout></ThresholdReadout>
           </section>
+
+          <Link to={`/taxpayers/${data.id}/chat`}>Chat about {data.id}</Link>
         </>
       );
     }

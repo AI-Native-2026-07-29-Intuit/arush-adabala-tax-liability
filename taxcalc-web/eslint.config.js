@@ -6,7 +6,17 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'coverage', 'src/gql/generated'] },
+  {
+    ignores: [
+      'dist',
+      'node_modules',
+      'coverage',
+      'src/gql/generated',
+      'playwright-report',
+      'test-results',
+      'e2e/.auth',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
