@@ -53,6 +53,16 @@ test.describe('TaxLiability W4 capstone happy-path', () => {
     await expect(page.getByRole('complementary', { name: 'tool-call' })).toBeVisible({ timeout: 10_000 });
     await expect(transcript).toContainText('Found stub taxpayer stub-1.', { timeout: 10_000 });
 
+    // The transcript rendering this turn's text and useTaxpayerChatStore's
+    // onFinish-triggered localStorage write are two different signals that
+    // usually land within microtasks of each other but aren't ordered from
+    // this test's perspective - reloading right after the DOM assertion
+    // above raced the persist write under CI load and lost, so this waits
+    // on the actual signal that matters before reloading: the write itself.
+    await page.waitForFunction(
+      () => localStorage.getItem('uc:taxpayer-chat')?.includes('Found stub taxpayer stub-1.') ?? false,
+    );
+
     // Reload: initialMessages rehydrates from useTaxpayerChatStore's
     // persisted history, so both turns should still be visible with no
     // further network activity needed.
