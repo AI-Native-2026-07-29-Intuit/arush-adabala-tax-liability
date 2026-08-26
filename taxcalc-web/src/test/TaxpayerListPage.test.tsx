@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import { graphql, HttpResponse } from 'msw';
+import { axe } from 'jest-axe';
 import { server } from './server';
 import { renderWithProviders } from './renderWithProviders';
 import { TaxpayerListPage } from '../pages/TaxpayerListPage';
@@ -81,5 +82,15 @@ describe('TaxpayerListPage', () => {
     renderListPage();
 
     expect(await screen.findByRole('list', { name: 'taxpayer-list' })).toBeInTheDocument();
+  });
+
+  it('has no detectable accessibility violations once the rows have loaded', async () => {
+    const { container } = renderListPage();
+    await screen.findByText('stub-1');
+
+    // One scan on the loaded, happy-path state - not one per test above -
+    // is the budget; the failure output names the rule and the offending
+    // selector if this ever regresses.
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

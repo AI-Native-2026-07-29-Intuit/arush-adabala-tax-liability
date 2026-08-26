@@ -88,7 +88,7 @@ beforeAll(() => {
       statusText: response.statusText,
       headers: response.headers,
     });
-  }) as typeof globalThis.fetch;
+  });
 });
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());

@@ -77,7 +77,11 @@ function baseChunk(overrides: Record<string, unknown>): Record<string, unknown> 
  * OpenAI-compatible stream format this time, not the Vercel one.
  */
 app.post('/ai/chat/completions', async (c) => {
-  const body = (await c.req.json()) as ChatCompletionsRequestBody;
+  // Hono's `json<T = any>()` is generic, not validated at runtime - a type
+  // argument here (rather than an `as` assertion after the call) is what
+  // lets the compiler infer the specific shape without a separately
+  // flagged, technically-redundant assertion on top of it.
+  const body = await c.req.json<ChatCompletionsRequestBody>();
   const messages = body.messages ?? [];
   const hasToolResult = messages.some((m) => m.role === 'tool');
   const lastUserContent = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -195,7 +199,7 @@ interface GraphQLRequestBody {
  * matches by operation name rather than parsing the query string.
  */
 app.post('/graphql', async (c) => {
-  const body = (await c.req.json()) as GraphQLRequestBody;
+  const body = await c.req.json<GraphQLRequestBody>();
   if (body.operationName === 'LatestTaxpayers') {
     return c.json({
       data: {

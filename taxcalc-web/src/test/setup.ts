@@ -3,10 +3,12 @@ import { expect } from 'vitest';
 import { toHaveNoViolations } from 'jest-axe';
 import './server'; // installs MSW's request handlers for every test file
 
-// jest-axe's matcher isn't in @testing-library/jest-dom, so it needs its
-// own expect.extend + Assertion<T> module augmentation (declared below) for
-// TypeScript to know `toHaveNoViolations()` exists on the matcher chain.
-expect.extend({ toHaveNoViolations });
+// jest-axe's `toHaveNoViolations` export is already the matcher-map shape
+// expect.extend wants ({ toHaveNoViolations: fn }), not a bare function -
+// `expect.extend({ toHaveNoViolations })` would wrap it one level too deep
+// and register a matcher whose "function" is actually an object, which
+// vitest's expect then fails to call at all.
+expect.extend(toHaveNoViolations);
 
 declare module 'vitest' {
   interface Assertion<T> {

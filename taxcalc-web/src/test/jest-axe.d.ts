@@ -11,5 +11,10 @@ declare module 'jest-axe' {
 
   export function axe(html: Element | string, options?: RunOptions): Promise<AxeResults>;
 
-  export function toHaveNoViolations(results: AxeResults): { pass: boolean; message: () => string };
+  // jest-axe's own runtime export is already the { matcherName: fn } shape
+  // expect.extend wants - a plain function here, however accurate its own
+  // signature, would be the wrong shape for setup.ts's `expect.extend(toHaveNoViolations)`.
+  export const toHaveNoViolations: {
+    toHaveNoViolations(results: AxeResults): { pass: boolean; message: () => string };
+  };
 }

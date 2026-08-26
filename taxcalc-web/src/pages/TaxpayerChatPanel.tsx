@@ -80,7 +80,7 @@ export function TaxpayerChatPanel(): React.ReactElement {
         <button type="button" onClick={stop} disabled={!isLoading}>
           Stop
         </button>
-        <button type="button" onClick={() => reload()} disabled={isLoading}>
+        <button type="button" onClick={() => void reload()} disabled={isLoading}>
           Regenerate
         </button>
       </form>

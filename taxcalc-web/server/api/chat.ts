@@ -152,7 +152,9 @@ function toClientErrorMessage(error: unknown): string {
  * token-by-token streaming into one final chunk on the wire.
  */
 export const chat = new Hono().post('/', async (c) => {
-  const rawBody = await c.req.json().catch(() => null);
+  // `unknown`, not the default `any` - the whole point of the schema check
+  // two lines down is that this body's shape isn't trusted yet.
+  const rawBody = await c.req.json<unknown>().catch(() => null);
   const parsedBody = chatRequestBodySchema.safeParse(rawBody);
   if (!parsedBody.success) {
     console.error('chat proxy: invalid request body', parsedBody.error.issues);

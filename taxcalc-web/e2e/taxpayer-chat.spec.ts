@@ -1,5 +1,6 @@
 // e2e/taxpayer-chat.spec.ts
 import { test, expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
 /**
  * The W4 D5 capstone happy-path: an already-authenticated session (see
@@ -23,6 +24,13 @@ test.describe('TaxLiability W4 capstone happy-path', () => {
     await page.getByRole('link', { name: /stub-1/i }).click();
     await expect(page).toHaveURL(/\/taxpayers\/stub-1$/);
     await expect(page.getByRole('heading')).toContainText('stub-1');
+
+    // One a11y scan on this loaded page state is the budget - not one per
+    // state in the flow. wcag2a/wcag2aa mirrors the tag set the two
+    // jest-axe scans in TaxpayerListPage.test.tsx / TaxpayerSummaryPage.test.tsx
+    // already use, so a real browser and jsdom are held to the same bar.
+    const detailPageScan = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
+    expect(detailPageScan.violations).toEqual([]);
 
     // Navigate into the chat panel via the in-app link, not a raw goto.
     await page.getByRole('link', { name: 'Chat about stub-1' }).click();

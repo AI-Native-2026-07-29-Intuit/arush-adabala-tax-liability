@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import { Route, Routes } from 'react-router-dom';
 import { graphql, HttpResponse } from 'msw';
+import { axe } from 'jest-axe';
 import { server } from './server';
 import { renderWithProviders } from './renderWithProviders';
 import { TaxpayerSummaryPage } from '../pages/TaxpayerSummaryPage';
@@ -78,5 +79,17 @@ describe('TaxpayerSummaryPage', () => {
     renderAtSummaryRoute();
 
     expect(screen.getByRole('region', { name: 'taxpayer-summary' })).toBeInTheDocument();
+  });
+
+  it('has no detectable accessibility violations once the summary has loaded', async () => {
+    const { container, user } = renderAtSummaryRoute();
+
+    await user.click(screen.getByRole('button', { name: 'Summarize' }));
+    await screen.findByText('SINGLE');
+
+    // One scan on the loaded, happy-path state - not one per test above -
+    // is the budget; the failure output names the rule and the offending
+    // selector if this ever regresses.
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

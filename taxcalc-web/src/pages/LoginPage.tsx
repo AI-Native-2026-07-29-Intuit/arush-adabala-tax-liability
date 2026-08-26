@@ -15,7 +15,10 @@ export function LoginPage(): React.ReactElement {
 
   const signIn = (): void => {
     setStoredJwt(STUB_JWT);
-    navigate('/taxpayers');
+    // react-router's data-router `navigate` returns a Promise (it resolves
+    // once the destination route's loaders settle); nothing here needs to
+    // wait on it, so `void` marks that deliberate rather than an oversight.
+    void navigate('/taxpayers');
   };
 
   return (

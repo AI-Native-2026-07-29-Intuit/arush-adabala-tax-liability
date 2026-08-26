@@ -74,7 +74,7 @@ describe('TaxpayerChatPanel', () => {
    */
   it('Stop mid-stream flips isLoading false and freezes the message shorter than the full stub', async () => {
     server.use(
-      http.post('/api/chat', async () => {
+      http.post('/api/chat', () => {
         const stream = new ReadableStream<Uint8Array>({
           async start(controller) {
             controller.enqueue(new TextEncoder().encode('0:"stub "\n'));
@@ -220,7 +220,7 @@ describe('TaxpayerChatPanel', () => {
     // click Stop with a comfortable margin before any content would
     // otherwise arrive.
     server.use(
-      http.post('/api/chat', async () => {
+      http.post('/api/chat', () => {
         const stream = new ReadableStream<Uint8Array>({
           async start(controller) {
             await new Promise((resolve) => setTimeout(resolve, 500));
