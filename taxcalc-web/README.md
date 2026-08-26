@@ -23,7 +23,17 @@ resolve to network errors, which is expected outside a full backend setup.
 `/taxpayers/:id/chat`'s streaming assistant needs both `pnpm server`
 running *and* the backend's `POST /ai/chat` endpoint reachable at
 `localhost:8080/ai` — see [Week 4 Day 4](../README.md#week-4-day-4--vercel-ai-sdk-streaming-responses-streamed-tool-calls--msw-sse-tests)
-in the root README for what's actually wired up versus assumed.
+in the root README for what's actually wired up versus assumed. Since
+that endpoint (and a docker-compose to run it) doesn't exist anywhere in
+this repo, `pnpm stub-backend` starts a minimal stand-in on `:8080` -
+purely so the chat happy path is demonstrable in a real browser without
+the full Spring stack, not a substitute for building the real endpoint:
+
+```bash
+pnpm dev            # :5173
+pnpm server          # :3001 - separate terminal
+pnpm stub-backend    # :8080 - separate terminal
+```
 
 ## Scripts
 
@@ -31,6 +41,7 @@ in the root README for what's actually wired up versus assumed.
 |---|---|
 | `pnpm dev` | Start the Vite dev server |
 | `pnpm server` | Start the Hono `/api/chat` streaming proxy (`server/index.ts`, `:3001`) |
+| `pnpm stub-backend` | Start the dev-only stand-in for the (nonexistent) W3 D4 Spring AI + REST backend (`dev/stub-spring-ai.ts`, `:8080`) |
 | `pnpm build` | Typecheck, then produce a production bundle in `dist/` |
 | `pnpm preview` | Serve the built `dist/` bundle locally |
 | `pnpm lint` | ESLint 9 (flat config, `eslint.config.js`) |
@@ -69,6 +80,7 @@ src/main.tsx                        entry point: Apollo/Query providers wrap Err
 server/index.ts                     Hono entry point (pnpm server), mounts the chat route on :3001
 server/api/chat.ts                  POST /api/chat: streamText + toDataStreamResponse against the Spring AI backend
 server/api/chat-tools.ts            lookupTaxpayer/estimateLiability ai tools, executed server-side against the REST backend
+dev/stub-spring-ai.ts               dev-only stand-in for the (nonexistent) Spring AI + REST backend (pnpm stub-backend, :8080) - not a real implementation, just enough to demo the chat happy path
 src/test/handlers.ts, server.ts     MSW request handlers + setupServer lifecycle
 src/test/sse-handlers.ts            MSW handler emitting the AI SDK data-stream protocol by hand (no live proxy needed for tests)
 src/test/                           Vitest setup + unit/smoke tests
@@ -104,10 +116,15 @@ W4 D3 data layer:
 - **Streaming chat is new.** `TaxpayerChatPanel` (`/taxpayers/:id/chat`)
   runs the Vercel AI SDK's `useChat` against a thin Hono proxy
   (`server/api/chat.ts`, `pnpm server` on `:3001`) that streams the W3 D4
-  Spring AI backend's reply via `streamText` + `toDataStreamResponse`. See
-  the root README's Week 4 Day 4 section for the full breakdown, including
-  why `ai`/`@ai-sdk/react` are pinned to the v4 line, the two tool calls,
-  the persist-only-on-`onFinish` rule, and the jsdom `AbortSignal` gap that
-  keeps Stop's cancellation from being verifiable in a unit test.
+  Spring AI backend's reply via `streamText` + `toDataStreamResponse`. That
+  backend (and a docker-compose to run it) doesn't exist anywhere in this
+  repo, so `pnpm stub-backend` (`dev/stub-spring-ai.ts`, `:8080`) stands in
+  with real OpenAI-compatible streaming completions and canned REST
+  responses — enough to drive the whole happy path, tool calls included,
+  in an actual browser. See the root README's Week 4 Day 4 section for the
+  full breakdown, including why `ai`/`@ai-sdk/react` are pinned to the v4
+  line, the two tool calls, the persist-only-on-`onFinish` rule, and how
+  Stop's cancellation was made genuinely testable by fixing the underlying
+  jsdom `AbortSignal` gap rather than working around it.
 
 Planned: the full frontend testing/production-readiness pass (W4 D5).

@@ -432,6 +432,33 @@ tests now pass, up from 22, hitting the deliverable's "≥ 40" target.
 test && pnpm build` — the exact sequence `.github/workflows/web-ci.yml`
 runs — all pass locally, under both Node versions.
 
+**Follow-up: `dev/stub-spring-ai.ts`.** Everything above verifies the chat
+proxy's plumbing, but none of it demonstrates the actual happy path in a
+browser, since no Spring AI backend or docker-compose for it exists
+anywhere in this repo. Added a dev-only, hand-rolled stand-in (`pnpm
+stub-backend`, `:8080`, not committed as any kind of real backend
+implementation) that speaks the genuine OpenAI-compatible chat-completions
+wire format `@ai-sdk/openai-compatible` expects — not the Vercel
+data-stream protocol the browser sees, one level further upstream, so
+`streamText`'s real parsing path runs end-to-end rather than being
+bypassed by a mock. It detects a `role: "tool"` message in the incoming
+request (step two of a tool-calling exchange) versus a fresh user message
+mentioning "lookup" (triggering a canned `lookupTaxpayer` tool call) and
+streams a plain-text reply either way; `GET /api/v1/taxpayers/:id` and
+`GET /api/v1/taxpayers?year=` return canned JSON for the two tools'
+`execute()` calls. Driven through a real Chromium session (`pnpm dev` +
+`pnpm server` + `pnpm stub-backend`): typing a plain message renders real
+streamed tokens ("Hello from the stub tax assistant.") word by word, and
+a message containing "lookup" renders a genuine two-step exchange -
+`ToolCallCard` shows `lookupTaxpayer` with its args, then the REST result,
+then a real follow-up reply ("Found stub taxpayer stub-1.") - all through
+the actual production code path, not MSW. (One side effect worth noting:
+`useTaxpayerChatStore`'s single flat, non-taxpayer-scoped `messages` array
+means a second taxpayer's chat panel shows the first taxpayer's completed
+turns too on first mount, in the same browser session — the exact design
+question raised separately about whether that store should be keyed by
+taxpayer id.)
+
 ## Build and Test
 
 ```bash
