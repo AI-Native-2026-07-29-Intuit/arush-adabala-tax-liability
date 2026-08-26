@@ -37,7 +37,10 @@ export function TaxpayerSummaryPage(): React.ReactElement {
 
   return (
     <section aria-label="taxpayer-summary">
-      <button type="button" onClick={() => summarize()} disabled={loading}>
+      {/* useMutation already surfaces failures via `error` below; the
+          promise itself is caught here purely to avoid an unhandled
+          rejection, not to handle the error a second time. */}
+      <button type="button" onClick={() => void summarize().catch(() => undefined)} disabled={loading}>
         Summarize
       </button>
       {error && <p role="alert">Error: {error.message}</p>}
