@@ -69,3 +69,15 @@ export const handlers = [
     }),
   ),
 ];
+
+/**
+ * Opt-in 500 for `GET /api/v1/taxpayers/:id`. `server.use(taxpayerRestErrorHandler)`
+ * overrides only this one route for the rest of the current test - the
+ * GraphQL handlers above stay on their happy path - so integration tests
+ * that need both a working list query and a failing REST fetch in the same
+ * render don't have to rewrite the whole handler array.
+ */
+export const taxpayerRestErrorHandler = http.get(
+  'http://localhost:8080/api/v1/taxpayers/:id',
+  () => HttpResponse.json({ error: 'liability service unavailable' }, { status: 500 }),
+);
