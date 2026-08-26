@@ -27,7 +27,11 @@ function renderApp(): ReturnType<typeof renderWithProviders> {
       <Route path="/taxpayers" element={<TaxpayerListPage></TaxpayerListPage>} />
       <Route path="/taxpayers/:id" element={<TaxpayerDetailPage></TaxpayerDetailPage>} />
     </Routes>,
-    { initialEntries: ['/taxpayers'] },
+    // This whole file is the "MSW integration" suite - a real ApolloClient
+    // over HttpLink, actually hitting the network MSW intercepts, not
+    // renderWithProviders' default MockedProvider (that default is for the
+    // Task 1 component tests in src/pages/*.test.tsx).
+    { apolloClient: newSharedApolloClient(), initialEntries: ['/taxpayers'] },
   );
 }
 

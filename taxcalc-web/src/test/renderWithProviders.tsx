@@ -3,13 +3,28 @@ import type { ReactElement } from 'react';
 import { render, type RenderResult } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { ApolloClient, ApolloProvider, HttpLink, InMemoryCache, type NormalizedCacheObject } from '@apollo/client';
+import { ApolloProvider, type ApolloClient, type NormalizedCacheObject } from '@apollo/client';
+import { MockedProvider, type MockedResponse } from '@apollo/client/testing';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 interface ProviderOptions {
   /** Initial route(s) for the `MemoryRouter` - defaults to the app root. */
   readonly initialEntries?: readonly string[];
-  /** A pre-built Apollo client, for tests that need to assert against its cache directly. */
+  /**
+   * Canned GraphQL responses for Apollo's `MockedProvider` - the default
+   * Apollo test double, matching each outgoing operation by query +
+   * variables rather than hitting a real network layer. This is what every
+   * Task 1 component test in `src/pages/*.test.tsx` uses.
+   */
+  readonly mocks?: ReadonlyArray<MockedResponse>;
+  /**
+   * Escape hatch for tests that need a real `ApolloClient` over `HttpLink`
+   * intercepted by MSW instead - e.g. the Task 2 integration tests, which
+   * are specifically exercising real network/cache behavior (a genuine
+   * cache-hit render, `server.use()` overrides mid-test) that
+   * `MockedProvider`'s per-call mock matching can't express. Passing this
+   * overrides `mocks` entirely.
+   */
   readonly apolloClient?: ApolloClient<NormalizedCacheObject>;
   /** A pre-built QueryClient, for tests that need to assert against its cache directly. */
   readonly queryClient?: QueryClient;
@@ -18,14 +33,6 @@ interface ProviderOptions {
 interface RenderWithProvidersResult extends RenderResult {
   readonly user: UserEvent;
   readonly queryClient: QueryClient;
-  readonly apolloClient: ApolloClient<NormalizedCacheObject>;
-}
-
-function newApolloClient(): ApolloClient<NormalizedCacheObject> {
-  return new ApolloClient({
-    link: new HttpLink({ uri: 'http://localhost:8080/graphql' }),
-    cache: new InMemoryCache(),
-  });
 }
 
 function newQueryClient(): QueryClient {
@@ -36,26 +43,32 @@ function newQueryClient(): QueryClient {
 }
 
 /**
- * Mounts `ui` inside `MemoryRouter` + `QueryClientProvider` + `ApolloProvider`
- * - the three providers every routed page under `src/pages/` needs - and
- * returns a single `userEvent.setup()` instance alongside the render utils
- * and both clients, so tests can assert against cache state without
- * threading their own provider boilerplate through every file.
+ * Mounts `ui` inside `MemoryRouter` + `QueryClientProvider` + an Apollo
+ * provider - the three providers every routed page under `src/pages/`
+ * needs - and returns a single `userEvent.setup()` instance alongside the
+ * render utils and the QueryClient, so tests can assert against REST cache
+ * state without threading their own provider boilerplate through every
+ * file. The Apollo layer defaults to `MockedProvider` (pass `mocks`); pass
+ * `apolloClient` instead for a real client over MSW.
  */
 export function renderWithProviders(
   ui: ReactElement,
   opts: ProviderOptions = {},
 ): RenderWithProvidersResult {
-  const { initialEntries = ['/'], apolloClient = newApolloClient(), queryClient = newQueryClient() } = opts;
+  const { initialEntries = ['/'], mocks = [], apolloClient, queryClient = newQueryClient() } = opts;
 
   const user = userEvent.setup();
-  const utils = render(
+  const apolloLayer = apolloClient ? (
     <ApolloProvider client={apolloClient}>
-      <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={[...initialEntries]}>{ui}</MemoryRouter>
-      </QueryClientProvider>
-    </ApolloProvider>,
+      <MemoryRouter initialEntries={[...initialEntries]}>{ui}</MemoryRouter>
+    </ApolloProvider>
+  ) : (
+    <MockedProvider mocks={[...mocks]}>
+      <MemoryRouter initialEntries={[...initialEntries]}>{ui}</MemoryRouter>
+    </MockedProvider>
   );
 
-  return { user, queryClient, apolloClient, ...utils };
+  const utils = render(<QueryClientProvider client={queryClient}>{apolloLayer}</QueryClientProvider>);
+
+  return { user, queryClient, ...utils };
 }

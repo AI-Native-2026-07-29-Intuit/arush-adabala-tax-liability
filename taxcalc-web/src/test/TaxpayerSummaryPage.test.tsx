@@ -2,31 +2,63 @@
 import { describe, it, expect } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import { Route, Routes } from 'react-router-dom';
-import { graphql, HttpResponse } from 'msw';
+import type { MockedResponse } from '@apollo/client/testing';
 import { axe } from 'jest-axe';
-import { server } from './server';
 import { renderWithProviders } from './renderWithProviders';
+import { SummarizeTaxpayerDocument, type SummarizeTaxpayerMutation } from '../gql/generated/hooks';
 import { TaxpayerSummaryPage } from '../pages/TaxpayerSummaryPage';
 
-function renderAtSummaryRoute(): ReturnType<typeof renderWithProviders> {
+const VARIABLES = { id: 'stub-1' };
+
+const HAPPY_DATA: SummarizeTaxpayerMutation = {
+  summarizeTaxpayer: {
+    __typename: 'TaxpayerSummary',
+    filingStatus: 'SINGLE',
+    totalLiability: 8420,
+    jurisdictionCount: 2,
+    riskBand: 'LOW',
+  },
+};
+
+/**
+ * A short, deliberate delay (mirroring the old MSW handler's `delay(200)`)
+ * so tests observing the optimistic PENDING placeholder have a real window
+ * before this resolves - without it, an in-memory resolver can settle
+ * within the same microtask flush the placeholder renders in, and a test
+ * never actually observes two distinct render states.
+ */
+function summarizeMock(delay = 200): MockedResponse {
+  return { request: { query: SummarizeTaxpayerDocument, variables: VARIABLES }, result: { data: HAPPY_DATA }, delay };
+}
+
+function summarizeErrorMock(message: string): MockedResponse {
+  return {
+    request: { query: SummarizeTaxpayerDocument, variables: VARIABLES },
+    // A plain GraphQLFormattedError object, not a `GraphQLError` class
+    // instance - see TaxpayerListPage.test.tsx's errorMock for why.
+    result: { errors: [{ message }] },
+  };
+}
+
+function renderAtSummaryRoute(mocks: MockedResponse[]): ReturnType<typeof renderWithProviders> {
   return renderWithProviders(
     <Routes>
       <Route path="/taxpayers/:id/summary" element={<TaxpayerSummaryPage></TaxpayerSummaryPage>} />
     </Routes>,
-    { initialEntries: ['/taxpayers/stub-1/summary'] },
+    { mocks, initialEntries: ['/taxpayers/stub-1/summary'] },
   );
 }
 
 describe('TaxpayerSummaryPage', () => {
   it('renders a "Summarize" button and no summary before it is clicked', () => {
-    renderAtSummaryRoute();
+    renderAtSummaryRoute([summarizeMock()]);
 
     expect(screen.getByRole('button', { name: 'Summarize' })).toBeEnabled();
     expect(screen.queryByRole('definition')).not.toBeInTheDocument();
   });
 
   it('shows the optimistic placeholder immediately, then the server result', async () => {
-    const { user } = renderAtSummaryRoute();
+    const { user } = renderAtSummaryRoute([summarizeMock()]);
 
     await user.click(screen.getByRole('button', { name: 'Summarize' }));
 
@@ -34,9 +66,9 @@ describe('TaxpayerSummaryPage', () => {
     // before the network call is even made - so the placeholder is
     // already in the DOM the instant the click resolves, with no waitFor
     // needed. filingStatus and riskBand both carry the same placeholder
-    // text. The MSW handler still delays its response (see handlers.ts)
-    // so the two waitFor calls below have a real window between this
-    // synchronous placeholder and the real result landing.
+    // text. The mock still delays its response (see summarizeMock's own
+    // comment) so the two waitFor calls below have a real window between
+    // this synchronous placeholder and the real result landing.
     expect(screen.getAllByText('PENDING')).toHaveLength(2);
 
     await waitFor(() => expect(screen.getByText('SINGLE')).toBeInTheDocument());
@@ -44,7 +76,7 @@ describe('TaxpayerSummaryPage', () => {
   });
 
   it('disables the button while the mutation is in flight', async () => {
-    const { user } = renderAtSummaryRoute();
+    const { user } = renderAtSummaryRoute([summarizeMock()]);
 
     const button = screen.getByRole('button', { name: 'Summarize' });
     await user.click(button);
@@ -54,7 +86,7 @@ describe('TaxpayerSummaryPage', () => {
   });
 
   it('renders totalLiability and jurisdictionCount alongside filingStatus', async () => {
-    const { user } = renderAtSummaryRoute();
+    const { user } = renderAtSummaryRoute([summarizeMock()]);
 
     await user.click(screen.getByRole('button', { name: 'Summarize' }));
 
@@ -63,12 +95,7 @@ describe('TaxpayerSummaryPage', () => {
   });
 
   it('renders a role="alert" error banner when the mutation fails', async () => {
-    server.use(
-      graphql.mutation('SummarizeTaxpayer', () =>
-        HttpResponse.json({ errors: [{ message: 'summary service down' }] }),
-      ),
-    );
-    const { user } = renderAtSummaryRoute();
+    const { user } = renderAtSummaryRoute([summarizeErrorMock('summary service down')]);
 
     await user.click(screen.getByRole('button', { name: 'Summarize' }));
 
@@ -76,13 +103,13 @@ describe('TaxpayerSummaryPage', () => {
   });
 
   it('names the summary region for assistive tech', () => {
-    renderAtSummaryRoute();
+    renderAtSummaryRoute([summarizeMock()]);
 
     expect(screen.getByRole('region', { name: 'taxpayer-summary' })).toBeInTheDocument();
   });
 
   it('has no detectable accessibility violations once the summary has loaded', async () => {
-    const { container, user } = renderAtSummaryRoute();
+    const { container, user } = renderAtSummaryRoute([summarizeMock()]);
 
     await user.click(screen.getByRole('button', { name: 'Summarize' }));
     await screen.findByText('SINGLE');
