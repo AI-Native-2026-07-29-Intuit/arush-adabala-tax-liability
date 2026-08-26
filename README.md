@@ -459,6 +459,37 @@ turns too on first mount, in the same browser session — the exact design
 question raised separately about whether that store should be keyed by
 taxpayer id.)
 
+**Follow-up: request/response validation.** Neither `chat.ts` nor
+`chat-tools.ts` validated its input before this - the former took `{
+messages }` straight off the wire (and `:3001` has no auth or origin
+restriction, so anything that can reach it directly could POST arbitrary
+JSON), the latter returned a REST response's body untouched regardless of
+shape. Fixed with the same two-layer, log-the-real-cause pattern the
+5xx-mapping middleware already established, but split into two genuinely
+different failure classes rather than one shared path: `chat.ts`'s new
+`chatRequestBodySchema` (zod, `.passthrough()` so `id`/`toolInvocations`/
+etc. survive untouched) rejects a malformed request with a plain `400`
+before any stream opens - there's nothing to layer an SSE sentinel frame
+onto yet, so reusing that machinery here would have been the wrong shape
+for the failure. `chat-tools.ts`'s two new schemas (`taxpayerRestSchema`,
+mirroring `useGetTaxLiabilityRest.ts`'s already-established `TaxpayerRest`
+type field-for-field; `liabilityEstimateListSchema`, formalizing
+`dev/stub-spring-ai.ts`'s own shape since no real backend exists to check
+it against) validate each tool's REST response before returning it as the
+tool's result. A failure there throws `ToolResponseValidationError`,
+which the AI SDK wraps in `ToolExecutionError` and re-throws (confirmed by
+reading `ai`'s `executeTools`: there's no separate "let the model see a
+tool failure and react" path in this SDK version), so it still reaches
+`toClientErrorMessage` the same way an upstream connectivity failure
+does - unwrapped there via `.cause` so the log stays specific even though
+both end up behind the same generic client-facing message. 11 new tests
+(`chat.test.ts`, exercising the Hono route directly via its own
+`.request()` helper; `chat-tools.test.ts`, covering both tools' happy and
+malformed-response paths via MSW) bring the project to 51 Vitest tests;
+verified live end-to-end too, including that a well-formed body still
+reaches a real tool call through the running proxy + stub backend
+unaffected.
+
 ## Build and Test
 
 ```bash

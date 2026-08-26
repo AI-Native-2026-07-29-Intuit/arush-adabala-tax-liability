@@ -1,8 +1,9 @@
 // server/api/chat.ts
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { streamText } from 'ai';
+import { streamText, ToolExecutionError, type Message } from 'ai';
 import { Hono } from 'hono';
-import { taxpayerTools } from './chat-tools';
+import { z } from 'zod';
+import { taxpayerTools, ToolResponseValidationError } from './chat-tools';
 
 /** Maximum sequential LLM calls per turn: one tool call plus its follow-up reply. */
 const MAX_STEPS = 3;
@@ -27,6 +28,27 @@ class UpstreamStatusError extends Error {
     this.name = 'UpstreamStatusError';
   }
 }
+
+/**
+ * This route is reachable by anything that can hit `:3001` directly, not
+ * only the browser via the Vite proxy - `server/index.ts` mounts it with
+ * no auth or origin restriction. `messages` matches `@ai-sdk/react`'s own
+ * `Message` shape (`role: 'system' | 'user' | 'assistant' | 'data'`);
+ * `.passthrough()` keeps every other field (`id`, `content`,
+ * `toolInvocations`, ...) untouched in the parsed output rather than
+ * stripping down to a hand-picked subset, since `streamText` and the
+ * multi-step tool-call orchestration both need the full history
+ * `useChat` actually sends, not just what this schema bothers to name.
+ * This only checks that the request is *shaped* like a chat request
+ * (an array of role-tagged messages) - it says nothing about whether the
+ * upstream model or REST backend's responses are trustworthy, which is
+ * what `chat-tools.ts`'s schemas are for.
+ */
+const chatRequestBodySchema = z.object({
+  messages: z
+    .array(z.object({ role: z.enum(['system', 'user', 'assistant', 'data']) }).passthrough())
+    .min(1, 'messages must contain at least one entry'),
+});
 
 /**
  * The 5xx-mapping middleware: `createOpenAICompatible`'s own `fetch`
@@ -91,17 +113,35 @@ const SYSTEM_PROMPT =
  * that cause server-side either way, and uses the upstream-mapped message
  * verbatim when there is one rather than falling back to the generic
  * message for a failure that was already deliberately classified.
+ *
+ * A tool's `execute` throwing - including {@link ToolResponseValidationError}
+ * from `chat-tools.ts`, when a REST call answers with the wrong shape - is
+ * wrapped by the AI SDK into a `ToolExecutionError` and re-thrown (confirmed
+ * by reading `ai`'s `executeTools`: this SDK version has no separate
+ * "let the model see the failure and react" path, it propagates like any
+ * other stream-time error), so it arrives here the same way an upstream
+ * connectivity failure does. Unwrapping `.cause` keeps the two
+ * distinguishable in the log even though both end up behind the same
+ * generic client-facing fallback.
  */
 function toClientErrorMessage(error: unknown): string {
   console.error('chat proxy: upstream call failed', error);
   if (error instanceof UpstreamStatusError) return error.message;
+  if (error instanceof ToolExecutionError && error.cause instanceof ToolResponseValidationError) {
+    console.error('chat proxy: tool response validation failed', error.cause);
+  }
   return GENERIC_CLIENT_MESSAGE;
 }
 
 /**
  * `POST /api/chat` (mounted at that prefix by `server/index.ts`; this
- * sub-app itself only defines `/`). Reads `{ messages }` from the request
- * body, streams the model's reply back as Server-Sent Events via
+ * sub-app itself only defines `/`). Validates the request body against
+ * {@link chatRequestBodySchema} before doing anything else and rejects a
+ * bad one with a plain `400`, not an SSE error frame - no stream has
+ * started yet at that point, so there's nothing for a data-stream sentinel
+ * to be layered onto; that machinery exists for failures *during* an
+ * already-open stream, not for rejecting a request before one opens. Once
+ * validated, streams the model's reply back as Server-Sent Events via
  * {@link streamText}'s {@link https://sdk.vercel.ai/docs data-stream
  * protocol}, and forwards the incoming request's `AbortSignal` so a client
  * disconnect (the browser's Stop button, or a closed tab) cancels the
@@ -112,7 +152,18 @@ function toClientErrorMessage(error: unknown): string {
  * token-by-token streaming into one final chunk on the wire.
  */
 export const chat = new Hono().post('/', async (c) => {
-  const { messages } = await c.req.json();
+  const rawBody = await c.req.json().catch(() => null);
+  const parsedBody = chatRequestBodySchema.safeParse(rawBody);
+  if (!parsedBody.success) {
+    console.error('chat proxy: invalid request body', parsedBody.error.issues);
+    return c.json({ error: 'Invalid request body: expected a non-empty messages array.' }, 400);
+  }
+  // zod's inferred type for a `.passthrough()` schema can't express "every
+  // other field has whatever shape ai-sdk's Message needs" without
+  // duplicating that whole type here - the runtime check above already
+  // confirmed the one field that mattered (a valid `role` on every entry),
+  // so this cast is safe rather than blind.
+  const messages = parsedBody.data.messages as unknown as Message[];
 
   const result = streamText({
     model: upstream.chatModel('uptime-crew-assistant'),

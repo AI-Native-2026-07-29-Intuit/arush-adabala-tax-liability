@@ -78,11 +78,13 @@ src/pages/TaxpayerChatPanel.tsx     streaming chat assistant (useChat), mounted 
 src/pages/ToolCallCard.tsx          presentational card for one ToolInvocation (partial-call/call/result)
 src/main.tsx                        entry point: Apollo/Query providers wrap ErrorBoundary + RouterProvider
 server/index.ts                     Hono entry point (pnpm server), mounts the chat route on :3001
-server/api/chat.ts                  POST /api/chat: streamText + toDataStreamResponse against the Spring AI backend
-server/api/chat-tools.ts            lookupTaxpayer/estimateLiability ai tools, executed server-side against the REST backend
+server/api/chat.ts                  POST /api/chat: validates the request body (zod), then streamText + toDataStreamResponse against the Spring AI backend
+server/api/chat-tools.ts            lookupTaxpayer/estimateLiability ai tools; each validates its REST response (zod) before returning it as the tool result
 dev/stub-spring-ai.ts               dev-only stand-in for the (nonexistent) Spring AI + REST backend (pnpm stub-backend, :8080) - not a real implementation, just enough to demo the chat happy path
 src/test/handlers.ts, server.ts     MSW request handlers + setupServer lifecycle
 src/test/sse-handlers.ts            MSW handler emitting the AI SDK data-stream protocol by hand (no live proxy needed for tests)
+src/test/chat.test.ts               chat.ts's request-body validation, exercised directly via Hono's own .request() helper
+src/test/chat-tools.test.ts         both tools' REST-response validation, happy and malformed paths, via MSW
 src/test/                           Vitest setup + unit/smoke tests
 ```
 
