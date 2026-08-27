@@ -14,6 +14,10 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   const page = await browser.newPage();
 
   await page.goto(`${baseURL}/login`);
+  // Not real credentials - LoginPage's stub sign-in never validates these
+  // against anything, but the button stays disabled until both are filled.
+  await page.getByLabel('Email').fill('engineer@uptimecrew.example.internal');
+  await page.getByLabel('Password').fill('synthetic-test-pwd');
   await page.getByRole('button', { name: /sign in/i }).click();
   await page.waitForURL(/\/taxpayers/);
 

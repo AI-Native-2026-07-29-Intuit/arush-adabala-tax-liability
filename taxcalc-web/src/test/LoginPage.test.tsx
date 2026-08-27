@@ -1,6 +1,7 @@
 // src/test/LoginPage.test.tsx
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { LoginPage } from '../pages/LoginPage';
 import { getStoredJwt } from '../lib/jwtStorage';
@@ -23,18 +24,39 @@ beforeEach(() => {
   installFakeLocalStorage();
 });
 
-describe('LoginPage', () => {
-  it('clicking "Sign in (stub)" stores a JWT and navigates to /taxpayers', () => {
-    render(
-      <MemoryRouter initialEntries={['/login']}>
-        <Routes>
-          <Route path="/login" element={<LoginPage></LoginPage>} />
-          <Route path="/taxpayers" element={<p>taxpayers page</p>} />
-        </Routes>
-      </MemoryRouter>,
-    );
+function renderLoginPage(): void {
+  render(
+    <MemoryRouter initialEntries={['/login']}>
+      <Routes>
+        <Route path="/login" element={<LoginPage></LoginPage>} />
+        <Route path="/taxpayers" element={<p>taxpayers page</p>} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in (stub)' }));
+describe('LoginPage', () => {
+  it('the Sign in button is disabled until both email and password are filled', async () => {
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    const button = screen.getByRole('button', { name: 'Sign in (stub)' });
+    expect(button).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Email'), 'engineer@uptimecrew.example.internal');
+    expect(button).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Password'), 'synthetic-test-pwd');
+    expect(button).toBeEnabled();
+  });
+
+  it('filling both fields and clicking "Sign in (stub)" stores a JWT and navigates to /taxpayers', async () => {
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    await user.type(screen.getByLabelText('Email'), 'engineer@uptimecrew.example.internal');
+    await user.type(screen.getByLabelText('Password'), 'synthetic-test-pwd');
+    await user.click(screen.getByRole('button', { name: 'Sign in (stub)' }));
 
     expect(screen.getByText('taxpayers page')).toBeInTheDocument();
     expect(getStoredJwt()).not.toBeNull();
