@@ -10,7 +10,7 @@ buildscript {
 plugins {
     id 'java'
     id 'jacoco'
-    id 'org.springframework.boot'      version '3.3.2'
+    id 'org.springframework.boot'      version '3.3.13'
     id 'io.spring.dependency-management' version '1.1.5'
     // A newer release than the flyway-core version Spring Boot 3.3.2 manages below
     // (10.10.0): the Gradle plugin needs a version compatible with this project's
@@ -32,6 +32,15 @@ java {
 repositories {
     mavenCentral()
 }
+
+// Trivy (docker/SECURITY.md scan) flagged HIGH/CRITICAL CVEs against the Tomcat and Netty
+// versions Spring Boot 3.3.13's BOM manages by default. Both projects publish patch releases
+// within their existing 3.3-compatible lines (10.1.x, 4.1.x respectively), so Spring Boot's
+// documented ext[] override mechanism can pull the fix in without changing the BOM/plugin
+// version itself. See docker/SECURITY.md for the CVE IDs this closes.
+ext['tomcat.version'] = '10.1.55'
+ext['netty.version'] = '4.1.136.Final'
+ext['jackson-bom.version'] = '2.18.8'
 
 // Pin the Spring Cloud release train (compatible with Spring Boot 3.3 / Java 21).
 dependencyManagement {
@@ -65,7 +74,7 @@ dependencies {
     implementation      'org.springframework.boot:spring-boot-starter-web'
     implementation      'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly         'org.springframework.boot:spring-boot-starter-jdbc'
-    runtimeOnly         'org.postgresql:postgresql:42.7.3'
+    runtimeOnly         'org.postgresql:postgresql:42.7.11'
 
     // --- Flyway migrations (NEW for W3 D3): owns taxcalc DDL, Hibernate stays ddl-auto=validate ---
     implementation      'org.flywaydb:flyway-core'
@@ -88,13 +97,27 @@ dependencies {
 
     // --- springdoc-openapi, OpenFeign & Resilience4j (NEW for W3 D2) ------
     implementation      'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.6.0'
-    implementation      'org.springframework.cloud:spring-cloud-starter-openfeign'
-    implementation      'org.springframework.cloud:spring-cloud-starter-circuitbreaker-resilience4j'
+    // spring-cloud-starter transitively pulls spring-security-rsa -> bcprov-jdk18on (~8MB): a
+    // BouncyCastle provider for decrypting {cipher}-prefixed config properties and PEM-encoded
+    // RSA keys. This project uses neither (no {cipher} values, no PEM key paths anywhere in
+    // config) - excluded to keep it off the Docker runtime image.
+    implementation('org.springframework.cloud:spring-cloud-starter-openfeign') {
+        exclude group: 'org.bouncycastle', module: 'bcprov-jdk18on'
+    }
+    implementation('org.springframework.cloud:spring-cloud-starter-circuitbreaker-resilience4j') {
+        exclude group: 'org.bouncycastle', module: 'bcprov-jdk18on'
+    }
 
     testImplementation  'org.wiremock:wiremock-standalone:3.9.1'
 
     // --- Kafka outbox/consumer (NEW for W3 D3) -----------------------------
-    implementation      'org.springframework.kafka:spring-kafka'
+    // zstd-jni (~6.4MB) bundles native compression binaries for every platform kafka-clients
+    // might run on; it is only loaded if compression.type=zstd is configured, which this
+    // project never sets (producer/consumer use Kafka's default "none"). Excluded to keep it
+    // off the Docker runtime image.
+    implementation('org.springframework.kafka:spring-kafka') {
+        exclude group: 'com.github.luben', module: 'zstd-jni'
+    }
 
     // --- Spring AI MCP server (NEW for W3 D3) -------------------------------
     // Spring Boot 3.3 does not manage Spring AI's version - it is not in the Boot BOM - so this
@@ -148,15 +171,15 @@ dependencies {
     testImplementation 'org.mockito:mockito-junit-jupiter:5.10.0'
 
     implementation      'org.slf4j:slf4j-api:2.0.12'
-    runtimeOnly         'ch.qos.logback:logback-classic:1.5.6'
-    testImplementation  'ch.qos.logback:logback-classic:1.5.6'
+    runtimeOnly         'ch.qos.logback:logback-classic:1.5.18'
+    testImplementation  'ch.qos.logback:logback-classic:1.5.18'
     testImplementation  'org.assertj:assertj-core:3.25.3'
 
     testImplementation platform('org.testcontainers:testcontainers-bom:1.19.7')
     testImplementation 'org.testcontainers:postgresql'
     testImplementation 'org.testcontainers:junit-jupiter'
     testImplementation 'org.testcontainers:kafka'
-    testImplementation 'org.postgresql:postgresql:42.7.3'
+    testImplementation 'org.postgresql:postgresql:42.7.11'
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
 
     // --- NEW for W2 D5: Testcontainers MongoDB module -----------------------

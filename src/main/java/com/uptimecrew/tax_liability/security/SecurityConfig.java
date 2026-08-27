@@ -39,7 +39,11 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/actuator/health").permitAll()
+                        // Wildcarded: Spring Boot serves the liveness/readiness groups as
+                        // sub-paths of this same endpoint (/actuator/health/readiness,
+                        // /actuator/health/liveness), and Docker/Kubernetes probes hit those
+                        // sub-paths directly, with no bearer token to present.
+                        .requestMatchers("/actuator/health/**").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         // (1a) Spring AI's MCP WebMVC server (W3 D3): the local-only tool surface
                         // Claude Code connects to over SSE. Unauthenticated like the two matchers

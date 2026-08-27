@@ -114,6 +114,12 @@ management:
   endpoint:
     health:
       show-details: always              # (8) so mongo/redis sub-health is visible over plain curl
+      probes:
+        enabled: true                   # (8c) exposes /actuator/health/{liveness,readiness} outside
+                                         #      Kubernetes too - Boot only auto-enables them when it
+                                         #      detects a K8s environment, but a plain `docker run`
+                                         #      HEALTHCHECK (and the Docker Compose / Kubernetes
+                                         #      probes W5 D2-D3 wire up) need the same two routes.
 
 springdoc:
   api-docs:
