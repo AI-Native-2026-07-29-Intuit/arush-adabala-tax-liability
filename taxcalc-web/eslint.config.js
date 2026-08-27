@@ -45,15 +45,21 @@ export default tseslint.config(
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
       '@typescript-eslint/no-explicit-any': 'error',
-      // `@typescript-eslint/no-explicit-any` only catches `any` used as a
-      // type position (`: any`, `Array<any>`); it doesn't catch `as any`,
-      // a type *assertion* rather than an annotation - this closes that
-      // gap so both routes to "I told the compiler to stop checking" are
-      // banned the same way.
+      // A belt-and-suspenders ban on `as any`/`<any>x` alongside
+      // `no-explicit-any` above (which already flags both in current
+      // typescript-eslint versions - verified by hand, not assumed - so
+      // this is deliberately redundant rather than covering a real gap).
+      // `any` is a keyword type, not a named one: it parses to a
+      // `TSAnyKeyword` node with no `typeName` property at all - that
+      // property only exists on `TSTypeReference` nodes (`as Foo`, `as
+      // Array<T>`). A selector checking `typeAnnotation.typeName.name`
+      // therefore never matches `as any` specifically; `typeAnnotation.type`
+      // is the check that actually works, confirmed with a scratch
+      // `x as any` file before and after this fix.
       'no-restricted-syntax': [
         'error',
         {
-          selector: "TSTypeAssertion[typeAnnotation.typeName.name='any'], TSAsExpression[typeAnnotation.typeName.name='any']",
+          selector: "TSTypeAssertion[typeAnnotation.type='TSAnyKeyword'], TSAsExpression[typeAnnotation.type='TSAnyKeyword']",
           message: 'as any is banned; widen the type properly.',
         },
       ],
