@@ -129,7 +129,7 @@ describe('TaxpayerListPage', () => {
     await screen.findByText('stub-1');
     expect(screen.getAllByRole('listitem')).toHaveLength(3);
 
-    await user.type(screen.getByRole('textbox', { name: 'Search' }), 'stub-1');
+    await user.type(screen.getByLabelText('Search'), 'stub-1');
 
     await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(1));
     expect(screen.getByText('stub-1')).toBeInTheDocument();
