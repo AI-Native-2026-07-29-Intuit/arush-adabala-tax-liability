@@ -1,6 +1,7 @@
 // dev/stub-spring-ai.ts
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 
 const PORT = 8080;
 
@@ -24,6 +25,18 @@ const PORT = 8080;
  * end-to-end, tool-call orchestration included, rather than bypassed.
  */
 const app = new Hono();
+// apollo/client.ts and useGetTaxLiabilityRest.ts both call this stub
+// directly from the browser at http://localhost:8080 - cross-origin from
+// the Vite dev server at :5173, unlike /api/chat (which vite.config.ts
+// proxies same-origin). Without CORS headers, the browser rejects both the
+// GraphQL POST and the REST GET's `authorization` header (a non-simple
+// header, so it also forces a preflight) with an opaque "Failed to fetch" -
+// the failure the W4 D5 Playwright happy-path spec first surfaced, since
+// nothing before it had ever driven this stub through a real browser.
+app.use('*', cors({ origin: 'http://localhost:5173', allowHeaders: ['authorization', 'content-type'] }));
+// See server/index.ts's identical route for why this exists: Playwright's
+// webServer readiness probe (playwright.config.ts) needs a real 2xx.
+app.get('/health', (c) => c.text('ok'));
 
 interface IncomingMessage {
   readonly role: string;
@@ -64,7 +77,11 @@ function baseChunk(overrides: Record<string, unknown>): Record<string, unknown> 
  * OpenAI-compatible stream format this time, not the Vercel one.
  */
 app.post('/ai/chat/completions', async (c) => {
-  const body = (await c.req.json()) as ChatCompletionsRequestBody;
+  // Hono's `json<T = any>()` is generic, not validated at runtime - a type
+  // argument here (rather than an `as` assertion after the call) is what
+  // lets the compiler infer the specific shape without a separately
+  // flagged, technically-redundant assertion on top of it.
+  const body = await c.req.json<ChatCompletionsRequestBody>();
   const messages = body.messages ?? [];
   const hasToolResult = messages.some((m) => m.role === 'tool');
   const lastUserContent = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -162,6 +179,43 @@ app.get('/api/v1/taxpayers', (c) => {
     { id: 'stub-1', taxYear: Number(year ?? 2024), liabilityAmount: 4820 },
     { id: 'stub-2', taxYear: Number(year ?? 2024), liabilityAmount: 9310 },
   ]);
+});
+
+interface GraphQLRequestBody {
+  readonly operationName?: string;
+  readonly query?: string;
+}
+
+/**
+ * `apollo/client.ts` targets `http://localhost:8080/graphql` unconditionally
+ * (there's no separate base URL for dev vs. test), so `TaxpayerListPage`
+ * needs this route stubbed the same way the REST handlers above stand in
+ * for the W3 D2 backend - otherwise the W4 D5 Playwright happy-path spec's
+ * first screen (the list, reached by clicking through the UI rather than a
+ * direct `goto`) would 404 before the browser ever reaches the chat panel.
+ * `operationName` is Apollo's own field for this, sent on every request
+ * regardless of the document's shape - matched the same way
+ * `src/test/handlers.ts`'s MSW `graphql.query('LatestTaxpayers', ...)`
+ * matches by operation name rather than parsing the query string.
+ */
+app.post('/graphql', async (c) => {
+  const body = await c.req.json<GraphQLRequestBody>();
+  if (body.operationName === 'LatestTaxpayers') {
+    return c.json({
+      data: {
+        latestTaxpayers: [
+          {
+            __typename: 'Taxpayer',
+            id: 'stub-1',
+            tags: ['flagged'],
+            lines: [{ __typename: 'LineItem', id: 'line-1', description: 'Wages', amount: 100 }],
+          },
+          { __typename: 'Taxpayer', id: 'stub-2', tags: [], lines: [] },
+        ],
+      },
+    });
+  }
+  return c.json({ errors: [{ message: `stub backend: unhandled operation ${body.operationName ?? '(none)'}` }] }, 200);
 });
 
 serve({ fetch: app.fetch, port: PORT });

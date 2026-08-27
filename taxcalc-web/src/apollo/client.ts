@@ -9,7 +9,10 @@ import { getStoredJwt } from '../lib/jwtStorage';
 // ProtectedLayout, which reads the same key via jwtStorage.ts.
 const httpLink = new HttpLink({ uri: 'http://localhost:8080/graphql' });
 
-const authLink = setContext((_operation, { headers }) => {
+// Apollo's own `DefaultContext` types `headers` as `Record<string, any>` -
+// this narrower annotation on the destructured parameter (not a cast on
+// its use) is what gives the spread below a real type instead of `any`.
+const authLink = setContext((_operation, { headers }: { headers?: Record<string, string> }) => {
   const token = getStoredJwt();
   return {
     headers: {

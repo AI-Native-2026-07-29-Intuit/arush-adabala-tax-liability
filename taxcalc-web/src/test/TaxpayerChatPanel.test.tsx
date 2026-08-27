@@ -1,5 +1,5 @@
 // src/test/TaxpayerChatPanel.test.tsx
-import { render, type RenderResult, screen, waitFor, within } from '@testing-library/react';
+import { render, type RenderResult, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Message } from 'ai';
 import { http, HttpResponse } from 'msw';
@@ -74,7 +74,7 @@ describe('TaxpayerChatPanel', () => {
    */
   it('Stop mid-stream flips isLoading false and freezes the message shorter than the full stub', async () => {
     server.use(
-      http.post('/api/chat', async () => {
+      http.post('/api/chat', () => {
         const stream = new ReadableStream<Uint8Array>({
           async start(controller) {
             controller.enqueue(new TextEncoder().encode('0:"stub "\n'));
@@ -220,7 +220,7 @@ describe('TaxpayerChatPanel', () => {
     // click Stop with a comfortable margin before any content would
     // otherwise arrive.
     server.use(
-      http.post('/api/chat', async () => {
+      http.post('/api/chat', () => {
         const stream = new ReadableStream<Uint8Array>({
           async start(controller) {
             await new Promise((resolve) => setTimeout(resolve, 500));
@@ -265,8 +265,14 @@ describe('TaxpayerChatPanel', () => {
     // fresh taxpayer id, seeded from whatever the store now holds - which
     // is still nothing, since the stopped turn was never persisted.
     const reloadedMount = renderAtChatRoute('stub-6-reloaded');
-    const transcript = within(reloadedMount.getByLabelText('chat-transcript'));
-    expect(transcript.queryAllByRole('listitem')).toHaveLength(0);
+    // Not queryAllByRole('listitem') - the transcript's role="log" (added
+    // for the W4 D5 Playwright spec's page.getByRole('log') assertion)
+    // means its <li> children no longer get an implicit listitem role at
+    // all (that role requires an ancestor with role="list", which role="log"
+    // isn't), so that query would silently return 0 regardless of what's
+    // actually in the DOM. querySelectorAll checks the real markup instead.
+    const transcript = reloadedMount.getByLabelText('chat-transcript');
+    expect(transcript.querySelectorAll('li')).toHaveLength(0);
   });
 
   it('Send is disabled when the input is empty or whitespace-only', async () => {

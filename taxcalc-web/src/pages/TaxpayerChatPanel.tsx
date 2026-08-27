@@ -52,7 +52,11 @@ export function TaxpayerChatPanel(): React.ReactElement {
 
   return (
     <section aria-label="taxpayer-chat">
-      <ul aria-label="chat-transcript">
+      {/* role="log" - a live region for "a series of new information ...
+          added in a meaningful order" - is the ARIA spec's own textbook
+          example for chat transcripts, a better fit than the plain list
+          role a bare <ul> carries by default. */}
+      <ul aria-label="chat-transcript" role="log">
         {messages.map((m) => (
           <li key={m.id} data-role={m.role}>
             <strong>{m.role}:</strong> {m.content}
@@ -80,7 +84,7 @@ export function TaxpayerChatPanel(): React.ReactElement {
         <button type="button" onClick={stop} disabled={!isLoading}>
           Stop
         </button>
-        <button type="button" onClick={() => reload()} disabled={isLoading}>
+        <button type="button" onClick={() => void reload()} disabled={isLoading}>
           Regenerate
         </button>
       </form>

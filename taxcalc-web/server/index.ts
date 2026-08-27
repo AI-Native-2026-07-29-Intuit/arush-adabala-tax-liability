@@ -14,6 +14,11 @@ const PORT = 3001;
  * only endpoint this deliverable needs.
  */
 const app = new Hono();
+// A real 200 for the Playwright webServer readiness probe (playwright.config.ts) -
+// Playwright's `url` check only considers the server started once it sees a
+// response under 400, and this app otherwise has no route at `/` (only
+// `POST /api/chat`), which 404s and would leave the check waiting forever.
+app.get('/health', (c) => c.text('ok'));
 app.route('/api/chat', chat);
 
 serve({ fetch: app.fetch, port: PORT });

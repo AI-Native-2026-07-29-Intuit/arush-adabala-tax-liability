@@ -490,6 +490,124 @@ verified live end-to-end too, including that a well-formed body still
 reaches a real tool call through the running proxy + stub backend
 unaffected.
 
+## Week 4 Day 5 — Frontend Testing, a11y & Production Readiness
+
+The W4 capstone day: turns the thin, one-or-two-test-per-file coverage
+carried through W4 D1–D4 into a real test pyramid — RTL + Vitest component
+tests with a branch-coverage gate at the bottom, MSW-backed page
+integration tests in the middle, one Playwright end-to-end happy-path at
+the top — plus a jest-axe/`@axe-core/playwright` a11y pass, a
+type-checked ESLint 9 flat config, and a single `pnpm check` script that
+ties all of it into one CI gate.
+
+**Task 1 — harness + component tests.** `vitest.config.ts` gets a
+`coverage` block (`@vitest/coverage-v8`, `include: ['src/**/*.{ts,tsx}']`,
+excluding `src/gql/generated/**` and `src/test/**`, `thresholds.branches:
+70`). `src/test/renderWithProviders.tsx` is new: a single helper mounting
+`ApolloProvider` + `QueryClientProvider` + `MemoryRouter` and returning a
+ready `userEvent.setup()` instance, replacing the per-test-file provider
+boilerplate `TaxpayerListPage.test.tsx`/`TaxpayerSummaryPage.test.tsx` had
+each been repeating since W4 D3. `src/test/setup.ts` registers jest-axe's
+matcher; since jest-axe ships no types of its own and the published
+`@types/jest-axe` (last released for the 3.x line) doesn't structurally
+satisfy Vitest's `expect.extend`, `src/test/jest-axe.d.ts` hand-declares
+just the two exports this project uses, typed against `axe-core`'s own
+`AxeResults`. `TaxpayerListPage.test.tsx` and `TaxpayerSummaryPage.test.tsx`
+grow from one test each to nine and six — loading skeleton, empty state,
+role="alert" error banner, tag rendering, disabled-while-loading button —
+15 new component tests total. Writing the error-path test surfaced a real
+bug: `TaxpayerSummaryPage`'s Summarize button called `summarize()` without
+awaiting or catching it, so a failed mutation left an unhandled promise
+rejection even though the `error` state already rendered correctly; fixed
+with a `.catch(() => undefined)` alongside the existing error UI.
+
+**Task 2 — MSW-backed page integration tests.** Two new files exercise
+real pages against the fake network layer rather than one component or a
+stubbed `fetch` in isolation: `TaxpayerDetailPage.integration.test.tsx`
+(8 tests — REST happy/500 paths, multiple liability line items, the
+search box narrowing the debounced "filtering for" text through the real
+Zustand store, the threshold slider updating its readout while REST data
+stays rendered, and a route-id change re-fetching the new taxpayer) and
+`TaxpayerListPage.integration.test.tsx` (5 tests — an Apollo cache-hit
+render that never re-shows the loading skeleton, list-to-detail router
+navigation landing on the right REST-backed page, and the `persist`
+middleware writing *only* its partialized `threshold` slice through
+`safeLocalStorage`, read back and asserted directly rather than just
+trusted from the store's own state). `src/test/handlers.ts` exports a new
+`taxpayerRestErrorHandler` so a test can opt one route into its 500 branch
+via `server.use()` without touching the rest of the handler array.
+
+**Task 3 — Playwright E2E happy-path.** `playwright.config.ts` boots three
+local servers in parallel (`pnpm dev`, `pnpm server`, `pnpm stub-backend`)
+and runs `e2e/global-setup.ts` once to sign in through the real UI and
+persist `storageState` for every spec. `e2e/taxpayer-chat.spec.ts` drives
+the actual capstone flow in a live browser: list → detail → chat → a
+streamed reply → a tool-calling turn (`lookupTaxpayer`, orchestrated
+entirely server-side by `streamText`'s `maxSteps` loop) → reload with the
+transcript still there. There was previously no in-app link from the
+detail page to `/taxpayers/:id/chat` at all — `TaxpayerDetailPage.tsx`
+gets one (`Chat about {id}`) so the spec can click through it like a real
+user instead of a raw `page.goto`. Driving this through an actual browser
+— something no MSW-backed test had ever done — surfaced three real bugs:
+`dev/stub-spring-ai.ts` had no CORS headers, so the browser silently
+failed every cross-origin call to `:8080` from the Vite dev server at
+`:5173` (fixed with `hono/cors`); neither `server/index.ts` nor
+`dev/stub-spring-ai.ts` had a route returning a real 2xx for Playwright's
+`webServer` readiness probe, so it polled forever against a 404 (both get
+a `GET /health`); and Vitest's default file glob was also collecting the
+Playwright spec itself, colliding with its own `test`/`expect` globals
+(fixed by excluding `e2e/**` in `vitest.config.ts`). `dev/stub-spring-ai.ts`
+also gains a `/graphql` stub for the `LatestTaxpayers` query, matched by
+`operationName` the same way the MSW handlers already do, so the list
+page — reached by clicking through the UI, not a direct `goto` — is
+reachable from a live browser without the full Spring stack.
+
+**Task 4 — a11y, type-checked ESLint, and the `check` gate.** One
+`jest-axe` scan (`expect(await axe(container)).toHaveNoViolations()`) is
+added to each of `TaxpayerListPage.test.tsx` and `TaxpayerSummaryPage.test.tsx`'s
+loaded states, and one `@axe-core/playwright` `AxeBuilder({ page })`
+`.withTags(['wcag2a', 'wcag2aa']).analyze()` scan to the E2E spec's detail
+page state — one scan per state, not one per test. Wiring jest-axe
+surfaced a real bug in `setup.ts` itself: jest-axe's `toHaveNoViolations`
+export is *already* the `{ toHaveNoViolations: fn }` shape `expect.extend`
+wants, not a bare function — `expect.extend({ toHaveNoViolations })` had
+nested it one level too deep, silently registering a matcher whose
+"function" was actually an object; both axe scans below only pass because
+this got fixed first (`expect.extend(toHaveNoViolations)`), and the
+type declaration in `jest-axe.d.ts` was corrected to match. `eslint.config.js`
+now runs `typescript-eslint`'s `recommendedTypeChecked` rule set (with
+`parserOptions.project` and a `disableTypeChecked` override for the one
+plain-JS file, itself) plus `eslint-plugin-jsx-a11y`'s recommended rules,
+and a `no-restricted-syntax` rule banning `as any` (a type *assertion*,
+which `@typescript-eslint/no-explicit-any` alone doesn't catch) alongside
+the existing `no-explicit-any`. Turning on type-checked linting surfaced
+real issues across files untouched since earlier weeks: two unsafe `any`
+flows (Hono's `c.req.json()` defaults to `any` — fixed with an explicit
+generic argument, `c.req.json<T>()`, rather than an `as` cast, since a
+cast immediately after that specific call is flagged as redundant once
+TypeScript's contextual generic inference already narrows it; Apollo's
+`setContext` types its `headers` context field as `Record<string, any>`
+— fixed by annotating the destructured parameter directly), a floating
+promise in `LoginPage`'s `navigate()` call (react-router's data-router
+`navigate` returns a `Promise<void>`; fixed with `void`), and the same
+misused-promise pattern in `TaxpayerChatPanel`'s Regenerate button Task 1
+had already fixed in `TaxpayerSummaryPage`. `package.json` gains one
+`check` script (`tsc --noEmit && eslint . && vitest run --coverage &&
+playwright test`); `.github/workflows/web-ci.yml`'s job now installs
+Chromium (`playwright install --with-deps chromium`) and calls `pnpm
+check` as its single entrypoint, in place of the four separate
+lint/typecheck/test/build steps.
+
+79 Vitest tests (up from 51) across 17 files, plus one Playwright spec,
+clear `pnpm check` locally — `tsc --noEmit`, `eslint .`, and `vitest run
+--coverage` (93.96% branches, comfortably above the 70% gate) all pass;
+`playwright test` was verified live in an earlier pass of this same
+session (the CORS/health-route/GraphQL-stub/chat-link fixes above were
+all found and fixed by running it against a real browser) but could not
+be re-run at the very end of this session because port 8080 was held
+locally by an unrelated sibling project's own dev server, left untouched
+rather than killed again.
+
 ## Build and Test
 
 ```bash
@@ -500,6 +618,7 @@ unaffected.
 ```bash
 cd taxcalc-web
 pnpm install
-pnpm lint && pnpm typecheck && pnpm test && pnpm build   # same gate as .github/workflows/web-ci.yml
-pnpm dev                                                  # http://localhost:5173/#/taxpayers/stub-id-1
+pnpm exec playwright install chromium   # once, before the first `pnpm check` or `pnpm e2e`
+pnpm check                              # tsc --noEmit && eslint . && vitest run --coverage && playwright test - same gate as .github/workflows/web-ci.yml
+pnpm dev                                # http://localhost:5173/login
 ```

@@ -3,6 +3,9 @@ dist
 dist-ssr
 *.local
 coverage
+playwright-report
+test-results
+e2e/.auth
 
 .vscode/*
 !.vscode/extensions.json
