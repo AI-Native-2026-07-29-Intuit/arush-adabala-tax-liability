@@ -5,9 +5,11 @@
 // Apollo-cache-hit scenario that a single-component test can't exercise
 // (it needs the same ApolloClient instance reused across two mounts).
 import { describe, it, expect, beforeEach } from 'vitest';
-import { screen, waitFor, fireEvent } from '@testing-library/react';
+import { screen, fireEvent } from '@testing-library/react';
 import { Route, Routes } from 'react-router-dom';
 import { ApolloClient, HttpLink, InMemoryCache, type NormalizedCacheObject } from '@apollo/client';
+import { server } from './server';
+import { latestTaxpayersLoadingHandler } from './handlers';
 import { renderWithProviders } from './renderWithProviders';
 import { useTaxpayerFilterStore } from '../stores/useTaxpayerFilterStore';
 import { safeLocalStorage } from '../lib/safeLocalStorage';
@@ -41,11 +43,15 @@ beforeEach(() => {
 
 describe('TaxpayerListPage integration (Apollo cache + router + REST)', () => {
   it('shows the list before showing the loading skeleton on a fresh Apollo client', async () => {
+    // The artificially-delayed handler (not the default near-instant one)
+    // gives this a real, deliberate window to observe the loading state in,
+    // rather than relying on a promise always settling a microtask later.
+    server.use(latestTaxpayersLoadingHandler);
     const client = newSharedApolloClient();
     renderWithProviders(<TaxpayerListPage></TaxpayerListPage>, { apolloClient: client, initialEntries: ['/taxpayers'] });
 
     expect(screen.getByRole('status')).toHaveTextContent(/loading/i);
-    await waitFor(() => expect(screen.getByText('stub-1')).toBeInTheDocument());
+    expect(await screen.findByText('stub-1')).toBeInTheDocument();
   });
 
   it('reads from the Apollo cache on a second mount with the same client - no loading flash', async () => {
@@ -54,7 +60,7 @@ describe('TaxpayerListPage integration (Apollo cache + router + REST)', () => {
       apolloClient: client,
       initialEntries: ['/taxpayers'],
     });
-    await waitFor(() => expect(screen.getByText('stub-1')).toBeInTheDocument());
+    await screen.findByText('stub-1');
     first.unmount();
 
     renderWithProviders(<TaxpayerListPage></TaxpayerListPage>, { apolloClient: client, initialEntries: ['/taxpayers'] });
@@ -71,7 +77,7 @@ describe('TaxpayerListPage integration (Apollo cache + router + REST)', () => {
 
     await user.click(await screen.findByRole('link', { name: /stub-1/i }));
 
-    await waitFor(() => expect(screen.getByRole('heading')).toHaveTextContent('stub-1'));
+    expect(await screen.findByRole('heading')).toHaveTextContent('stub-1');
     expect(screen.getByText('SINGLE')).toBeInTheDocument();
   });
 
@@ -80,14 +86,19 @@ describe('TaxpayerListPage integration (Apollo cache + router + REST)', () => {
 
     await user.click(await screen.findByRole('link', { name: /stub-2/i }));
 
-    await waitFor(() => expect(screen.getByRole('heading')).toHaveTextContent('stub-2'));
+    expect(await screen.findByRole('heading')).toHaveTextContent('stub-2');
   });
 
   it('persists only the threshold slice (honoring partialize) once the slider moves on a routed detail page', async () => {
     const { user } = renderApp();
     await user.click(await screen.findByRole('link', { name: /stub-1/i }));
-    await waitFor(() => screen.getByRole('heading'));
+    await screen.findByRole('heading');
 
+    // fireEvent, not userEvent, is a deliberate exception here - verified by
+    // hand that userEvent's synthetic keyboard/pointer events never step an
+    // `<input type="range">`'s value under jsdom (no native layout engine
+    // backs it, unlike a real browser), so fireEvent.change is the only way
+    // to drive this specific control in this test environment.
     fireEvent.change(screen.getByLabelText('Threshold'), { target: { value: '80' } });
 
     // The persist middleware writes through `safeLocalStorage` on every

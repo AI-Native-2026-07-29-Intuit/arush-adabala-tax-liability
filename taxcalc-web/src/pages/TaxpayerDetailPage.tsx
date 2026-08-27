@@ -56,7 +56,7 @@ export function TaxpayerDetailPage(): React.ReactElement {
       <FilterStrip></FilterStrip>
       <p>filtering for: &apos;{debouncedSearchText}&apos;</p>
 
-      <DetailCard state={state}></DetailCard>
+      <DetailCard state={state} debouncedSearchText={debouncedSearchText}></DetailCard>
 
       {import.meta.env.DEV && (
         <button type="button" onClick={() => setShouldThrow(true)}>
@@ -67,8 +67,14 @@ export function TaxpayerDetailPage(): React.ReactElement {
   );
 }
 
+interface DetailCardProps {
+  readonly state: DetailState;
+  /** Narrows the liabilities table to rows whose bracket matches this substring. */
+  readonly debouncedSearchText: string;
+}
+
 /** Renders the branch of {@link DetailState} the fetch has reached. */
-function DetailCard({ state }: { readonly state: DetailState }): React.ReactElement {
+function DetailCard({ state, debouncedSearchText }: DetailCardProps): React.ReactElement {
   switch (state.status) {
     case 'idle':
     case 'loading':
@@ -79,6 +85,12 @@ function DetailCard({ state }: { readonly state: DetailState }): React.ReactElem
       return <p>Not found.</p>;
     case 'success': {
       const { data } = state;
+      const needle = debouncedSearchText.trim().toLowerCase();
+      const liabilities =
+        needle === ''
+          ? data.liabilities
+          : data.liabilities.filter((l) => l.bracketId.toLowerCase().includes(needle));
+
       return (
         <>
           <h1 id="taxpayer-heading">Taxpayer {data.displayName} ({data.id})</h1>
@@ -88,13 +100,29 @@ function DetailCard({ state }: { readonly state: DetailState }): React.ReactElem
             <dt>tags</dt>               <dd>{data.tags.length > 0 ? data.tags.join(', ') : '—'}</dd>
           </dl>
 
-          <ul aria-label="liabilities">
-            {data.liabilities.map((l) => (
-              <li key={`${l.taxYear}-${l.bracketId}`}>
-                {l.taxYear} {l.bracketId}: {l.liabilityAmount}
-              </li>
-            ))}
-          </ul>
+          {/* Tabular financial data (year/bracket/amount) - a <table> gives
+              each cell a real role="cell" / row="row", which a bare <ul>
+              never did, and reads better with a screen reader's table
+              navigation than a flat list of concatenated strings would. */}
+          <table>
+            <caption>Liabilities</caption>
+            <thead>
+              <tr>
+                <th scope="col">Tax year</th>
+                <th scope="col">Bracket</th>
+                <th scope="col">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {liabilities.map((l) => (
+                <tr key={`${l.taxYear}-${l.bracketId}`}>
+                  <td>{l.taxYear}</td>
+                  <td>{l.bracketId}</td>
+                  <td>{l.liabilityAmount}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
 
           <section aria-label="Threshold control">
             <ThresholdSlider></ThresholdSlider>
