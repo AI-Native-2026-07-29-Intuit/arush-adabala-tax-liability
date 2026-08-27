@@ -18,6 +18,7 @@ test.describe('TaxLiability W4 capstone happy-path', () => {
     test.setTimeout(60_000);
 
     await page.goto('/taxpayers');
+    await expect(page.getByRole('heading', { name: 'Taxpayers' })).toBeVisible();
     await expect(page.getByRole('list', { name: 'taxpayer-list' })).toBeVisible();
 
     // Open the first taxpayer row by its accessible name.
@@ -36,8 +37,11 @@ test.describe('TaxLiability W4 capstone happy-path', () => {
     await page.getByRole('link', { name: 'Chat about stub-1' }).click();
     await expect(page).toHaveURL(/\/taxpayers\/stub-1\/chat$/);
 
-    const transcript = page.getByRole('list', { name: 'chat-transcript' });
-    const chatInput = page.getByRole('textbox', { name: 'chat-input' });
+    // role="log" - the ARIA-correct role for a chat transcript (a live
+    // region where new entries append in order) - not the plain list role
+    // a bare <ul> would carry by default.
+    const transcript = page.getByRole('log');
+    const chatInput = page.getByRole('textbox', { name: /chat-input/i });
 
     // Plain turn: assert the streamed tokens land in the transcript.
     await chatInput.fill('hello there');
@@ -50,7 +54,11 @@ test.describe('TaxLiability W4 capstone happy-path', () => {
     // one submit is enough to see both the tool call card and its reply.
     await chatInput.fill('please lookup this taxpayer');
     await page.getByRole('button', { name: 'Send' }).click();
-    await expect(page.getByRole('complementary', { name: 'tool-call' })).toBeVisible({ timeout: 10_000 });
+    // getByLabel, not getByRole('complementary', ...) - ToolCallCard's
+    // <aside aria-label="tool-call"> already carries this label from W4 D4,
+    // and getByLabel matches any aria-labelled element, not only form
+    // controls (confirmed by hand against a standalone <aside>).
+    await expect(page.getByLabel('tool-call')).toBeVisible({ timeout: 10_000 });
     await expect(transcript).toContainText('Found stub taxpayer stub-1.', { timeout: 10_000 });
 
     // The transcript rendering this turn's text and useTaxpayerChatStore's

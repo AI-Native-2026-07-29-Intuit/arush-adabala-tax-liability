@@ -14,7 +14,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   const page = await browser.newPage();
 
   await page.goto(`${baseURL}/login`);
-  await page.getByRole('button', { name: 'Sign in (stub)' }).click();
+  await page.getByRole('button', { name: /sign in/i }).click();
   await page.waitForURL(/\/taxpayers/);
 
   await page.context().storageState({ path: 'e2e/.auth/user.json' });
