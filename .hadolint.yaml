@@ -1,0 +1,7 @@
+# .hadolint.yaml - lints Dockerfile at PR time (see .github/workflows/docker.yml).
+ignored: []
+trustedRegistries:
+  - docker.io
+  - gcr.io
+  - ghcr.io
+failure-threshold: warning

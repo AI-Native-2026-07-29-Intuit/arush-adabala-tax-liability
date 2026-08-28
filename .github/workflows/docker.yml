@@ -1,0 +1,133 @@
+name: taxcalc-api docker
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradlew"
+      - "gradlew.bat"
+      - "gradle/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".hadolint.yaml"
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradlew"
+      - "gradlew.bat"
+      - "gradle/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".hadolint.yaml"
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+
+permissions:
+  contents: read
+  id-token: write   # for AWS OIDC -> ECR login on main pushes
+
+jobs:
+  hadolint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+  build-scan-smoke:
+    runs-on: ubuntu-22.04
+    needs: hadolint
+    # Only Postgres and MongoDB are service containers here: both are opened
+    # eagerly during Spring context refresh (Flyway migration, and Mongo's
+    # auto-index-creation on the MongoTemplate bean) and block
+    # /actuator/health/readiness from ever going UP if unreachable. Redis
+    # (Lettuce, lazy-connecting) and Kafka (the listener container joins its
+    # consumer group *after* "Started Application" is logged, observed
+    # locally) do not block startup or readiness, so they're left out to
+    # keep this job simpler and faster.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: devpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand(\"ping\")'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (PR - don't push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: uptimecrew/taxcalc-api:ci-${{ github.run_id }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan - fail on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: uptimecrew/taxcalc-api:ci-${{ github.run_id }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Smoke test - boot, health, kill
+        run: |
+          # Matches the literal Task 1 `docker run ... -p 8080:8080 ...` command: bridge
+          # network, not --network host. The image's `docker` Spring profile (application.yml)
+          # points Postgres/Mongo/Kafka at host.docker.internal, which Docker Desktop/Rancher
+          # Desktop resolve automatically but plain Linux (this runner) needs --add-host for.
+          docker run -d --name taxcalc-smoke \
+            --add-host=host.docker.internal:host-gateway \
+            -p 8080:8080 \
+            -e DB_PASSWORD=devpass \
+            uptimecrew/taxcalc-api:ci-${{ github.run_id }}
+
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8080/actuator/health/readiness; then
+              echo "Healthy after $((i*2))s"
+              docker stop taxcalc-smoke
+              docker rm taxcalc-smoke
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Failed health check; logs follow:"
+          docker logs taxcalc-smoke
+          exit 1
+
+      # Deploy path: pushing 0.1.0 + <git-sha> tags to a private registry on
+      # merge to main (ECR via OIDC, or GHCR as a fallback) is documented in
+      # docker/SECURITY.md but intentionally NOT implemented in this job -
+      # out of scope for this deliverable. PR builds never push (see
+      # `load: true` above, no `push: true` anywhere in this workflow).

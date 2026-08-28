@@ -1,0 +1,40 @@
+# .dockerignore - keep build context small + secrets-free.
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Unrelated sibling project - not part of the taxcalc-api image.
+taxcalc-web/
+
+# Build outputs
+build/
+out/
+target/
+**/node_modules
+.gradle/
+
+# IDE / OS junk
+.idea/
+.vscode/
+.DS_Store
+*.iml
+
+# Test artefacts
+**/coverage
+**/test-results
+
+# SECRETS - never enter the build context.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+secrets/
+credentials.json
+docker-compose.override.yml
+
+# Docs (not needed in runtime image). docker/healthcheck/ is real build input
+# (the HEALTHCHECK probe source) and must stay in the context.
+*.md
+docker/*.md

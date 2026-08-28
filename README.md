@@ -608,6 +608,10 @@ be re-run at the very end of this session because port 8080 was held
 locally by an unrelated sibling project's own dev server, left untouched
 rather than killed again.
 
+## Week 5 Day 1 — Docker, Multi-Stage, Distroless & CI Scan Gate
+
+`Dockerfile` packages this service as a four-stage build — `healthcheck-builder` (`golang:1.25-alpine`, compiles the static Go HEALTHCHECK probe in `docker/healthcheck/`, since distroless ships no shell/curl) → `builder` (`eclipse-temurin:17-jdk-jammy`, matching `build.gradle`'s Java 17 toolchain pin) → `extractor` (`eclipse-temurin:21-jre-jammy`, runs `layertools extract`) → the shipped runtime (`gcr.io/distroless/java21-debian12:nonroot`, UID 65532) — all four base images pinned by digest. `.dockerignore` keeps the build context to 17KB and excludes secrets; `.hadolint.yaml` + `.github/workflows/docker.yml` lint and Trivy-scan every PR touching the image (`hadolint` → `build-scan-smoke`, the latter with real Postgres/MongoDB service containers since this app's `/actuator/health/readiness` genuinely blocks on both at startup, not a stub). Fixing the readiness probe surfaced two real bugs, both fixed here: `SecurityConfig` permitted only the exact `/actuator/health` path (401ing the `/readiness`/`/liveness` sub-paths Docker/Kubernetes probes hit), and `application.yml` never enabled those probe routes outside a detected Kubernetes environment (404) — `management.endpoint.health.probes.enabled=true` fixes the latter. `docker/SIZE.md` documents the layered-JAR size trim (334MB → 325MB, plus a 545MB single-stage baseline for comparison) and `docker/SECURITY.md` documents the pinned digests, the Trivy scan (80 → 23 HIGH/CRITICAL findings via verified-safe Tomcat/Netty/Jackson version overrides — one further fix, spring-ai 1.0.7, was attempted and reverted after it broke the MCP server bean at startup), and a dated waiver for what's left. Image pushed to `ghcr.io/arushadabala/taxcalc-api:0.1.0`.
+
 ## Build and Test
 
 ```bash

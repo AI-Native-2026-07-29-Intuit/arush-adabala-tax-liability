@@ -114,6 +114,12 @@ management:
   endpoint:
     health:
       show-details: always              # (8) so mongo/redis sub-health is visible over plain curl
+      probes:
+        enabled: true                   # (8c) exposes /actuator/health/{liveness,readiness} outside
+                                         #      Kubernetes too - Boot only auto-enables them when it
+                                         #      detects a K8s environment, but a plain `docker run`
+                                         #      HEALTHCHECK (and the Docker Compose / Kubernetes
+                                         #      probes W5 D2-D3 wire up) need the same two routes.
 
 springdoc:
   api-docs:
@@ -162,6 +168,29 @@ logging:
     com.uptimecrew.tax_liability: DEBUG   # turn up your own packages in local dev
     org.springframework.security.web: DEBUG   # (9) surfaces "Will secure ... with [DefaultSecurityFilterChain...]"
                                                #     on every request so the filter chain build is visible in bootRun
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+  # Baked into the Docker image as SPRING_PROFILES_ACTIVE=docker (see Dockerfile), so this
+  # activates automatically on every `docker run` with zero extra flags. `localhost` inside a
+  # bridge-networked container (`docker run -p 8080:8080 ...`, no `--network host`) means the
+  # container itself, not the host machine, so Postgres/Mongo running on the host (or in sibling
+  # containers with published ports) are unreachable at the `local` profile's `localhost` URLs -
+  # Flyway/Mongo bean creation blocks context refresh forever waiting on a connection that will
+  # never come. `host.docker.internal` is the Docker-provided DNS name for "the host machine";
+  # Rancher Desktop and Docker Desktop resolve it automatically, no `--add-host` flag needed.
+  datasource:
+    url: jdbc:postgresql://host.docker.internal:5432/postgres
+  data:
+    mongodb:
+      uri: mongodb://host.docker.internal:27017/taxcalc
+    redis:
+      host: host.docker.internal
+  kafka:
+    bootstrap-servers: host.docker.internal:9092
 
 ---
 spring:
