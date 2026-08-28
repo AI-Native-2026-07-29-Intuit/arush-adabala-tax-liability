@@ -1,0 +1,122 @@
+# compose.yaml - local-dev stack for taxcalc-api.
+# Compose v2: no top-level `version:` field.
+# Bring up: docker compose up -d --wait
+# Tear down: docker compose down -v
+
+name: taxcalc_dev
+
+services:
+  # ----- application under test -----------------------------------------
+  taxcalc-api:
+    image: uptimecrew/taxcalc-api:0.1.0
+    networks: [taxcalc_net]
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./envs/taxcalc.env
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taxcalc_dev
+      SPRING_DATASOURCE_USERNAME: taxcalc_dev
+      SPRING_DATASOURCE_PASSWORD_FILE: /run/secrets/pg_password
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_DATA_MONGODB_URI: mongodb://mongo:27017/taxcalc_dev
+    secrets:
+      - pg_password
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ----- primary data store -----------------------------------------------
+  postgres:
+    image: postgres:16
+    networks: [taxcalc_net]
+    environment:
+      POSTGRES_DB: taxcalc_dev
+      POSTGRES_USER: taxcalc_dev
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taxcalc_dev -d taxcalc_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ----- cache / session store ---------------------------------------------
+  redis:
+    image: redis:7
+    networks: [taxcalc_net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ----- event backbone (KRaft mode, no Zookeeper) -------------------------
+  kafka:
+    image: apache/kafka:3.7.0
+    # apache/kafka's arm64 build for the 3.x series crashes the JVM with SIGILL on Apple
+    # Silicon (java.lang.System.registerNatives, upstream image bug); force amd64 + emulation.
+    platform: linux/amd64
+    networks: [taxcalc_net]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"
+      interval: 10s
+      timeout: 15s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  # ----- read-model store (Spring Data MongoDB, TaxpayerReadModelRepository) ----
+  # Not part of the W5D2 lesson's 3-dependency reference stack, but taxcalc-api
+  # wires TaxpayerReadModelRepository unconditionally in every profile, so the
+  # app cannot finish context startup without a reachable Mongo.
+  mongo:
+    image: mongo:7
+    networks: [taxcalc_net]
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  taxcalc_net:
+    driver: bridge
+
+volumes:
+  pgdata: {}
+  kafka-data: {}
+  mongodata: {}
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password.txt
