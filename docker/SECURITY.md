@@ -16,6 +16,10 @@
   attempted silently.
 - **Builder base is `eclipse-temurin:17-jdk-jammy`, not `:21-jdk-jammy`** -
   see the table below.
+- **Image is 325MB, not under the 250MB target** - see `docker/SIZE.md`'s
+  "Against the 250MB curriculum target" section for the full breakdown and
+  the two rounds of dependency trimming already done (545MB single-stage
+  baseline -> 325MB final).
 
 ## Base image choices
 
