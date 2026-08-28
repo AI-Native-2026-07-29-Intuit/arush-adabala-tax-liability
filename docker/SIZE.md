@@ -89,10 +89,33 @@ Docker packaging task.
     '*.java'` returns 0 matches; `BOOT-INF/classes/` holds only compiled
     `.class` files and resources.
 - Warm rebuild after a code-only change (one comment line added to
-  `TaxpayerController.java`, then reverted): `./gradlew dependencies` layer
-  reported `CACHED`; total `docker build` time **8.0s**, under the 10s target.
-  Cold build (no cache) was ~2m15s, dominated by the Gradle dependency
-  resolution step.
+  `TaxpayerController.java`, then reverted): the dependency pre-warm layer
+  reported `CACHED`; total `docker build` time **5.96s**, well under the 10s
+  target.
+- Cold build (no cache) is dominated entirely by the dependency pre-warm
+  step's network download, not by anything else in the Dockerfile - measured
+  with an isolated, guaranteed-fresh BuildKit cache mount so the numbers
+  below are a true apples-to-apples comparison:
+  - `./gradlew --no-daemon dependencies` (unscoped, resolves *every*
+    configuration - `compileClasspath`, `runtimeClasspath`,
+    `testCompileClasspath`, `testRuntimeClasspath`, ...): **73.1s**.
+  - `./gradlew --no-daemon dependencies --configuration compileClasspath`
+    then `--configuration runtimeClasspath` (only what `bootJar -x test`
+    actually needs - the Dockerfile as committed): **49.0s**, a 33% cut.
+    Test-only dependencies this skips downloading during the image build
+    (WireMock, three Testcontainers modules, Mockito, spring-boot-starter-test
+    and its transitives, spring-kafka-test, spring-graphql-test) are still
+    resolved normally by plain `./gradlew test` outside Docker - nothing
+    about running the test suite changes.
+  - The task's own guideline is "~60-90s" cold; this project's real
+    dependency graph (Postgres, MongoDB, Kafka, Redis, an OAuth2 resource
+    server, GraphQL, OpenTelemetry, Spring AI - six external integrations)
+    is heavier than whatever reference app that estimate assumed, so even
+    the scoped 49.0s dependency-resolution step, plus the ~30s `bootJar`
+    compile/package step after it, lands close to that range rather than
+    comfortably inside it. This is the same "not fixable without cutting
+    functionality" story as the 250MB image-size target in
+    `docker/SECURITY.md`'s known-deviations list.
 - Full container smoke test against this machine's already-running Postgres /
   MongoDB / Kafka / Redis: `Started Application` logged, Kafka consumer
   joined its group, `curl http://localhost:8080/actuator/health/readiness` →
