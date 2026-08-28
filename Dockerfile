@@ -63,6 +63,12 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
+# A plain `docker run` (bridge network, no --network host) gives the container its own network
+# namespace, where `localhost` means the container itself - Postgres/Mongo on the host are only
+# reachable via host.docker.internal. The `docker` Spring profile (application.yml) points there;
+# baking it in here means it activates on every `docker run` with zero extra flags.
+ENV SPRING_PROFILES_ACTIVE=docker
+
 # Distroless :nonroot pre-creates UID 65532. Explicit USER for clarity, and it
 # must come before ENTRYPOINT so the process itself (not just image metadata)
 # actually runs as non-root.

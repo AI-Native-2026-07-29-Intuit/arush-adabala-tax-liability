@@ -103,8 +103,13 @@ jobs:
 
       - name: Smoke test - boot, health, kill
         run: |
+          # Matches the literal Task 1 `docker run ... -p 8080:8080 ...` command: bridge
+          # network, not --network host. The image's `docker` Spring profile (application.yml)
+          # points Postgres/Mongo/Kafka at host.docker.internal, which Docker Desktop/Rancher
+          # Desktop resolve automatically but plain Linux (this runner) needs --add-host for.
           docker run -d --name taxcalc-smoke \
-            --network host \
+            --add-host=host.docker.internal:host-gateway \
+            -p 8080:8080 \
             -e DB_PASSWORD=devpass \
             uptimecrew/taxcalc-api:ci-${{ github.run_id }}
 
