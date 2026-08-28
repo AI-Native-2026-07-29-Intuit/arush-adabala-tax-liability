@@ -73,6 +73,10 @@ dependencies {
     implementation      'org.springframework.boot:spring-boot-starter'
     implementation      'org.springframework.boot:spring-boot-starter-web'
     implementation      'org.springframework.boot:spring-boot-starter-actuator'
+    // developmentOnly: excluded from bootJar by the Spring Boot Gradle plugin, so it never
+    // reaches the shipped Docker image. Powers the compose.override.yaml live-reload loop
+    // (see scripts/dev.md) - NEW for W5 D2.
+    developmentOnly     'org.springframework.boot:spring-boot-devtools'
     runtimeOnly         'org.springframework.boot:spring-boot-starter-jdbc'
     runtimeOnly         'org.postgresql:postgresql:42.7.11'
 
