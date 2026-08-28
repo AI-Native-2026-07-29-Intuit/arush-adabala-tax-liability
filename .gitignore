@@ -4,3 +4,9 @@ out/
 .idea/
 .vscode/
 *.iml
+
+# Compose-managed dev state (W5 D2). NEVER commit any of these.
+envs/*.env
+!envs/*.env.example
+secrets/*
+!secrets/.gitkeep

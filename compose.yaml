@@ -8,7 +8,7 @@ name: taxcalc_dev
 services:
   # ----- application under test -----------------------------------------
   taxcalc-api:
-    image: uptimecrew/taxcalc-api:0.1.0
+    image: uptimecrew/taxcalc-api:${APP_VERSION:?APP_VERSION required}
     networks: [taxcalc_net]
     ports:
       - "8080:8080"
