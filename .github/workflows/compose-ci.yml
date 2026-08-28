@@ -21,9 +21,18 @@ permissions:
 jobs:
   compose-up-smoke:
     runs-on: blacksmith-2vcpu-ubuntu-2204
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      # uptimecrew/taxcalc-api:0.1.0 is never pushed to a registry (docker.yml
+      # builds it with `load: true` for its own scan+smoke job only, PR builds
+      # never push - see that workflow's comments) - it only exists as a local
+      # image on an engineer's laptop. Build it locally here too, under the
+      # exact tag compose.yaml resolves to, or `docker compose up` 404s trying
+      # to pull it.
+      - name: Build taxcalc-api image
+        run: docker build -t uptimecrew/taxcalc-api:0.1.0 --build-arg APP_VERSION=0.1.0 --build-arg GIT_SHA=${{ github.sha }} .
 
       # CI does NOT have the engineer's envs/secrets on disk - write them
       # here from values acceptable for ephemeral CI use only. The app
