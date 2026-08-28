@@ -73,6 +73,25 @@ above). Closing the remaining ~69 MB gap to the 250 MB target would mean
 dropping one of those integrations, not repackaging — out of scope for a
 Docker packaging task.
 
+### Follow-up: is there anything left to trim? (checked, 2026-08-28)
+
+Re-investigated three more candidates rather than taking the ~69 MB gap as
+settled, on the current 325 MB image (post-Task-3/4 additions):
+
+| Candidate | Size | Verdict |
+|---|---|---|
+| `io.rest-assured:json-path` (→ `groovy`) | 7.4 MB | **Not safe to exclude**, confirmed with `./gradlew dependencyInsight`: `spring-ai-anthropic` declares it as a *direct* runtime dependency in its own POM, not an incidental transitive - almost certainly used internally to parse structured JSON output, which is exactly what `summarizeTaxpayer` (W3 D4) exercises. Excluding it risks a silent runtime failure the next time that endpoint is called, not just a startup crash - and confirming it's safe would need a real functional test against the Anthropic API or a WireMock stub, more test infrastructure than this pass has. |
+| `swagger-ui-5.17.14.jar` | 3.0 MB | **Freely removable, but it's a feature removal, not a packaging trim.** Dropping it means losing the browsable `/swagger-ui.html` interactive API docs page (deliberately built in W3 D2), keeping only the raw `/v3/api-docs` JSON spec. A legitimate choice some teams make for production images, but a scope decision, not a Dockerfile fix - left in. |
+| `docker/healthcheck` static binary | 5.3 MB | Could shrink with a hand-rolled C implementation (raw-socket HTTP GET) instead of Go's stdlib `net/http`, whose runtime carries real fixed overhead. Not attempted: meaningfully more implementation risk (manual HTTP/1.1 response parsing) for one isolated ~5 MB win. |
+
+Best case, taking **all three** — including accepting the `rest-assured`
+risk and removing the Swagger UI feature — is ~15.7 MB, landing at **~309
+MB**. Still 59 MB over target. The conclusion stands: the real floor here is
+166 MB of distroless base image (not under this Dockerfile's control) plus
+genuinely load-bearing dependencies for six real integrations; no further
+combination of exclusions closes a gap of that size without dropping one of
+those integrations outright.
+
 ## Verification performed
 
 - `docker images uptimecrew/taxcalc-api` → `319MB` (< the fat single-stage
