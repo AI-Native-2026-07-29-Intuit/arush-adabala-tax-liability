@@ -129,14 +129,20 @@ is never pushed anywhere:
 
 ```
 ghcr.io/arushadabala/taxcalc-api:0.1.0
-ghcr.io/arushadabala/taxcalc-api:8ac9709   # <git-sha>, same digest
+ghcr.io/arushadabala/taxcalc-api:41e4ad5   # <git-sha>, same digest
 ```
 
 Both tags resolve to the same immutable digest:
 
 ```
-ghcr.io/arushadabala/taxcalc-api@sha256:a89211fb8e01082d80d0a2ae003cf5eeaf40488fd8967bf98814af599178bc6b
+ghcr.io/arushadabala/taxcalc-api@sha256:15d961dd226d8a958392102a7d4e281fa20689ddeda477ebfa3b95a2f4e0d88f
 ```
+
+(Re-pushed once more after a `git filter-branch` rewrite removed the
+`Co-Authored-By` trailer from every commit on this branch - the branch's
+commit hashes all changed, so the previously-pushed image's baked-in
+`org.opencontainers.image.revision` label pointed at a git SHA that no
+longer exists in history. This push has no code changes, only the label.)
 
 The `0.1.0` tag was overwritten once, in place, during this PR's review
 (originally pushed at commit `7499789`, before the `docker`-profile readiness
