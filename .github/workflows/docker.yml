@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   hadolint:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     steps:
       - uses: actions/checkout@v4
       - uses: hadolint/hadolint-action@v3.1.0
@@ -45,7 +45,7 @@ jobs:
           failure-threshold: warning
 
   build-scan-smoke:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     needs: hadolint
     # Only Postgres and MongoDB are service containers here: both are opened
     # eagerly during Spring context refresh (Flyway migration, and Mongo's
