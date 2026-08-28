@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   compose-up-smoke:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
