@@ -47,28 +47,55 @@ every module, whether this app uses it or not (~166MB just for that). The
 
 Measured result: **64.5MB**, versus 166MB for the full distroless JRE.
 
-**Why five modules are hardcoded on top of `jdeps`'s own output, not left to
-static analysis alone**: `jdeps` cannot see modules only reached through
-Java's crypto Service Provider mechanism (TLS cipher suites, JCE providers) -
-those are loaded reflectively by the JVM itself, never called directly in
-application bytecode. Verified empirically before trusting this in the real
-Dockerfile: a `jlink` runtime built from `jdeps`'s raw output alone failed
-**every** outbound HTTPS request with `SSLHandshakeException:
-handshake_failure` (missing `jdk.crypto.ec` means no ECDHE, which almost
-every modern TLS server requires) - undetected, this would have silently
-broken the OAuth2 JWK Set fetch and the Spring AI Anthropic client the first
-time either was actually exercised in production, not at boot. Added:
+### What this change broke, and the fix - found by testing, not assumed
 
-- `jdk.crypto.ec`, `jdk.crypto.cryptoki` - TLS/JCE cryptography (the actual gap found above)
-- `java.naming` - JNDI, commonly needed by JDBC drivers and logging frameworks even without an obvious direct call
-- `java.logging` - `java.util.logging`, which several libraries bridge to/from even when SLF4J is the primary API
-- `java.xml` - XML processing several Spring/Jackson internals touch
+`jdeps` cannot see modules only reached through Java's crypto Service
+Provider mechanism (TLS cipher suites, JCE providers) - those are loaded
+reflectively by the JVM itself at the TLS-engine layer, never called
+directly in application bytecode, so no amount of static analysis finds
+them. This was verified empirically, in three steps, before trusting it in
+the real Dockerfile:
 
-Re-tested the augmented module list against a real external HTTPS endpoint
-and got a clean response before relying on it. The `jdeps` list is
-re-derived on every build (so it adapts automatically if dependencies
-change) and always unioned with these five, so a future dependency change
-can't silently drop them again.
+1. **Broke**: built a throwaway `jlink` runtime from `jdeps`'s raw,
+   unmodified output and pointed a minimal `java.net.http.HttpClient` test
+   program at a real external HTTPS endpoint (`api.github.com`). Every run
+   failed with `SSLHandshakeException: handshake_failure` - `jdk.crypto.ec`
+   was missing, meaning no ECDHE cipher support, which almost every modern
+   TLS server requires for the handshake at all. Undetected, this would have
+   silently broken the OAuth2 JWK Set fetch and the Spring AI Anthropic
+   client the first time either was actually exercised in production, not
+   at boot - readiness would report healthy right up until the first real
+   HTTPS call.
+   **Fix**: added `jdk.crypto.ec` and `jdk.crypto.cryptoki` to
+   `--add-modules`. Re-ran the same test - the handshake failure was gone.
+2. **Still failed differently after the fix above**: the same test then hit
+   `PKIX path building failed: unable to find valid certification path`.
+   Investigated rather than assumed to be a second module gap: ran the
+   identical test against the *stock, untrimmed* JDK (no jlink involved at
+   all) and got the exact same PKIX error - proving this was this
+   development machine's pre-existing corporate TLS-inspection proxy
+   (Zscaler, the same one behind every `gradlew` cold-download workaround
+   used elsewhere in this repo's local verification), not anything jlink
+   removed. Confirmed conclusively by importing the corporate root CA into
+   the jlink runtime's own `cacerts` and re-running the test: clean
+   `200 OK`. That CA-import step is local-machine-only, not part of the
+   committed Dockerfile - it only existed to get an unambiguous, fully-clean
+   success signal on this one network.
+3. **Added defensively, not from a caught failure**: `java.naming` (JNDI -
+   commonly needed by JDBC drivers and logging frameworks even without an
+   obvious direct call), `java.logging` (`java.util.logging`, which several
+   libraries bridge to/from even when SLF4J is the primary API), and
+   `java.xml` (XML processing several Spring/Jackson internals touch).
+   These weren't proven necessary by a specific reproduced failure the way
+   `jdk.crypto.ec` was - added as a documented safety margin given
+   `jdeps`'s known blind spot for reflection/SPI-loaded code, rather than
+   risk finding a third gap later, in production, on a path this session's
+   testing didn't happen to exercise.
+
+The final module list is `jdeps`'s own output - re-derived on every build,
+so it adapts automatically if dependencies change - unioned with these five
+hardcoded modules, so a future dependency change can't silently drop them
+again.
 
 **Full functional verification performed on the resulting image**, not just
 "does it boot": ran against this machine's live Postgres/MongoDB/Kafka/Redis
