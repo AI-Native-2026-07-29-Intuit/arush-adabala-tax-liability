@@ -83,7 +83,7 @@ docker run -d --name taxcalc-api \
   uptimecrew/taxcalc-api:0.1.0
 ```
 
-## Registry push (verified 2026-08-27, updated same day after the `docker`-profile fix below)
+## Registry push (verified 2026-08-27, last updated same day after the dependency pre-warm scoping fix)
 
 Pushed to GitHub Container Registry (GHCR), private visibility, under the
 author's personal namespace (no AWS ECR credentials available in this
@@ -91,13 +91,13 @@ environment - see AWS path in the Prerequisites):
 
 ```
 ghcr.io/arushadabala/taxcalc-api:0.1.0
-ghcr.io/arushadabala/taxcalc-api:fe92848   # <git-sha>, same digest
+ghcr.io/arushadabala/taxcalc-api:372f9cc   # <git-sha>, same digest
 ```
 
 Both tags resolve to the same immutable digest:
 
 ```
-ghcr.io/arushadabala/taxcalc-api@sha256:b5147182f90e8c6b0ad25a335f6660aa4be18b03a496d02cc1a5e18860daada0
+ghcr.io/arushadabala/taxcalc-api@sha256:df6361a1fc0d17c9ea1d484be7142d19b57d212f6e2b40064b4b23f0d8336e9a
 ```
 
 The `0.1.0` tag was overwritten once, in place, during this PR's review
