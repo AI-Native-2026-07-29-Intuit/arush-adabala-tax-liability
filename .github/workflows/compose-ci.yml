@@ -1,0 +1,59 @@
+# .github/workflows/compose-ci.yml
+name: taxcalc-api compose-ci
+
+on:
+  pull_request:
+    paths:
+      - "compose.yaml"
+      - "compose.override.yaml"
+      - "compose.profiles.yaml"
+      - "envs/**"
+      - "scripts/**"
+      - "Makefile"
+      - "src/**"
+      - "build.gradle"
+      - "Dockerfile"
+      - ".github/workflows/compose-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compose-up-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      # CI does NOT have the engineer's envs/secrets on disk - write them
+      # here from values acceptable for ephemeral CI use only. The app
+      # doesn't actually read SPRING_DATASOURCE_PASSWORD_FILE (Spring Boot
+      # has no built-in support for that Docker "_FILE" convention), so it
+      # falls back to application.yml's ${DB_PASSWORD:devpass} default -
+      # CI_PG_PASSWORD must be "devpass" for Postgres auth to succeed here,
+      # matching this repo's own docker.yml CI job.
+      - name: Seed envs + secrets for CI
+        run: |
+          mkdir -p envs secrets
+          cp envs/taxcalc.env.example envs/taxcalc.env
+          printf '%s' "$CI_PG_PASSWORD" > secrets/pg_password.txt
+        env:
+          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+
+      - name: Validate compose.yaml schema
+        run: docker compose config --quiet
+
+      # scripts/smoke.sh owns the whole lifecycle itself (its own -p project
+      # name, --wait, health checks, and a trap that always tears the stack
+      # down and - on failure - writes compose-logs.txt before exiting), so
+      # there's no separate "compose up" / "tear down" step here: running
+      # one would stand up a second, colliding stack on the same host ports.
+      - name: Smoke
+        run: ./scripts/smoke.sh
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: compose-logs
+          path: compose-logs.txt
+          retention-days: 14
