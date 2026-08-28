@@ -28,19 +28,55 @@
 | `healthcheck-builder` | `golang:1.25-alpine` | Compiles the static HEALTHCHECK probe (see below). Discarded; contributes 0 bytes to the shipped image. |
 | `builder` | `eclipse-temurin:17-jdk-jammy` | Full JDK + Gradle. **JDK 17, not 21**: `build.gradle` pins `java.toolchain.languageVersion=17` with no toolchain auto-provisioning configured, so the builder's JDK major version must match exactly. Discarded after `bootJar`. |
 | `extractor` | `eclipse-temurin:21-jre-jammy` | Runs `layertools extract` on the boot JAR. JRE only, no Gradle. The Java-17-compiled class files run unmodified on a Java 21 JRE. Discarded after extraction. |
-| runtime (final) | `gcr.io/distroless/java21-debian12:nonroot` | No shell, no package manager, no user-management tools — the smallest attack surface available for a Java 21 workload. This is the only stage that ships. |
+| `debug` (opt-in only) | `gcr.io/distroless/java21-debian12:debug-nonroot` | Same app layers as `runtime`, but the base bundles BusyBox (shell + `id`/`ls`/`cat`/...) - see "Debug build target" below. Only built with `docker build --target debug`; never the default, never pushed. |
+| `runtime` (shipped, final) | `gcr.io/distroless/java21-debian12:nonroot` | No shell, no package manager, no user-management tools — the smallest attack surface available for a Java 21 workload. The last stage in the file, so this is what `docker build .` (no `--target`) produces, and the only stage ever pushed. |
 
-All four base images are pinned by digest (`@sha256:...`), not by tag. A tag is
+All five base images are pinned by digest (`@sha256:...`), not by tag. A tag is
 mutable; the same `:nonroot` reference can point at different bytes on
 different days. A digest is content-addressed and immutable.
+
+## Debug build target
+
+`gcr.io/distroless/java21-debian12:nonroot` ships zero shell/coreutils by
+design - there is no `id`, `sh`, `ls`, or anything else for `docker exec` to
+run, so `docker exec <container> id` fails outright
+(`exec: "id": executable file not found in $PATH`). That is the entire point
+of distroless: no shell means an attacker who gets code execution inside the
+container still can't do anything shell-shaped with it. `docker top` and
+`docker inspect` prove the same fact (the process runs as UID 65532, not
+root) without needing a shell at all, and are the correct tools for verifying
+a properly hardened container - see the PR for the literal command's output.
+
+For the rare case where a human genuinely needs to `exec` in (e.g. manually
+confirming `id`'s exact `uid=65532(nonroot) gid=65532(nonroot)` output), the
+Dockerfile has an opt-in `debug` stage: identical app layers, but based on
+`gcr.io/distroless/java21-debian12:debug-nonroot`, which bundles BusyBox.
+It is **never** the default build target - `runtime` is the last stage in the
+file, which is what `docker build .` produces with no `--target` flag, so
+every existing build command (Task 1's, CI's) is completely unaffected - and
+it is never pushed to any registry; only `runtime` is. Build it explicitly:
+
+```bash
+docker build --target debug -t uptimecrew/taxcalc-api:debug .
+docker run -d --name taxcalc-api-debug uptimecrew/taxcalc-api:debug
+docker exec taxcalc-api-debug id
+# uid=65532(nonroot) gid=65532(nonroot) groups=65532(nonroot)
+```
+
+This is a real trade-off, not a free win: the `debug` image is 523MB (vs.
+325MB for `runtime`) specifically because it has a shell and utilities the
+shipped image deliberately doesn't. Treat any image built from the `debug`
+stage as a local development tool only, never as something to run in any
+shared or production environment.
 
 ## Pinned digests (current)
 
 ```text
-golang:1.25-alpine                          @sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
-eclipse-temurin:17-jdk-jammy                @sha256:400014962ad7224461f945bb1cc3d7d5a1927ce15b8245b72d9cedcda554cd2a
-eclipse-temurin:21-jre-jammy                @sha256:eebd356ad7358b7094758e5787a6726f332917cfd56feab6457c56dab895cdbf
-gcr.io/distroless/java21-debian12:nonroot   @sha256:7e37784d94dccbf5ccb195c73b295f5ad00cd266512dfbac12eb9c3c28f8077d
+golang:1.25-alpine                                @sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+eclipse-temurin:17-jdk-jammy                      @sha256:400014962ad7224461f945bb1cc3d7d5a1927ce15b8245b72d9cedcda554cd2a
+eclipse-temurin:21-jre-jammy                      @sha256:eebd356ad7358b7094758e5787a6726f332917cfd56feab6457c56dab895cdbf
+gcr.io/distroless/java21-debian12:debug-nonroot   @sha256:9be3a4d32b386cb2970368e6c605d8dd47f0242660ea732b66e7c5c099b03955   # debug stage only, never shipped
+gcr.io/distroless/java21-debian12:nonroot         @sha256:7e37784d94dccbf5ccb195c73b295f5ad00cd266512dfbac12eb9c3c28f8077d   # runtime stage, shipped
 ```
 
 Refresh the digests on the **first business day of each month**, or
