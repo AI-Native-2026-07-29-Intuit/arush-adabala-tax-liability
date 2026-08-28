@@ -171,6 +171,32 @@ into the workflow - out of scope for this deliverable.
 
 ## Trivy scan waiver — 2026-08-27
 
+### Why a waiver instead of 0 HIGH / 0 CRITICAL
+
+The task target is 0 unfixed HIGH/CRITICAL, with three explicitly-sanctioned
+paths to get there: upgrade the dependency, bump the base-image digest, or
+document a dated, scoped waiver. All three were used - the first two closed
+57 of the original 80 findings (see table below); a waiver covers the
+remaining 23 because closing them for real means one specific thing:
+**~14 of the 23 require a Spring Boot *minor or major* version bump**
+(3.3 -> 3.5+/4.0, Spring Framework 6.1 -> 6.2/7.0, Spring Security 6.3 ->
+6.5/7.0), not a patch. Checked directly against Maven Central
+(`spring-boot-gradle-plugin`'s `maven-metadata.xml`): **3.3.13 - what this
+project already runs - is the newest release in the entire 3.3.x line.**
+There is no smaller, safer bump available for these findings the way there
+was for Tomcat/Netty/Jackson (all three stayed within their already-adopted
+major.minor line via a targeted `ext[]` override).
+
+A cross-Spring-Boot-generation bump moves roughly a dozen interdependent
+library versions at once across the entire codebase - a real, standalone
+upgrade decision with its own regression risk and review, not something that
+belongs inside a Docker-packaging PR. This isn't a theoretical caution: the
+one bump attempted in this pass that looked equally safe on paper
+(`spring-ai` 1.0.0 -> 1.0.7, same minor line, would have closed 3 findings)
+**broke the app for real** when actually tested - see the revert below. If a
+same-minor-line patch bump could do that, treat a cross-generation Spring
+Boot bump as materially riskier, not less.
+
 `trivy image --severity HIGH,CRITICAL --ignore-unfixed uptimecrew/taxcalc-api:0.1.0`
 reports **23 findings** (1 OS package, 22 Java dependencies) as of this date.
 Before waiving anything, three fixes were verified safe and applied (see
@@ -203,7 +229,7 @@ The remaining 23 are waived as of **2026-08-27**, re-evaluate by
 | `liblcms2-2` (OS, debian 12.13) | 2.14-2 | 2.14-2+deb12u1 | Base image's OS package, not this project's dependency graph. Not present in the `gcr.io/distroless/java21-debian12:nonroot` digest pinned above; will close automatically on the next monthly digest refresh once upstream rebuilds. |
 | `commons-fileupload`, `commons-io`, `micrometer-core`, `kafka-clients`, `lz4-java`, `postgresql` (42.7.12) | various | patch releases | Boot-BOM-managed or independently pinned; each needs its own `ext[]`/version override the same way Tomcat/Netty/Jackson did above, not yet done for these six - lower severity, deferred to the next pass rather than rushed in this PR. |
 | `spring-ai-client-chat`, `spring-ai-model` | 1.0.0 | 1.0.7+ | See revert above - the fix requires the same spring-ai bump that crashed the MCP server. Needs a coordinated fix (likely also bumping/pinning `com.networknt:json-schema-validator` explicitly) before it can be taken. |
-| `spring-boot`, `spring-core`, `spring-expression`, `spring-webflux`, `spring-webmvc`, `spring-security-web`, `spring-data-commons`, `spring-data-mongodb`, `spring-kafka`, `spring-graphql` | 3.3.13 / 6.1.21 / 6.3.10 / etc. | a Spring Boot **minor or major** version bump (3.3 → 3.5+/4.0, Spring Framework 6.1 → 6.2/7.0, Spring Security 6.3 → 6.5/7.0) | None of these have a same-line patch fix; every one requires moving to a different minor/major release. That's a coordinated, whole-project upgrade with real compatibility risk across the entire codebase (unlike the isolated Tomcat/Netty/Jackson `ext[]` overrides, which stay within their already-qualified line) - out of scope for this Docker packaging deliverable. Tracked as follow-up work, not silently accepted risk. |
+| `spring-boot`, `spring-core`, `spring-expression`, `spring-webflux`, `spring-webmvc`, `spring-security-web`, `spring-data-commons`, `spring-data-mongodb`, `spring-kafka`, `spring-graphql` | 3.3.13 / 6.1.21 / 6.3.10 / etc. | a Spring Boot **minor or major** version bump (3.3 → 3.5+/4.0, Spring Framework 6.1 → 6.2/7.0, Spring Security 6.3 → 6.5/7.0) | None of these have a same-line patch fix. Confirmed directly against Maven Central's `spring-boot-gradle-plugin` metadata: **3.3.13 is the newest release in the 3.3.x line**, so there's no smaller bump to take the way there was for Tomcat/Netty/Jackson. Every fix requires moving to a different minor/major release - a coordinated, whole-project upgrade (~a dozen interdependent library versions at once) with real compatibility risk across the entire codebase, out of scope for this Docker packaging deliverable. See "Why a waiver instead of 0 HIGH / 0 CRITICAL" above for the full reasoning. Tracked as follow-up work, not silently accepted risk. |
 
 This waiver is scoped to image tag `0.1.0` / digest as built on 2026-08-27. A
 rebuild that changes any of the versions above must re-run the scan and
