@@ -1,0 +1,46 @@
+# .trivyignore - implements the dated waiver documented in docker/SECURITY.md
+# ("Trivy scan waiver - 2026-08-27"). Every CVE below is explained there:
+# why it isn't fixed yet, and what closing it actually requires.
+#
+# `exp:2026-09-27` matches SECURITY.md's own re-evaluation date - trivy stops
+# honoring these entries after that date, so the CI gate goes back to
+# enforcing 0 HIGH/CRITICAL until this file (and the waiver table) are
+# updated against a fresh scan.
+#
+# A rebuild that changes any dependency version above must re-run the scan
+# and update both this file and the SECURITY.md table, not assume the
+# waiver still applies.
+
+# OS package (liblcms2-2, base image - gcr.io/distroless/java-base-debian12)
+CVE-2026-41254 exp:2026-09-27
+
+# commons-fileupload, commons-io
+CVE-2025-48976 exp:2026-09-27
+CVE-2024-47554 exp:2026-09-27
+
+# micrometer-core, kafka-clients, lz4-java, postgresql (42.7.12 fix)
+CVE-2026-40984 exp:2026-09-27
+CVE-2026-35554 exp:2026-09-27
+CVE-2025-12183 exp:2026-09-27
+CVE-2026-54291 exp:2026-09-27
+
+# spring-ai-client-chat, spring-ai-model (needs spring-ai 1.0.7+, reverted -
+# see SECURITY.md's "attempted and reverted" section)
+CVE-2026-41712 exp:2026-09-27
+CVE-2026-41713 exp:2026-09-27
+
+# spring-boot / spring-framework / spring-security / spring-data / spring-kafka
+# / spring-graphql - all need a Spring Boot minor/major version bump; 3.3.13
+# is the newest release in the 3.3.x line (verified against Maven Central).
+CVE-2026-40973 exp:2026-09-27
+CVE-2026-22732 exp:2026-09-27
+CVE-2025-41249 exp:2026-09-27
+CVE-2026-41850 exp:2026-09-27
+CVE-2026-41842 exp:2026-09-27
+CVE-2026-41845 exp:2026-09-27
+CVE-2026-41716 exp:2026-09-27
+CVE-2026-41717 exp:2026-09-27
+CVE-2026-41731 exp:2026-09-27
+CVE-2026-41699 exp:2026-09-27
+CVE-2026-41700 exp:2026-09-27
+CVE-2026-41856 exp:2026-09-27
