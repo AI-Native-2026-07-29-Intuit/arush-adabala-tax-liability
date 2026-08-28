@@ -55,7 +55,7 @@ jobs:
         run: |
           mkdir -p envs secrets
           cp envs/taxcalc.env.example envs/taxcalc.env
-          printf '%s' "intentionally-wrong-password-DELIBERATE-BREAK-TEST" > secrets/pg_password.txt
+          printf '%s' "$CI_PG_PASSWORD" > secrets/pg_password.txt
         env:
           CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
 
