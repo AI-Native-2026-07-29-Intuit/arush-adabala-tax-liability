@@ -1,5 +1,22 @@
 # taxcalc-api docker/SECURITY.md
 
+## Known deviations from the lesson spec
+
+- **No `taxcalc-api/` subdirectory.** This repo predates that convention:
+  `build.gradle`, `settings.gradle`, `gradlew`, `gradle/`, and `src/` already
+  live at the repo root as a single-module Gradle project (`rootProject.name
+  = 'tax_liability'`), not a multi-module project with a `taxcalc-api`
+  submodule. `Dockerfile`, `.dockerignore`, and `.hadolint.yaml` are at repo
+  root to match, since Docker's build context can't reach outside itself -
+  a `Dockerfile` alone in a `taxcalc-api/` folder couldn't `COPY` source that
+  lives elsewhere. Fixing this literally would mean moving the entire Gradle
+  project into a new subdirectory, a repo-wide restructuring evaluated and
+  deliberately declined for this PR (high blast radius, touches most of the
+  file tree, unrelated to Docker packaging correctness) rather than
+  attempted silently.
+- **Builder base is `eclipse-temurin:17-jdk-jammy`, not `:21-jdk-jammy`** -
+  see the table below.
+
 ## Base image choices
 
 | Stage | Base image | Why |
@@ -62,7 +79,7 @@ docker run -d --name taxcalc-api \
   uptimecrew/taxcalc-api:0.1.0
 ```
 
-## Registry push (verified 2026-08-27)
+## Registry push (verified 2026-08-27, updated same day after the `docker`-profile fix below)
 
 Pushed to GitHub Container Registry (GHCR), private visibility, under the
 author's personal namespace (no AWS ECR credentials available in this
@@ -70,14 +87,21 @@ environment - see AWS path in the Prerequisites):
 
 ```
 ghcr.io/arushadabala/taxcalc-api:0.1.0
-ghcr.io/arushadabala/taxcalc-api:7499789   # <git-sha>, same digest
+ghcr.io/arushadabala/taxcalc-api:fe92848   # <git-sha>, same digest
 ```
 
 Both tags resolve to the same immutable digest:
 
 ```
-ghcr.io/arushadabala/taxcalc-api@sha256:ef48a72c1fc992985feb5d1df806a7b55b88cf9da95305ef3150f411f6e40672
+ghcr.io/arushadabala/taxcalc-api@sha256:b5147182f90e8c6b0ad25a335f6660aa4be18b03a496d02cc1a5e18860daada0
 ```
+
+The `0.1.0` tag was overwritten once, in place, during this PR's review
+(originally pushed at commit `7499789`, before the `docker`-profile readiness
+fix). That is a one-time exception for pre-merge iteration on an
+unpublished/unconsumed artifact, not a rejection of the "immutable tags"
+policy below - after merge, a fix like this would ship as `0.1.1`, not a
+second push to the same `0.1.0` tag.
 
 `.github/workflows/docker.yml`'s `build-scan-smoke` job intentionally does
 **not** push (PR builds use `load: true` only). The main-branch push path
