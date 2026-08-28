@@ -6,7 +6,12 @@
 
 set -euo pipefail
 
-PROJECT="taxcalc_dev_smoke_$$"
+# Local/standalone runs get a unique project per invocation so parallel runs
+# don't collide. CI pins COMPOSE_PROJECT_NAME itself (see compose-ci.yml) so
+# this script's own `up` reuses the exact stack a prior "Compose up" step
+# already brought healthy, instead of standing up a second one that would
+# collide with it on the same host ports.
+PROJECT="${COMPOSE_PROJECT_NAME:-taxcalc_dev_smoke_$$}"
 COMPOSE="docker compose -p ${PROJECT}"
 HOST_PORT="${HOST_PORT:-8080}"
 
@@ -18,11 +23,10 @@ cleanup() {
     if [ "${rc}" != "0" ]; then
         echo ""
         echo "--- Last 200 log lines per service ---"
-        # This script owns the whole up/verify/teardown lifecycle under its
-        # own -p project name, so it's also the only place that can capture
-        # logs before teardown - written to compose-logs.txt (repo root) so
-        # CI can upload it as an artefact regardless of which project name
-        # a wrapping workflow step would otherwise have looked under.
+        # This script's own trap tears its project down before returning
+        # control, so it's also the only place that can still capture logs
+        # first - written to compose-logs.txt (repo root) for CI to pick up
+        # and upload as an artefact after this script has already exited.
         ${COMPOSE} logs --no-color --tail=200 | tee compose-logs.txt || true
     fi
     ${COMPOSE} down --volumes --remove-orphans || true
