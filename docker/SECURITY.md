@@ -16,10 +16,10 @@
   attempted silently.
 - **Builder base is `eclipse-temurin:17-jdk-jammy`, not `:21-jdk-jammy`** -
   see the table below.
-- **Image is 325MB, not under the 250MB target** - see `docker/SIZE.md`'s
-  "Against the 250MB curriculum target" section for the full breakdown and
-  the two rounds of dependency trimming already done (545MB single-stage
-  baseline -> 325MB final).
+- **Image is now 232MB, under the 250MB target**, via a custom `jlink`-built
+  JRE instead of shipping the full distroless one - see "Custom JRE via
+  jlink" below and `docker/SIZE.md` for the full investigation (545MB
+  single-stage baseline -> 325MB via dependency trimming -> 232MB via jlink).
 
 ## Base image choices
 
@@ -28,16 +28,70 @@
 | `healthcheck-builder` | `golang:1.25-alpine` | Compiles the static HEALTHCHECK probe (see below). Discarded; contributes 0 bytes to the shipped image. |
 | `builder` | `eclipse-temurin:17-jdk-jammy` | Full JDK + Gradle. **JDK 17, not 21**: `build.gradle` pins `java.toolchain.languageVersion=17` with no toolchain auto-provisioning configured, so the builder's JDK major version must match exactly. Discarded after `bootJar`. |
 | `extractor` | `eclipse-temurin:21-jre-jammy` | Runs `layertools extract` on the boot JAR. JRE only, no Gradle. The Java-17-compiled class files run unmodified on a Java 21 JRE. Discarded after extraction. |
-| `debug` (opt-in only) | `gcr.io/distroless/java21-debian12:debug-nonroot` | Same app layers as `runtime`, but the base bundles BusyBox (shell + `id`/`ls`/`cat`/...) - see "Debug build target" below. Only built with `docker build --target debug`; never the default, never pushed. |
-| `runtime` (shipped, final) | `gcr.io/distroless/java21-debian12:nonroot` | No shell, no package manager, no user-management tools — the smallest attack surface available for a Java 21 workload. The last stage in the file, so this is what `docker build .` (no `--target`) produces, and the only stage ever pushed. |
+| `jlink-builder` | `eclipse-temurin:21-jdk-jammy` | Runs `jdeps` + `jlink` to build a custom, minimal JRE - see "Custom JRE via jlink" below. Needs a full JDK's `jmods`, not just a JRE. Discarded after the custom runtime is copied out. |
+| `debug` (opt-in only) | `gcr.io/distroless/java-base-debian12:debug-nonroot` | Same app layers + custom JRE as `runtime`, but the base bundles BusyBox (shell + `id`/`ls`/`cat`/...) - see "Debug build target" below. Only built with `docker build --target debug`; never the default, never pushed. |
+| `runtime` (shipped, final) | `gcr.io/distroless/java-base-debian12:nonroot` | No shell, no package manager, no user-management tools, and (unlike `java21-debian12`) no bundled JRE either — just glibc + CA certs + the nonroot user setup. The custom jlink runtime is the only Java runtime in the image. The last stage in the file, so this is what `docker build .` (no `--target`) produces, and the only stage ever pushed. |
 
-All five base images are pinned by digest (`@sha256:...`), not by tag. A tag is
+All six base images are pinned by digest (`@sha256:...`), not by tag. A tag is
 mutable; the same `:nonroot` reference can point at different bytes on
 different days. A digest is content-addressed and immutable.
 
+## Custom JRE via jlink
+
+`gcr.io/distroless/java21-debian12` bundles a full, pre-built OpenJDK JRE -
+every module, whether this app uses it or not (~166MB just for that). The
+`jlink-builder` stage builds a custom, minimal runtime instead:
+
+1. `jdeps -q --multi-release 21 --ignore-missing-deps --print-module-deps --recursive --class-path 'deps/*' classes` statically analyzes the app's own compiled classes plus every dependency jar in `BOOT-INF/lib/` to find which JDK modules are actually referenced.
+2. `jlink --add-modules <that list + five hardcoded modules, see below>` packages only those modules into a runtime, copied into the final image at `/opt/java` (so `ENTRYPOINT` uses the full path `/opt/java/bin/java` - there's no JRE on `PATH` by default on `java-base-debian12`, only what's explicitly `COPY`'d in).
+
+Measured result: **64.5MB**, versus 166MB for the full distroless JRE.
+
+**Why five modules are hardcoded on top of `jdeps`'s own output, not left to
+static analysis alone**: `jdeps` cannot see modules only reached through
+Java's crypto Service Provider mechanism (TLS cipher suites, JCE providers) -
+those are loaded reflectively by the JVM itself, never called directly in
+application bytecode. Verified empirically before trusting this in the real
+Dockerfile: a `jlink` runtime built from `jdeps`'s raw output alone failed
+**every** outbound HTTPS request with `SSLHandshakeException:
+handshake_failure` (missing `jdk.crypto.ec` means no ECDHE, which almost
+every modern TLS server requires) - undetected, this would have silently
+broken the OAuth2 JWK Set fetch and the Spring AI Anthropic client the first
+time either was actually exercised in production, not at boot. Added:
+
+- `jdk.crypto.ec`, `jdk.crypto.cryptoki` - TLS/JCE cryptography (the actual gap found above)
+- `java.naming` - JNDI, commonly needed by JDBC drivers and logging frameworks even without an obvious direct call
+- `java.logging` - `java.util.logging`, which several libraries bridge to/from even when SLF4J is the primary API
+- `java.xml` - XML processing several Spring/Jackson internals touch
+
+Re-tested the augmented module list against a real external HTTPS endpoint
+and got a clean response before relying on it. The `jdeps` list is
+re-derived on every build (so it adapts automatically if dependencies
+change) and always unioned with these five, so a future dependency change
+can't silently drop them again.
+
+**Full functional verification performed on the resulting image**, not just
+"does it boot": ran against this machine's live Postgres/MongoDB/Kafka/Redis
+stack. `Started Application` in 9.5s, zero
+`NoClassDefFoundError`/`ClassNotFoundException` anywhere in the logs, Flyway
+migrated against Postgres successfully, MongoDB driver connected,
+`/actuator/health/readiness` settled to `healthy`, the HEALTHCHECK probe
+itself exits 0, and `docker top` confirms the process still runs as UID
+65532. Trivy findings are unchanged (still 23, same waiver applies - the
+base swap didn't add or remove any CVE-relevant OS packages). Full
+investigation and numbers in `docker/SIZE.md`.
+
+One pre-existing, unrelated issue surfaced during this testing: the Kafka
+consumer can't fully rejoin its group in bridge-network mode against this
+machine's local dev Kafka broker, because the broker's own
+`advertised.listeners` config reports `localhost:9092` for reconnection
+(correct for `--network host`, unreachable from bridge mode) - a local
+dev-infrastructure config gap, not a jlink issue, and it doesn't block
+startup or readiness. See `docker/SIZE.md` for detail.
+
 ## Debug build target
 
-`gcr.io/distroless/java21-debian12:nonroot` ships zero shell/coreutils by
+`gcr.io/distroless/java-base-debian12:nonroot` ships zero shell/coreutils by
 design - there is no `id`, `sh`, `ls`, or anything else for `docker exec` to
 run, so `docker exec <container> id` fails outright
 (`exec: "id": executable file not found in $PATH`). That is the entire point
@@ -49,12 +103,14 @@ a properly hardened container - see the PR for the literal command's output.
 
 For the rare case where a human genuinely needs to `exec` in (e.g. manually
 confirming `id`'s exact `uid=65532(nonroot) gid=65532(nonroot)` output), the
-Dockerfile has an opt-in `debug` stage: identical app layers, but based on
-`gcr.io/distroless/java21-debian12:debug-nonroot`, which bundles BusyBox.
+Dockerfile has an opt-in `debug` stage: identical app layers + the same
+custom jlink JRE as `runtime`, but based on
+`gcr.io/distroless/java-base-debian12:debug-nonroot`, which bundles BusyBox.
 It is **never** the default build target - `runtime` is the last stage in the
 file, which is what `docker build .` produces with no `--target` flag, so
 every existing build command (Task 1's, CI's) is completely unaffected - and
-it is never pushed to any registry; only `runtime` is. Build it explicitly:
+it is never pushed to any registry; only `runtime` is. Build and verify it
+explicitly (re-verified after the jlink change):
 
 ```bash
 docker build --target debug -t uptimecrew/taxcalc-api:debug .
@@ -63,9 +119,11 @@ docker exec taxcalc-api-debug id
 # uid=65532(nonroot) gid=65532(nonroot) groups=65532(nonroot)
 ```
 
-This is a real trade-off, not a free win: the `debug` image is 523MB (vs.
-325MB for `runtime`) specifically because it has a shell and utilities the
-shipped image deliberately doesn't. Treat any image built from the `debug`
+This is a real trade-off, not a free win: the `debug` image is 233MB (vs.
+232MB for `runtime`) specifically because it has a shell and utilities the
+shipped image deliberately doesn't (roughly break-even now, since both
+images use the same 64.5MB custom JRE - before the jlink change, `debug` was
+523MB against `runtime`'s 325MB). Treat any image built from the `debug`
 stage as a local development tool only, never as something to run in any
 shared or production environment.
 
@@ -75,8 +133,9 @@ shared or production environment.
 golang:1.25-alpine                                @sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
 eclipse-temurin:17-jdk-jammy                      @sha256:400014962ad7224461f945bb1cc3d7d5a1927ce15b8245b72d9cedcda554cd2a
 eclipse-temurin:21-jre-jammy                      @sha256:eebd356ad7358b7094758e5787a6726f332917cfd56feab6457c56dab895cdbf
-gcr.io/distroless/java21-debian12:debug-nonroot   @sha256:9be3a4d32b386cb2970368e6c605d8dd47f0242660ea732b66e7c5c099b03955   # debug stage only, never shipped
-gcr.io/distroless/java21-debian12:nonroot         @sha256:7e37784d94dccbf5ccb195c73b295f5ad00cd266512dfbac12eb9c3c28f8077d   # runtime stage, shipped
+eclipse-temurin:21-jdk-jammy                       @sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77   # jlink-builder only
+gcr.io/distroless/java-base-debian12:debug-nonroot @sha256:dba159ea506850709f6a3b925a90e12a461084145b35266e18d585c433a21f62   # debug stage only, never shipped
+gcr.io/distroless/java-base-debian12:nonroot       @sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c   # runtime stage, shipped
 ```
 
 Refresh the digests on the **first business day of each month**, or
@@ -232,7 +291,7 @@ The remaining 23 are waived as of **2026-08-27**, re-evaluate by
 
 | Package | Installed | Fix needs | Why not fixed now |
 |---|---|---|---|
-| `liblcms2-2` (OS, debian 12.13) | 2.14-2 | 2.14-2+deb12u1 | Base image's OS package, not this project's dependency graph. Not present in the `gcr.io/distroless/java21-debian12:nonroot` digest pinned above; will close automatically on the next monthly digest refresh once upstream rebuilds. |
+| `liblcms2-2` (OS, debian 12.13) | 2.14-2 | 2.14-2+deb12u1 | Base image's OS package, not this project's dependency graph - present in `gcr.io/distroless/java-base-debian12:nonroot` the same way it was in `java21-debian12:nonroot` before the jlink switch (both pull the same underlying Debian package set for the modules this app's jlink runtime needs, e.g. `java.desktop`'s font-rendering libs). Will close automatically on the next monthly digest refresh once upstream rebuilds with the patched package. |
 | `commons-fileupload`, `commons-io`, `micrometer-core`, `kafka-clients`, `lz4-java`, `postgresql` (42.7.12) | various | patch releases | Boot-BOM-managed or independently pinned; each needs its own `ext[]`/version override the same way Tomcat/Netty/Jackson did above, not yet done for these six - lower severity, deferred to the next pass rather than rushed in this PR. |
 | `spring-ai-client-chat`, `spring-ai-model` | 1.0.0 | 1.0.7+ | See revert above - the fix requires the same spring-ai bump that crashed the MCP server. Needs a coordinated fix (likely also bumping/pinning `com.networknt:json-schema-validator` explicitly) before it can be taken. |
 | `spring-boot`, `spring-core`, `spring-expression`, `spring-webflux`, `spring-webmvc`, `spring-security-web`, `spring-data-commons`, `spring-data-mongodb`, `spring-kafka`, `spring-graphql` | 3.3.13 / 6.1.21 / 6.3.10 / etc. | a Spring Boot **minor or major** version bump (3.3 → 3.5+/4.0, Spring Framework 6.1 → 6.2/7.0, Spring Security 6.3 → 6.5/7.0) | None of these have a same-line patch fix. Confirmed directly against Maven Central's `spring-boot-gradle-plugin` metadata: **3.3.13 is the newest release in the 3.3.x line**, so there's no smaller bump to take the way there was for Tomcat/Netty/Jackson. Every fix requires moving to a different minor/major release - a coordinated, whole-project upgrade (~a dozen interdependent library versions at once) with real compatibility risk across the entire codebase, out of scope for this Docker packaging deliverable. See "Why a waiver instead of 0 HIGH / 0 CRITICAL" above for the full reasoning. Tracked as follow-up work, not silently accepted risk. |
