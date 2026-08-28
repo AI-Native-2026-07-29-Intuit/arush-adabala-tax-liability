@@ -178,24 +178,26 @@ docker run -d --name taxcalc-api \
   uptimecrew/taxcalc-api:0.1.0
 ```
 
-## Registry push (verified 2026-08-27, last updated same day after adding the opt-in debug build target)
+## Registry push (verified 2026-08-27, last updated 2026-08-28 after the jlink custom-JRE change)
 
 Pushed to GitHub Container Registry (GHCR), private visibility, under the
 author's personal namespace (no AWS ECR credentials available in this
 environment - see AWS path in the Prerequisites). This is always the
-`runtime` stage (distroless `:nonroot`, no shell) - the `debug` stage above
-is never pushed anywhere:
+`runtime` stage (distroless `java-base-debian12:nonroot` + the custom jlink
+JRE, no shell) - the `debug` stage above is never pushed anywhere:
 
 ```
 ghcr.io/arushadabala/taxcalc-api:0.1.0
-ghcr.io/arushadabala/taxcalc-api:41e4ad5   # <git-sha>, same digest
+ghcr.io/arushadabala/taxcalc-api:6fa590e   # <git-sha>, same digest
 ```
 
 Both tags resolve to the same immutable digest:
 
 ```
-ghcr.io/arushadabala/taxcalc-api@sha256:15d961dd226d8a958392102a7d4e281fa20689ddeda477ebfa3b95a2f4e0d88f
+ghcr.io/arushadabala/taxcalc-api@sha256:31e9f09313e2271651fa93e18567461d313a12316a3d10b3a34848c7e5ff810a
 ```
+
+232MB, under the 250MB target.
 
 (Re-pushed once more after a `git filter-branch` rewrite removed the
 `Co-Authored-By` trailer from every commit on this branch - the branch's
