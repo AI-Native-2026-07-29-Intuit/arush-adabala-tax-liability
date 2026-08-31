@@ -635,6 +635,10 @@ make dev     # taxcalc-api-dev live-reload profile - see scripts/dev.md
 make nuke    # wipe containers + named volumes + locally-built images
 ```
 
+## Week 5 Day 3
+
+_TODO: document Week 5 Day 3 once the implementation work lands._
+
 ## Build and Test
 
 ```bash
