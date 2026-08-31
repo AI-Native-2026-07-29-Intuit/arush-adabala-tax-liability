@@ -1,0 +1,63 @@
+# compose.profiles.yaml - sidecars activated via `--profile <name>`.
+# Merge with: docker compose -f compose.yaml -f compose.profiles.yaml --profile e2e up -d --wait
+# Each service must declare a `profiles:` list; un-profiled services
+# always start.
+
+services:
+  # ----- e2e profile: W4 React frontend ------------------------------------
+  taxcalc-web:
+    profiles: [e2e]
+    image: uptimecrew/taxcalc-web:0.1.0
+    networks: [taxcalc_net]
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE: http://localhost:8080
+    depends_on:
+      taxcalc-api: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ----- test profile: seed deterministic fixtures -------------------------
+  seed-fixtures:
+    profiles: [test]
+    image: uptimecrew/taxcalc-api:${APP_VERSION:?APP_VERSION required}
+    networks: [taxcalc_net]
+    # This image's ENTRYPOINT is already `java ... JarLauncher` (distroless,
+    # no shell) - `command:` supplies Spring Boot program args only, not a
+    # `java -jar` invocation.
+    command: ["--spring.profiles.active=seed"]
+    env_file:
+      - ./envs/taxcalc.env
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taxcalc_dev
+      SPRING_DATASOURCE_USERNAME: taxcalc_dev
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_DATA_MONGODB_URI: mongodb://mongo:27017/taxcalc_dev
+    secrets:
+      - pg_password
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    restart: "no"
+
+  # ----- observability profile: forward to W5 D5 ----------------------------
+  otelcol:
+    profiles: [observability, e2e]
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    networks: [taxcalc_net]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - type: bind
+        source: ./otelcol/config.yaml
+        target: /etc/otelcol-contrib/config.yaml
+        read_only: true
+
+  jaeger:
+    profiles: [observability, e2e]
+    image: jaegertracing/all-in-one:1.62
+    networks: [taxcalc_net]
+    ports:
+      - "16686:16686"

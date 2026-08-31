@@ -1,0 +1,71 @@
+# compose.override.yaml - local-dev tweaks. Auto-merged by Compose when
+# present alongside compose.yaml. NEVER deployed; this file expresses
+# engineer-laptop convenience, not team-shared behaviour.
+
+services:
+  taxcalc-api:
+    # This service ships the Day 1 custom jlink JRE (see Dockerfile / SIZE.md),
+    # trimmed via jdeps to only the modules the app's own classes reference. It
+    # does NOT include jdk.jdwp.agent, so `-agentlib:jdwp` fails fast on this
+    # runtime ("Could not find agent library jdwp ... libjdwp.so"). Attach a
+    # debugger to taxcalc-api-dev below instead (a full eclipse-temurin JDK) -
+    # that's also the live-reload workflow documented in scripts/dev.md.
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+
+  postgres:
+    # Publish 5432 to host only when you want psql / DataGrip from the host.
+    # Keep commented in committed copy; engineers uncomment locally.
+    # ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: taxcalc_dev
+      POSTGRES_USER: taxcalc_dev
+
+  # ----- dev-mode live-reload override -------------------------------------
+  # Run with: docker compose --profile dev up -d taxcalc-api-dev
+  # Terminal 1 (host): ./gradlew classes --continuous
+  # Terminal 2 (host): docker compose --profile dev logs -f taxcalc-api-dev
+  # Full loop + why this runs via `bootRun` (not `java -jar`) documented in
+  # scripts/dev.md: spring-boot-devtools is a `developmentOnly` Gradle
+  # dependency, so the Spring Boot Gradle plugin strips it out of the
+  # packaged bootJar - devtools' restart classloader only ever loads when
+  # running on an exploded classpath, i.e. via bootRun.
+  taxcalc-api-dev:
+    profiles: [dev]
+    image: eclipse-temurin:17-jdk-jammy
+    networks: [taxcalc_net]
+    working_dir: /workspace
+    command:
+      - "sh"
+      - "-c"
+      - |
+        ./gradlew --no-daemon bootRun \
+          -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005 -Dspring.devtools.restart.poll-interval=1s -Dspring.devtools.restart.quiet-period=400ms"
+    ports:
+      - "8081:8080"
+      - "5006:5005"
+    env_file:
+      - ./envs/taxcalc.env
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taxcalc_dev
+      SPRING_DATASOURCE_USERNAME: taxcalc_dev
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_DATA_MONGODB_URI: mongodb://mongo:27017/taxcalc_dev
+    secrets:
+      - pg_password
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+      - gradle-cache:/root/.gradle
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  gradle-cache: {}

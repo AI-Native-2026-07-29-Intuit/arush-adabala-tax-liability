@@ -1,0 +1,99 @@
+# .github/workflows/compose-ci.yml
+name: taxcalc-api compose-ci
+
+on:
+  pull_request:
+    paths:
+      - "compose.yaml"
+      - "compose.override.yaml"
+      - "compose.profiles.yaml"
+      - "envs/**"
+      - "scripts/**"
+      - "Makefile"
+      - "src/**"
+      - "build.gradle"
+      - "Dockerfile"
+      - ".github/workflows/compose-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compose-up-smoke:
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 20
+    env:
+      # Pinned here (job-level, so every step's `docker compose` inherits it)
+      # so this job's own "Compose up" step and scripts/smoke.sh's internal
+      # `up` resolve to the exact same project. Without this, smoke.sh
+      # defaults to its own unique-per-invocation project name and a
+      # separate "compose up" step here would stand up a second, colliding
+      # stack on the same host ports; with it, smoke.sh's `up` becomes an
+      # idempotent no-op against the containers this job already brought
+      # healthy, and its teardown tears down the one shared project.
+      COMPOSE_PROJECT_NAME: taxcalc_dev_ci_${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # uptimecrew/taxcalc-api:0.1.0 is never pushed to a registry (docker.yml
+      # builds it with `load: true` for its own scan+smoke job only, PR builds
+      # never push - see that workflow's comments) - it only exists as a local
+      # image on an engineer's laptop. Build it locally here too, under the
+      # exact tag compose.yaml resolves to, or `docker compose up` 404s trying
+      # to pull it.
+      - name: Build taxcalc-api image
+        run: docker build -t uptimecrew/taxcalc-api:0.1.0 --build-arg APP_VERSION=0.1.0 --build-arg GIT_SHA=${{ github.sha }} .
+
+      # CI does NOT have the engineer's envs/secrets on disk - write them
+      # here from values acceptable for ephemeral CI use only. The app reads
+      # this file via application.yml's `optional:configtree:/run/secrets/`
+      # import (property key = filename, "pg_password"), so CI_PG_PASSWORD
+      # can be any value here - it no longer has to match a hardcoded
+      # fallback the way it did before that import existed.
+      - name: Seed envs + secrets for CI
+        run: |
+          mkdir -p envs secrets
+          cp envs/taxcalc.env.example envs/taxcalc.env
+          printf '%s' "$CI_PG_PASSWORD" > secrets/pg_password.txt
+        env:
+          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+
+      - name: Validate compose.yaml schema
+        run: docker compose config --quiet
+
+      - name: Compose up --wait
+        run: docker compose up -d --wait --wait-timeout 120
+
+      # scripts/smoke.sh's own `up` reuses this same COMPOSE_PROJECT_NAME, so
+      # it's idempotent here (containers are already healthy) rather than a
+      # second stack. Its trap still tears the (shared) project down before
+      # this step returns and, on failure, tees logs to compose-logs.txt.
+      - name: Smoke
+        run: ./scripts/smoke.sh
+
+      # Two different failures land here differently:
+      # - "Compose up --wait" itself failed -> Smoke never ran, so
+      #   compose-logs.txt doesn't exist yet, but the containers are still
+      #   up (nothing has torn them down) - capture fresh.
+      # - Smoke failed internally -> its own trap already wrote
+      #   compose-logs.txt AND already tore the stack down, so a fresh
+      #   `docker compose logs` here would find nothing; use the file it
+      #   left behind instead.
+      - name: Capture logs on failure
+        if: failure()
+        run: |
+          if [ ! -s compose-logs.txt ]; then
+            docker compose logs --no-color --tail=500 > compose-logs.txt || true
+          fi
+          cat compose-logs.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: compose-logs
+          path: compose-logs.txt
+          retention-days: 14
+
+      - name: Tear down (always)
+        if: always()
+        run: docker compose down --volumes --remove-orphans || true

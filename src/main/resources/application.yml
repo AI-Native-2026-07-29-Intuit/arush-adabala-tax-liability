@@ -3,10 +3,19 @@ spring:
     name: taxcalc-service
   profiles:
     default: local
+  config:
+    # Reads each file under /run/secrets/ (the Compose secrets mount point - see
+    # compose.yaml's top-level `secrets:` block) as a property named after the file.
+    # `optional:` so this is a no-op wherever /run/secrets/ doesn't exist (IDE runs,
+    # bootRun outside Docker, the `test` profile's Testcontainers-backed tests).
+    import: "optional:configtree:/run/secrets/"
   datasource:
     url: jdbc:postgresql://localhost:5432/postgres
     username: postgres
-    password: ${DB_PASSWORD:devpass}
+    # pg_password comes from the mounted secrets/pg_password.txt file (via the
+    # configtree import above) when present; DB_PASSWORD/devpass remain as
+    # fallbacks for contexts with no mounted secret.
+    password: ${pg_password:${DB_PASSWORD:devpass}}
     hikari:
       maximum-pool-size: 5
   flyway:
