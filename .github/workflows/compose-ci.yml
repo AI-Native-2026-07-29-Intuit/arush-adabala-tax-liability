@@ -45,12 +45,11 @@ jobs:
         run: docker build -t uptimecrew/taxcalc-api:0.1.0 --build-arg APP_VERSION=0.1.0 --build-arg GIT_SHA=${{ github.sha }} .
 
       # CI does NOT have the engineer's envs/secrets on disk - write them
-      # here from values acceptable for ephemeral CI use only. The app
-      # doesn't actually read SPRING_DATASOURCE_PASSWORD_FILE (Spring Boot
-      # has no built-in support for that Docker "_FILE" convention), so it
-      # falls back to application.yml's ${DB_PASSWORD:devpass} default -
-      # CI_PG_PASSWORD must be "devpass" for Postgres auth to succeed here,
-      # matching this repo's own docker.yml CI job.
+      # here from values acceptable for ephemeral CI use only. The app reads
+      # this file via application.yml's `optional:configtree:/run/secrets/`
+      # import (property key = filename, "pg_password"), so CI_PG_PASSWORD
+      # can be any value here - it no longer has to match a hardcoded
+      # fallback the way it did before that import existed.
       - name: Seed envs + secrets for CI
         run: |
           mkdir -p envs secrets

@@ -18,7 +18,6 @@ services:
       SPRING_PROFILES_ACTIVE: local
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taxcalc_dev
       SPRING_DATASOURCE_USERNAME: taxcalc_dev
-      SPRING_DATASOURCE_PASSWORD_FILE: /run/secrets/pg_password
       SPRING_DATA_REDIS_HOST: redis
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_DATA_MONGODB_URI: mongodb://mongo:27017/taxcalc_dev
