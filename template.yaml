@@ -1,12 +1,13 @@
 # template.yaml - the SAM stack for the taxcalc-taxpayer-lookup Lambda (W5 D4).
 #
-# One HTTP API + one DynamoDB table + one Function + one explicit LogGroup, in a single
-# CloudFormation stack. The AWS::Serverless-2016-10-31 transform expands AWS::Serverless::*
+# One HTTP API + one DynamoDB table + one Function + one explicit LogGroup + one p99 alarm, in a
+# single CloudFormation stack. The AWS::Serverless-2016-10-31 transform expands AWS::Serverless::*
 # into the full graph (the Function's execution role, the Lambda permission API Gateway needs to
-# invoke it, and the route/integration wiring) at change-set time.
+# invoke it, the version/alias pair AutoPublishAlias implies, and the route/integration wiring)
+# at change-set time.
 #
 # Every resource here is owned by the stack, which is the entire point: `sam delete` takes the
-# table, the API, the function, the log group, and the generated IAM role with it.
+# table, the API, the function, the log group, the alarm, and the generated IAM role with it.
 
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
@@ -88,6 +89,16 @@ Resources:
       FunctionName: !Sub "taxcalc-taxpayer-lookup-${StageName}"
       Handler: com.uptimecrew.tax_liability.lambda.TaxpayerLookupHandler::handleRequest
       CodeUri: .
+      SnapStart:
+        # A JVM snapshot is taken after INIT and restored on cold start, so the handler's
+        # `private static final` fields (SDK client, ObjectMapper, env reads) are paid for once
+        # at publish time rather than on every cold invocation.
+        ApplyOn: PublishedVersions
+      # REQUIRED, not cosmetic: SnapStart only ever applies to published versions. Without an
+      # alias the HttpApi integration targets $LATEST, which never has a snapshot - SnapStart
+      # would read as "enabled" in the console and do nothing at all. With the alias set, SAM
+      # points the integration at the alias and each deploy publishes a new version behind it.
+      AutoPublishAlias: live
       Environment:
         Variables:
           # Externalised config only - the handler hardcodes neither the table name nor a region
@@ -119,6 +130,30 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/taxcalc-taxpayer-lookup-${StageName}"
       RetentionInDays: !Ref LogRetentionDays
 
+  # --- p99 latency alarm -----------------------------------------------------------------------
+  TaxpayerLookupFunctionP99Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "taxcalc-taxpayer-lookup-p99-${StageName}"
+      AlarmDescription: >
+        p99 invocation duration above 1.5s over 5 consecutive minutes - the cold-start tail
+        SnapStart is meant to be flattening.
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions: [{ Name: FunctionName, Value: !Ref TaxpayerLookupFunction }]
+      # ExtendedStatistic: p99, NOT Statistic: Average. The Lambda console defaults to Average,
+      # which is exactly the view that hides a cold-start tail: a handful of multi-second restores
+      # averaged against hundreds of 40ms warm invocations never crosses any threshold worth
+      # setting. Always alarm on the SLO percentile.
+      ExtendedStatistic: p99
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1500
+      ComparisonOperator: GreaterThanThreshold
+      # A function with no traffic emits no Duration datapoints at all; without this the alarm
+      # sits in INSUFFICIENT_DATA rather than OK whenever the stack is idle.
+      TreatMissingData: notBreaching
+
 Outputs:
   HttpApiUrl:
     Description: Base URL of the HTTP API stage.
@@ -129,3 +164,6 @@ Outputs:
   TableName:
     Description: The DynamoDB read-model table backing the lookup.
     Value: !Ref TaxpayersTable
+  P99AlarmName:
+    Description: The p99 latency alarm guarding the cold-start tail.
+    Value: !Ref TaxpayerLookupFunctionP99Alarm
