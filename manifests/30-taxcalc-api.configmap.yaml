@@ -11,7 +11,10 @@ metadata:
   name: taxcalc-api-config
   namespace: taxcalc-dev
   labels:
-    app.kubernetes.io/name: taxcalc-api
+    app.kubernetes.io/name:       taxcalc-api
+    app.kubernetes.io/component:  api
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
 data:
   SPRING_PROFILES_ACTIVE:          k8s
   LOGGING_LEVEL_ROOT:              INFO

@@ -27,9 +27,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name:      taxcalc-api   # MUST match selector
-        app.kubernetes.io/component: api
-        app.kubernetes.io/part-of:   taxcalc
+        app.kubernetes.io/name:       taxcalc-api   # MUST match selector
+        app.kubernetes.io/component:  api
+        app.kubernetes.io/part-of:    taxcalc
+        app.kubernetes.io/managed-by: kubectl
       annotations:
         # Restart on config / secret content change. CI computes the
         # hash; this placeholder is rewritten at apply time.

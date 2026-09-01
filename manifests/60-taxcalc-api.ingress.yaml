@@ -12,7 +12,10 @@ metadata:
   name: taxcalc-api
   namespace: taxcalc-dev
   labels:
-    app.kubernetes.io/name: taxcalc-api
+    app.kubernetes.io/name:       taxcalc-api
+    app.kubernetes.io/component:  api
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size:    "1m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "30"

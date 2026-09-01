@@ -8,8 +8,10 @@ metadata:
   name: taxcalc-api
   namespace: taxcalc-dev
   labels:
-    app.kubernetes.io/name:      taxcalc-api
-    app.kubernetes.io/component: api
+    app.kubernetes.io/name:       taxcalc-api
+    app.kubernetes.io/component:  api
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
 spec:
   type: ClusterIP
   selector:
