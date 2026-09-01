@@ -51,7 +51,19 @@ jobs:
 
       - name: Deploy ingress-nginx
         run: |
-          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
+          curl -sL https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml \
+            -o ingress-nginx-baremetal.yaml
+          # k3d's `--port "8080:80@loadbalancer"` forwards the host port to
+          # port 80 on the cluster's nodes - it's a static node-IP:port proxy,
+          # not Service-aware. The controller only receives that traffic if
+          # it's actually bound to the node's own port 80, which the upstream
+          # manifest doesn't do by default (its Service is ClusterIP-routed,
+          # not host-bound) - confirmed via a real failed CI run where every
+          # smoke request got curl exit 52 "Empty reply from server" on every
+          # retry, not a one-off race. `hostNetwork: true` fixes it.
+          sed -i 's/^      dnsPolicy: ClusterFirst$/      dnsPolicy: ClusterFirstWithHostNet\n      hostNetwork: true/' \
+            ingress-nginx-baremetal.yaml
+          kubectl apply -f ingress-nginx-baremetal.yaml
           # The upstream manifest's ValidatingWebhookConfiguration requires its
           # own cert-gen Jobs to finish AND the controller's webhook port to be
           # reachable before the admission Service has endpoints - until then
