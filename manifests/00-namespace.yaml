@@ -1,0 +1,55 @@
+# manifests/00-namespace.yaml - the bounded blast radius for taxcalc-api.
+# A ResourceQuota caps total resource use; a LimitRange supplies defaults
+# so pods that omit requests/limits still get sane numbers.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: taxcalc-dev
+  labels:
+    app.kubernetes.io/name:       taxcalc-dev
+    app.kubernetes.io/component:  namespace
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: taxcalc-dev-quota
+  namespace: taxcalc-dev
+  labels:
+    app.kubernetes.io/name:       taxcalc-dev-quota
+    app.kubernetes.io/component:  namespace
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  hard:
+    requests.cpu:    "4"
+    requests.memory: 8Gi
+    limits.cpu:      "8"
+    limits.memory:   16Gi
+    pods:            "20"
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: taxcalc-dev-defaults
+  namespace: taxcalc-dev
+  labels:
+    app.kubernetes.io/name:       taxcalc-dev-defaults
+    app.kubernetes.io/component:  namespace
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  limits:
+    - type: Container
+      # HEADS UP - `default.cpu` here silently overrides Topic 6's
+      # "omit limits.cpu" guidance for EVERY container in this namespace that
+      # doesn't set one, including taxcalc-api (see the NOTE in
+      # 10-taxcalc-api.deployment.yaml). Both settings are required by the
+      # W5 D3 brief and they genuinely conflict; drop `cpu` from this
+      # `default:` block if you want unthrottled containers instead.
+      default:        { cpu: 500m, memory: 768Mi }   # if the pod omits limits
+      defaultRequest: { cpu: 100m, memory: 256Mi }    # if the pod omits requests
