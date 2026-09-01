@@ -725,14 +725,32 @@ So four of the five were emulator fidelity gaps and the template was right all a
 
 **The `LogFormat: JSON` row was then closed observably, not just on paper.** The `<Lambda>` appender switches on `AWS_LAMBDA_LOG_FORMAT` — the env var the real runtime sets from `LoggingConfig`, reserved on AWS but settable on the emulator. Setting it to `JSON` and invoking produced the exact documented envelope (quoted in the logging section above), which is what surfaced the two silent Log4j2 defects described there.
 
+### Cold-vs-warm latency, measured for real (RIE), and what it does and does not prove
+
+floci cannot measure this — but AWS's own **Runtime Interface Emulator** can, and it is a different tool entirely: `sam local start-lambda` runs the function inside `public.ecr.aws/lambda/java:21-rapid-arm64`, the real published runtime image, and emits genuine `REPORT` lines. Run with `--warm-containers EAGER` so the container is reused (without it every invocation gets a fresh container and *every* sample is cold — the first attempt here produced cold 632ms vs warm 609ms, which is the signature of that mistake, not a real result), 1 cold + 39 warm invocations against the `400` branch:
+
+| | Duration |
+|---|---|
+| **Cold** — first invocation into a fresh JVM | **744.5 ms** |
+| **Warm** — n=39: min / p50 / p90 / p99 | **1.14 / 3.74 / 5.86 / 19.22 ms** |
+| cold ÷ warm p50 | **199×** |
+| INIT-attributable delta (cold − warm p50) | **740.7 ms** |
+
+Read precisely, because it is easy to overclaim:
+
+- **This is not a SnapStart before/after.** The RIE has no snapshot/restore. What it quantifies is the *size of the prize*: ~741 ms of JVM start, class loading and static-initialiser work (SDK client, `ObjectMapper`, Log4j2 config) that SnapStart is designed to remove, measured in the real runtime image rather than guessed at.
+- **The `400` branch was used deliberately** — it exercises JVM start, every static initialiser, MDC and response building with zero network I/O, so the cold number isn't polluted by a DynamoDB round trip. The corollary is that **warm p50 of 3.74 ms excludes the `GetItem`**; a real warm p50 on the 200 path will be higher.
+- **The RIE's own `Init Duration` field is useless here** — it reports 0.03–0.10 ms because JVM initialisation is folded into the first invocation's `Duration`. That is why "cold" is defined above as the first invocation's `Duration`, not as `Init Duration`.
+- **Against the deliverable's targets** (cold p99 < 600 ms, warm p50 < 60 ms): warm passes with a 16× margin. Cold at 744 ms does *not* — which is exactly the gap SnapStart exists to close, and exactly what cannot be confirmed without a real deploy.
+
 **Still genuinely open — these need real AWS and nothing else will do:**
 
 | Graded artefact | Why an emulator cannot stand in |
 |---|---|
-| Cold-vs-warm latency table | SnapStart is Firecracker snapshot/restore. floci has none, so numbers taken there would measure Docker container start. Deliberately not recorded. |
+| SnapStart cold-start improvement | The measurement above sizes what SnapStart would remove, but the post-SnapStart cold number needs Firecracker restore on real AWS. |
 | `list-metrics --namespace TaxcalcDev` | floci stores the EMF line as an ordinary log line and never parses it (`{"Metrics": []}`). The template-side risk is now closed though: AWS documents that *"Lambda doesn't double-encode any logs that are already JSON encoded"*, so `_aws` stays at the root under `LogFormat: JSON` — the earlier worry about the ALC envelope swallowing it was unfounded. |
 | Alarm state / `describe-alarms` | Created, but with the p99 dropped and `INSUFFICIENT_DATA`. |
-| CloudWatch `REPORT` lines | Emitted by the real Lambda runtime, not the function. Application log lines *do* reach the log group. |
+| CloudWatch `REPORT` lines *in the deployed log group* | floci emits none, so `sam-smoke.sh`'s check is skipped there via `EXPECT_RUNTIME_REPORT=false`. Partly closed though: the RIE **does** emit real `REPORT` lines locally (they are the source of the latency table above), so the format the script greps for is confirmed against the real runtime — only their delivery into CloudWatch Logs is unverified. |
 | OIDC CI deploy | GitHub↔AWS STS trust plus a real Actions run; no local equivalent by construction. |
 
 Two further floci quirks worth knowing before repeating this: its CloudFormation Outputs report the real-AWS-shaped `https://{id}.execute-api.{region}.amazonaws.com` hostname, which does not resolve locally — the API is actually served at **`http://localhost:4566/execute-api/{apiId}/{stage}`** (the LocalStack-style `/restapis/.../_user_request_/` and `*.localhost.localstack.cloud` forms all 404; cf. upstream issue [#1902](https://github.com/floci-io/floci/issues/1902)). And `get-template --template-stage Original` returns the *post*-transform template (`TaxpayerLookupFunction` has `Type: AWS::Lambda::Function`), so you cannot inspect what was actually submitted. To keep the smoke script usable in both worlds without a second drifting copy, `scripts/sam-smoke.sh` gained two overrides that both default to real-AWS behaviour: `HTTP_API_URL` (bypass Outputs resolution) and `EXPECT_RUNTIME_REPORT` (skip the REPORT assertion). Never set the latter to `false` for a real AWS run — that check is what catches a function and a log group that have drifted apart.
