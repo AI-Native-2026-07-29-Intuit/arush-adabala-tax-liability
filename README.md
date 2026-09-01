@@ -730,19 +730,27 @@ So four of the five were emulator fidelity gaps and the template was right all a
 
 floci cannot measure this — but AWS's own **Runtime Interface Emulator** can, and it is a different tool entirely: `sam local start-lambda` runs the function inside `public.ecr.aws/lambda/java:21-rapid-arm64`, the real published runtime image, and emits genuine `REPORT` lines. Run with `--warm-containers EAGER` so the container is reused (without it every invocation gets a fresh container and *every* sample is cold — the first attempt here produced cold 632ms vs warm 609ms, which is the signature of that mistake, not a real result), 1 cold + 39 warm invocations against the `400` branch:
 
-| | Duration |
-|---|---|
-| **Cold** — first invocation into a fresh JVM | **744.5 ms** |
-| **Warm** — n=39: min / p50 / p90 / p99 | **1.14 / 3.74 / 5.86 / 19.22 ms** |
-| cold ÷ warm p50 | **199×** |
-| INIT-attributable delta (cold − warm p50) | **740.7 ms** |
+| Sample | n | min | p50 | p90 | p99 |
+|---|---|---|---|---|---|
+| **Cold** — fresh container + fresh JVM per call | 15 | 1175 | **1239** | 1408 | **1418 ms** |
+| **Cold** — container already up, JVM init on first call | 1 | — | 744.5 | — | — |
+| **Warm** — reused container and JVM | 39 | 1.14 | **3.74** | 5.86 | **19.22 ms** |
+
+cold p50 ÷ warm p50 = **331×**. Two cold rows because they measure different things: the first is
+what a real cold start looks like end to end (microVM/container creation *plus* JVM init), the
+second isolates JVM init alone by pre-creating the container with `--warm-containers EAGER`.
+
+**Against the deliverable's targets — one passes, one does not, and the failure is the point:**
+warm p50 of 3.74 ms clears the 60 ms bar by 16×. Cold p99 of 1418 ms does **not** clear the
+600 ms bar — because this is the *pre-SnapStart* baseline. Getting under 600 ms is precisely
+what SnapStart is for, and confirming it did needs a real deploy. Recording the baseline is the
+honest half of that comparison, and the deliverable explicitly asks for one.
 
 Read precisely, because it is easy to overclaim:
 
 - **This is not a SnapStart before/after.** The RIE has no snapshot/restore. What it quantifies is the *size of the prize*: ~741 ms of JVM start, class loading and static-initialiser work (SDK client, `ObjectMapper`, Log4j2 config) that SnapStart is designed to remove, measured in the real runtime image rather than guessed at.
 - **The `400` branch was used deliberately** — it exercises JVM start, every static initialiser, MDC and response building with zero network I/O, so the cold number isn't polluted by a DynamoDB round trip. The corollary is that **warm p50 of 3.74 ms excludes the `GetItem`**; a real warm p50 on the 200 path will be higher.
-- **The RIE's own `Init Duration` field is useless here** — it reports 0.03–0.10 ms because JVM initialisation is folded into the first invocation's `Duration`. That is why "cold" is defined above as the first invocation's `Duration`, not as `Init Duration`.
-- **Against the deliverable's targets** (cold p99 < 600 ms, warm p50 < 60 ms): warm passes with a 16× margin. Cold at 744 ms does *not* — which is exactly the gap SnapStart exists to close, and exactly what cannot be confirmed without a real deploy.
+- **The RIE's own `Init Duration` field is useless here** — across all 15 cold runs it reported between 0.01 and 0.20 ms, because JVM initialisation is folded into the invocation's `Duration` rather than tracked separately. That is why "cold" is defined above as `Duration`, not `Init Duration`. On real AWS this field is meaningful and should be recorded from the CloudWatch `REPORT` lines.
 
 **Still genuinely open — these need real AWS and nothing else will do:**
 
