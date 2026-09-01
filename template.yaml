@@ -107,6 +107,13 @@ Resources:
           # The EMF namespace the handler stamps onto its custom metrics. An env var rather than
           # a constant so a stage can be split out of the shared namespace without a code change.
           METRICS_NAMESPACE: TaxcalcDev
+          # Deliberately empty in every deployed stage - the handler skips a blank value and uses
+          # normal AWS endpoint resolution. It is declared at all because `sam local invoke`
+          # only injects variables the template already declares: anything passed via --env-vars
+          # that has no entry here is silently dropped, so without this line there is no way to
+          # point the function at a local DynamoDB and the handler can never be exercised
+          # end to end outside a live AWS account.
+          AWS_ENDPOINT_URL_DYNAMODB: ""
       Policies:
         # Least-privilege: SAM's DynamoDBReadPolicy connector expands to the specific read verbs
         # (GetItem, BatchGetItem, Query, Scan, ...) scoped to this one table's ARN plus its index

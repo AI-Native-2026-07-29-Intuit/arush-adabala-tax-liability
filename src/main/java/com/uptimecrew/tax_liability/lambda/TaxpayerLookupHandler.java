@@ -1,5 +1,6 @@
 package com.uptimecrew.tax_liability.lambda;
 
+import java.net.URI;
 import java.util.Map;
 import java.util.Optional;
 
@@ -295,6 +296,20 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         String region = System.getenv("AWS_REGION");
         if (region != null && !region.isBlank()) {
             builder.region(Region.of(region));
+        }
+        // Point DynamoDB at a local emulator when asked. Both names are the AWS-standard
+        // endpoint variables (service-specific wins over global), so this invents no config of
+        // its own; neither is ever set in the deployed stack, which is why production resolution
+        // is untouched. It is declared explicitly because the Java SDK v2 does NOT honour these
+        // variables on its own the way the CLI and several other SDKs do - confirmed by watching
+        // `sam local invoke` reach real DynamoDB and return "The security token included in the
+        // request is invalid" while AWS_ENDPOINT_URL_DYNAMODB was set. Without this the handler
+        // cannot be exercised end to end against anything but a live AWS account.
+        String endpoint = Optional.ofNullable(System.getenv("AWS_ENDPOINT_URL_DYNAMODB"))
+                .orElseGet(() -> System.getenv("AWS_ENDPOINT_URL"));
+        if (endpoint != null && !endpoint.isBlank()) {
+            LOG.info("using DynamoDB endpoint override endpoint={}", endpoint);
+            builder.endpointOverride(URI.create(endpoint));
         }
         try {
             return builder.build();
