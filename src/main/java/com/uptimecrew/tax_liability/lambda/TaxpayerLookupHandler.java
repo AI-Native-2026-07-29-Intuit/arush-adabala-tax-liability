@@ -288,6 +288,22 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
      *         Lambda (unit tests, CI), where returning null lets the non-DynamoDB paths still be
      *         exercised instead of failing the whole class at static-init time
      */
+    /**
+     * @param values candidate values, in precedence order; any may be null
+     * @return the first value that is neither null nor blank, or {@code null} if there is none.
+     *         Blank counts as absent on purpose - an env var declared with an empty default is
+     *         set-but-meaningless, and {@code Optional.ofNullable("")} would wrongly treat it as
+     *         a real value and stop the search.
+     */
+    private static String firstNonBlank(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v;
+            }
+        }
+        return null;
+    }
+
     private static DynamoDbClient buildDynamoClient() {
         DynamoDbClientBuilder builder = DynamoDbClient.builder()
                 .httpClient(UrlConnectionHttpClient.create());
@@ -297,17 +313,23 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         if (region != null && !region.isBlank()) {
             builder.region(Region.of(region));
         }
-        // Point DynamoDB at a local emulator when asked. Both names are the AWS-standard
-        // endpoint variables (service-specific wins over global), so this invents no config of
-        // its own; neither is ever set in the deployed stack, which is why production resolution
-        // is untouched. It is declared explicitly because the Java SDK v2 does NOT honour these
-        // variables on its own the way the CLI and several other SDKs do - confirmed by watching
-        // `sam local invoke` reach real DynamoDB and return "The security token included in the
-        // request is invalid" while AWS_ENDPOINT_URL_DYNAMODB was set. Without this the handler
-        // cannot be exercised end to end against anything but a live AWS account.
-        String endpoint = Optional.ofNullable(System.getenv("AWS_ENDPOINT_URL_DYNAMODB"))
-                .orElseGet(() -> System.getenv("AWS_ENDPOINT_URL"));
-        if (endpoint != null && !endpoint.isBlank()) {
+        // Point DynamoDB at a local emulator when asked.
+        //
+        // DYNAMODB_ENDPOINT_OVERRIDE is deliberately OUR name rather than the AWS-standard
+        // AWS_ENDPOINT_URL_DYNAMODB, and that is not arbitrary. `sam local invoke --env-vars`
+        // can only override variables template.yaml already declares - undeclared ones are
+        // dropped silently - so the variable has to appear in the template to be usable locally.
+        // But declaring the *AWS-standard* name with an empty default breaks the deployed
+        // function outright: the SDK reads that variable itself, and an empty value makes it
+        // build an endpoint with no scheme, failing every call with
+        // "SdkClientException: Unable to marshall request to JSON: protocol must not be null".
+        // A name only this code reads can be declared empty harmlessly. The AWS-standard names
+        // are still honoured as fallbacks for anyone who sets them properly.
+        String endpoint = firstNonBlank(
+                System.getenv("DYNAMODB_ENDPOINT_OVERRIDE"),
+                System.getenv("AWS_ENDPOINT_URL_DYNAMODB"),
+                System.getenv("AWS_ENDPOINT_URL"));
+        if (endpoint != null) {
             LOG.info("using DynamoDB endpoint override endpoint={}", endpoint);
             builder.endpointOverride(URI.create(endpoint));
         }

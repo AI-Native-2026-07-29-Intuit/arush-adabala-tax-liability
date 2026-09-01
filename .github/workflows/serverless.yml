@@ -52,6 +52,12 @@ jobs:
       - name: mvn test
         run: mvn -B -ntp test
 
+      # ----- 2b. Package the shaded jar ----------------------------------
+      # template.yaml marks the function SkipBuild with CodeUri pointing at this
+      # artefact, so Maven is what compiles it; `sam build` only stages it.
+      - name: mvn package
+        run: mvn -B -ntp package -DskipTests
+
       # ----- 3. Build under a Lambda-parity container --------------------
       - name: sam build
         run: sam build --use-container

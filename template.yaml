@@ -79,16 +79,13 @@ Resources:
   TaxpayerLookupFunction:
     Type: AWS::Serverless::Function
     Metadata:
-      # `sam build` picks its Java workflow from the build file it finds in CodeUri, and it looks
-      # for build.gradle BEFORE pom.xml. This repo's root has both (Gradle owns the Spring Boot
-      # service, Maven owns this Lambda), so the default selection built the wrong project
-      # entirely. A makefile build method makes the choice explicit: SAM runs
-      # `make build-TaxpayerLookupFunction`, which is the Maven build and nothing else.
-      BuildMethod: makefile
+      # The deployment artefact is the shaded jar Maven already produces, so `sam build` has
+      # nothing to do but carry it through. SkipBuild says exactly that.
+      SkipBuild: true
     Properties:
       FunctionName: !Sub "taxcalc-taxpayer-lookup-${StageName}"
       Handler: com.uptimecrew.tax_liability.lambda.TaxpayerLookupHandler::handleRequest
-      CodeUri: .
+      CodeUri: target/taxcalc-taxpayer-lookup-1.0.0.jar
       SnapStart:
         # A JVM snapshot is taken after INIT and restored on cold start, so the handler's
         # `private static final` fields (SDK client, ObjectMapper, env reads) are paid for once
@@ -107,13 +104,16 @@ Resources:
           # The EMF namespace the handler stamps onto its custom metrics. An env var rather than
           # a constant so a stage can be split out of the shared namespace without a code change.
           METRICS_NAMESPACE: TaxcalcDev
-          # Deliberately empty in every deployed stage - the handler skips a blank value and uses
-          # normal AWS endpoint resolution. It is declared at all because `sam local invoke`
-          # only injects variables the template already declares: anything passed via --env-vars
-          # that has no entry here is silently dropped, so without this line there is no way to
-          # point the function at a local DynamoDB and the handler can never be exercised
-          # end to end outside a live AWS account.
-          AWS_ENDPOINT_URL_DYNAMODB: ""
+          # Empty in every deployed stage; the handler skips a blank value and uses normal AWS
+          # endpoint resolution. Declared only so `sam local invoke --env-vars` can override it -
+          # SAM silently drops any variable the template does not already declare, so an
+          # undeclared name cannot be injected locally at all.
+          #
+          # NOT named AWS_ENDPOINT_URL_DYNAMODB on purpose. The SDK reads that variable itself,
+          # and declaring it empty made every deployed call fail with "protocol must not be null"
+          # (an empty endpoint has no scheme). A name only our own code reads is safe to leave
+          # blank.
+          DYNAMODB_ENDPOINT_OVERRIDE: ""
       Policies:
         # Least-privilege: SAM's DynamoDBReadPolicy connector expands to the specific read verbs
         # (GetItem, BatchGetItem, Query, Scan, ...) scoped to this one table's ARN plus its index
