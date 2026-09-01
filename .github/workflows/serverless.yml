@@ -1,0 +1,149 @@
+# .github/workflows/serverless.yml - validate/test/build/local-invoke on PR,
+# OIDC-federated deploy + smoke on merge to main (W5 D4).
+name: taxcalc-taxpayer-lookup serverless
+
+on:
+  pull_request:
+    paths:
+      - 'template.yaml'
+      - 'pom.xml'
+      - 'src/main/java/com/uptimecrew/tax_liability/lambda/**'
+      - 'src/test/java/com/uptimecrew/tax_liability/lambda/**'
+      - 'src/main/resources-lambda/**'
+      - 'events/**'
+      - 'scripts/sam-*.sh'
+      - '.github/workflows/serverless.yml'
+  push:
+    branches: [main]
+
+permissions:
+  # Required for OIDC federated auth. Without this the token endpoint is not
+  # even offered to the job and configure-aws-credentials fails with
+  # "Could not load credentials from any providers".
+  id-token: write
+  contents: read
+
+jobs:
+  # ----- PR gate: everything that needs no AWS account at all ---------------
+  validate-build-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      # ----- 1. Static validation ---------------------------------------
+      # --region is passed explicitly: sam validate resolves a region even for
+      # a purely local lint, and this job has no credentials and no configured
+      # default profile to take one from.
+      - name: sam validate --lint
+        run: sam validate --lint --region us-east-1
+
+      # ----- 2. Unit tests (JUnit 5 + Mockito + AssertJ) ------------------
+      - name: mvn test
+        run: mvn -B -ntp test
+
+      # ----- 3. Build under a Lambda-parity container --------------------
+      - name: sam build
+        run: sam build --use-container
+
+      # ----- 4. Local invoke against the synthetic event ------------------
+      # An integration test of the built artifact inside the real runtime
+      # image: it proves the Handler string in template.yaml actually resolves
+      # to a loadable class, which no amount of unit testing can.
+      # The function has no DynamoDB access here, so the meaningful assertion
+      # is that a well-formed HTTP response comes back at all - grep for the
+      # statusCode key rather than for a specific status.
+      - name: sam local invoke (integration test against handler)
+        run: |
+          sam local invoke TaxpayerLookupFunction \
+            --event events/get-taxpayer.json \
+            | tee /tmp/local-invoke.json
+          grep -q '"statusCode"' /tmp/local-invoke.json
+
+      - name: Upload sam build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-build
+          path: .aws-sam/build
+          retention-days: 7
+
+  # ----- Merge to main: deploy to a sandbox stack via OIDC ------------------
+  deploy-sandbox:
+    needs: validate-build-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    environment: sandbox
+    timeout-minutes: 20
+    env:
+      STACK: taxcalc-lambda-sandbox
+      STAGE: dev
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with: { name: sam-build, path: .aws-sam/build }
+
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+
+      # OIDC federated auth: GitHub mints a short-lived OIDC token, AWS STS
+      # exchanges it for temporary credentials against a role whose trust
+      # policy is pinned to this repo and branch. There are deliberately NO
+      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets in this repository -
+      # a long-lived key in GitHub Secrets is the exact anti-pattern this
+      # replaces. The role ARN is a repository *variable*, not a secret: an
+      # ARN is not confidential, and hiding it only makes failures harder to
+      # read.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: sam deploy (sandbox)
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --stack-name "${STACK}" \
+            --region "${AWS_REGION}" \
+            --parameter-overrides "StageName=${STAGE}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --resolve-s3
+
+      - name: Smoke test (curl + CloudWatch REPORT check)
+        run: ./scripts/sam-smoke.sh
+
+      # Both halves of the diagnostics bundle are guarded with `|| true`: on a
+      # failed deploy the stack may not exist at all, and a describe-stack-events
+      # that itself errors would mask the real failure with a second one.
+      - name: Capture function diagnostics on failure
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name "${STACK}" \
+            --region "${AWS_REGION}" \
+            --max-items 50 > /tmp/stack-events.json || true
+          aws logs tail "/aws/lambda/taxcalc-taxpayer-lookup-${STAGE}" \
+            --since 10m --region "${AWS_REGION}" \
+            > /tmp/lambda-logs.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: sam-diagnostics
+          path: |
+            /tmp/stack-events.json
+            /tmp/lambda-logs.txt
+          retention-days: 14

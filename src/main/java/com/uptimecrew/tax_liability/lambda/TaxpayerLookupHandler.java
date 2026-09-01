@@ -88,7 +88,8 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context ctx) {
         String correlationId = resolveCorrelationId(event, ctx);
 
-        String taxpayerId = Optional.ofNullable(event.getPathParameters())
+        String taxpayerId = Optional.ofNullable(event)
+                .map(APIGatewayV2HTTPEvent::getPathParameters)
                 .map(p -> p.get("taxpayerId"))
                 .orElse(null);
 
@@ -102,12 +103,15 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         TaxpayerRecord record;
         try {
             record = loadFromDynamo(taxpayerId);
-        } catch (SdkException | IllegalStateException e) {
-            // Letting this propagate would end the invocation as an unhandled Lambda error, and
-            // API Gateway turns that into an opaque 502/500 with no body and, critically, no
-            // x-correlation-id header - losing the trace at exactly the point the caller most
-            // needs it. Confirmed against `sam local invoke`, where an expired token surfaced as
+        } catch (SdkException | IllegalStateException | IllegalArgumentException e) {
+            // Letting any of these propagate would end the invocation as an unhandled Lambda
+            // error, and API Gateway turns that into an opaque 5xx with no body and, critically,
+            // no x-correlation-id header - losing the trace at exactly the point the caller most
+            // needs it. Confirmed against `sam local invoke`, where an invalid token surfaced as
             // a raw DynamoDbException stack trace instead of an HTTP response.
+            // IllegalArgumentException covers the other half: a row written with a missing or
+            // mistyped attribute is a data problem, not a client problem, so it is a 500 too -
+            // but a *shaped* one that still says which request it happened on.
             LOG.error("dynamodb lookup failed correlationId={} taxpayerId={}", correlationId, taxpayerId, e);
             return errorResponse(500, "taxpayer lookup failed", correlationId);
         }

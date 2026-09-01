@@ -662,11 +662,64 @@ TAG=0.1.0 ./scripts/k8s-up.sh    # create/reuse the k3d cluster, import the imag
 kubeconform -strict -summary -schema-location default manifests/   # static validation, no cluster needed
 ```
 
+## Week 5 Day 4 — Serverless: AWS Lambda, API Gateway HTTP API, DynamoDB & SAM
+
+Yesterday's k3d Deployment runs the whole API 24/7; today the *read side* of the same capstone — one happy-path taxpayer lookup — is re-shipped as a single function. `template.yaml` at the repo root declares the entire stack: an explicit `AWS::Serverless::HttpApi` (`TaxcalcHttpApi` — declared rather than left implicit, since an implicit API can't be given its own throttling/access-log/custom-domain properties without first being made explicit), an `AWS::DynamoDB::Table` (`taxpayers-${StageName}`, `PAY_PER_REQUEST`, `id` (S) partition key, PITR on), the `AWS::Serverless::Function` (`java21`, `arm64`, 1024MB, 10s timeout, `Tracing: Active`, `LoggingConfig: { LogFormat: JSON, ApplicationLogLevel: INFO, SystemLogLevel: WARN }`, `SnapStart: { ApplyOn: PublishedVersions }` + `AutoPublishAlias: live`, `DynamoDBReadPolicy` scoped to the one table), an explicit `AWS::Logs::LogGroup` with `RetentionInDays`, and an `AWS::CloudWatch::Alarm` on `Duration` at `ExtendedStatistic: p99` / `Threshold: 1500` / `EvaluationPeriods: 5` / `Period: 60`. `lambda/TaxpayerLookupHandler.java` is a `RequestHandler<APIGatewayV2HTTPEvent, APIGatewayV2HTTPResponse>` whose `DynamoDbClient`, `ObjectMapper`, `TAXPAYERS_TABLE` env read and SLF4J `Logger` are all `private static final` — INIT-phase cost, paid once per execution environment and captured in the SnapStart snapshot. `TaxpayerRecord` is the same logical row as `readmodel.TaxpayerReadModel` and `entity.Taxpayer`, hand-mapped from the raw `GetItem` attribute map (not the Enhanced Client, whose annotation-driven `TableSchema` is INIT work a one-key read doesn't need), with money as `BigDecimal` at scale 2 / `HALF_UP`, ids as `String`, and timestamps as `Instant`.
+
+**Two build tools in one repo, on purpose.** `pom.xml` is new and owns *only* `com/uptimecrew/tax_liability/lambda/**`, via `maven-compiler-plugin` `<includes>`/`<testIncludes>` — the source roots are shared with Gradle, and an unscoped Maven build would try to compile the entire Spring Boot application against a dependency closure containing no Spring at all. `build.gradle` mirrors the split with a `sourceSets` exclusion of that same package, so `./gradlew check` doesn't need the AWS SDK on the app's classpath (or in its Docker image) to compile a handler the app never loads, and the JaCoCo branch-coverage floor keeps measuring the service rather than a handler Maven already tests. Verified both directions: `./gradlew compileJava compileTestJava` is green and `build/classes/java/main/.../lambda/` does not exist, while `mvn test` compiles and runs only the Lambda's 13 tests. Maven's `<resources>` is repointed at a new `src/main/resources-lambda/` for the same reason — the default `src/main/resources` belongs to the Boot app, and shading it in would put `application.yml`, the Flyway migrations and the GraphQL schema inside the Lambda jar.
+
+**Six real problems found by running the verification commands rather than reading them, each fixed with a comment in place:**
+
+1. **`sam build` built the wrong project.** SAM picks its Java workflow from the build file it finds in `CodeUri`, and it checks `build.gradle` **before** `pom.xml`. This repo's root has both, so `sam build` silently selected `JavaGradleWorkflow` and started building the whole Spring Boot application, failing on that application's own Lambda-irrelevant dependency graph. Pointing `CodeUri` at the pre-built jar instead — as the reference template does — fails differently and just as hard: SAM treats `CodeUri` as a *directory* and reports `Gradle build file not found: .../taxcalc-taxpayer-lookup-1.0.0.jar/build.gradle`. Fixed with `Metadata: { BuildMethod: makefile }` and a `build-TaxpayerLookupFunction` target, taking the workflow guess out of SAM's hands entirely.
+2. **A jar at the root of the deployment zip is never on the classpath.** The Makefile target copies the shaded jar into `$(ARTIFACTS_DIR)/lib/`, because the Java runtime puts `/var/task/lib/*.jar` on the classpath but ignores a jar sitting loose at the zip root — a function that would deploy perfectly cleanly and then fail every invocation with `ClassNotFoundException`.
+   *Consequence of `CodeUri: .` worth knowing before you hit it:* `sam build` copies the whole CodeUri tree into a scratch directory (and, under `--use-container`, into the build container). On a developer laptop this repo's working tree is ~572MB and the copy dominates the build — but that is entirely gitignored local state (`taxcalc-web/node_modules` 429MB, `build/` 122MB, `.gradle/`, `target/`); the tracked content SAM actually needs is **1.6MB**, so a fresh `actions/checkout` in CI copies ~1.6MB. Local `sam build` without `--use-container` completed in 2m52s; `--use-container` is meaningfully slower for the same reason and is best run on a clean tree.
+3. **A DynamoDB failure escaped as an unhandled Lambda error.** Caught live by `sam local invoke`: the SDK's "security token is invalid" surfaced as a raw `DynamoDbException` stack trace instead of an HTTP response, and API Gateway renders that as an opaque 5xx with no body and — critically — no `x-correlation-id` header, losing the trace at exactly the point a caller needs it. `SdkException`/`IllegalStateException` now map to a 500 that carries the correlation id like every other response.
+4. **The reference handler shape cannot survive `mvn test`.** `private static final DynamoDbClient DDB = DynamoDbClient.builder().build()` throws `SdkClientException: Unable to load region` at *class-initialisation* time anywhere `AWS_REGION` isn't set — every unit test, every CI runner. That's an `ExceptionInInitializerError` before a single assertion runs, taking down even the 400-path and correlation-id tests that never touch DynamoDB. `buildDynamoClient()` now reads `AWS_REGION` (always set by the Lambda runtime, so config stays externalised) and returns `null` rather than throwing when nothing resolves; `loadFromDynamo` fails fast with a clear message at first use instead.
+5. **Excluding the SDK's default HTTP clients means you must name one.** `netty-nio-client` (an async event-loop group built at `build()` time) and `apache-client` are both excluded to keep INIT cheap for a handler that makes exactly one blocking `GetItem`; with neither present the SDK fails at build time with "Unable to load an HTTP implementation", so `UrlConnectionHttpClient.create()` is set explicitly.
+6. **slf4j-simple logs to stderr by default.** Lambda routes stderr to CloudWatch as a bare line, outside the structured-log path `LogFormat: JSON` wraps — quietly breaking the "every log line is a JSON envelope" contract. `src/main/resources-lambda/simplelogger.properties` sets `logFile=System.out` and drops the timestamp/thread/logger-name prefixes the Lambda envelope already carries.
+
+**`AutoPublishAlias: live` is the half of SnapStart that nothing complains about when you omit it.** SnapStart only ever applies to *published versions*; without the alias the HttpApi integration targets `$LATEST`, which never has a snapshot, and the console cheerfully reports SnapStart "enabled" on a function that never restores from one.
+
+The custom metrics (`TaxpayerLookupSuccess` / `TaxpayerNotFound`, namespace `TaxcalcDev`) are hand-written EMF lines on `System.out` rather than synchronous `cloudwatch:PutMetricData` calls — PutMetricData would add a network round trip to every invocation *and* force a second IAM permission onto an execution role this deliverable exists to scope down to one DynamoDB table. Powertools' `MetricsUtils` was rejected for a different reason: its ergonomic path is an `@Metrics` annotation woven by aspectj, i.e. a build plugin plus a runtime weaving agent, for a metric surface of two counters. Because hand-assembled JSON fails *silently* here — CloudWatch accepts a malformed EMF line as an ordinary log event and simply never publishes a metric, with nothing raising an error anywhere — `buildEmf` is split out and unit-tested: the payload is parsed and asserted to have `_aws` at the root, a dimension key resolving to a real member of the same object, and the metric name doubling as the value key.
+
+`.github/workflows/serverless.yml` runs `sam validate --lint` → `mvn test` → `sam build --use-container` → `sam local invoke` on every PR, and on merge to `main` assumes an IAM role through **OIDC federated auth** (`aws-actions/configure-aws-credentials@v4` + `role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}`, with `permissions: id-token: write`) to deploy `taxcalc-lambda-sandbox`, smoke it, and upload a `sam-diagnostics` artifact (`describe-stack-events` + `aws logs tail`) on failure. There are deliberately **no** `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets in this repository; the role ARN is a repository *variable*, not a secret, because an ARN is not confidential and hiding it only makes failures harder to read. The PR job's `sam local invoke` assertion greps for `"statusCode"` rather than a specific status, because that job has no DynamoDB access — the meaningful signal is that the `Handler:` string in `template.yaml` resolves to a loadable class and a well-formed HTTP response comes back at all.
+
+**Known, deliberate gap — the AWS half of this deliverable is authored and locally verified, but never executed against real AWS.** This machine has no AWS credentials (`aws sts get-caller-identity` → `NoCredentials`) and no dev sandbox account attached, so all of the following are written but unobserved: `sam deploy`, the `curl <HttpApiUrl>/taxpayers/txp_synth_001` 200/404 pair, the cold-vs-warm latency table from CloudWatch `REPORT` lines, `aws lambda get-function-configuration --query 'SnapStart'`, `aws iam get-role-policy` on the generated role, `aws cloudwatch describe-alarms`, `aws cloudwatch list-metrics --namespace TaxcalcDev`, the OIDC trust-policy wiring, the deliberately-broken-template CI run, and `sam delete`. Those artefacts are graded from real output and fabricating them would be worse than declaring the gap; the run needs an account and a `vars.AWS_DEPLOY_ROLE_ARN` first. One further item is *unverifiable*, not merely unrun: EMF requires `_aws` at the **root** of the log event, and Lambda's advanced logging controls wrap stdout in an envelope — whether the EMF parser still extracts the metric under `LogFormat: JSON` is an assumption here, not an observation, and is the first thing to check once a stack exists. (Unrelated local-environment note, no repo change: this laptop sits behind Zscaler TLS interception whose root CA is in the macOS System keychain but in no JDK truststore, so Maven Central and Gradle only resolve with `-Djavax.net.ssl.trustStore` pointed at a keychain-derived store. GitHub Actions runners are unaffected.)
+
+What *was* run and did pass, locally:
+
+```bash
+sam validate --lint --region us-east-1   # -> "template.yaml is a valid SAM Template"
+mvn -B -ntp test                         # -> Tests run: 13, Failures: 0, Errors: 0
+mvn -B -ntp package                      # -> target/taxcalc-taxpayer-lookup-1.0.0.jar (shaded, 10.6MB)
+sam build                                # -> Build Succeeded (2m52s; the makefile build method)
+sam local invoke TaxpayerLookupFunction --event events/get-taxpayer.json
+# -> {"statusCode": 500, "headers": {"x-correlation-id": "local-smoke-corr-1"}, ...}
+#    500 is the correct answer here: the handler loaded, the Handler string resolved, the
+#    event's correlation id propagated, TAXPAYERS_TABLE was injected, and the GetItem was
+#    genuinely rejected for want of credentials.
+./gradlew compileJava compileTestJava    # -> BUILD SUCCESSFUL; the Gradle/Maven split holds
+```
+
+```bash
+./scripts/sam-deploy.sh    # sam validate --lint -> sam build --use-container -> sam deploy -> print Outputs
+./scripts/sam-smoke.sh     # resolve HttpApiUrl from stack Outputs; known-good path + correlation-id echo, route-miss 404, CloudWatch REPORT check
+sam delete --stack-name taxcalc-lambda-dev --region "$AWS_REGION"   # teardown is part of the deliverable, not an afterthought
+```
+
 ## Build and Test
 
 ```bash
-./gradlew build   # compile and run all checks
+./gradlew build   # compile and run all checks (the Spring Boot service)
 ./gradlew test    # run the JUnit 5 test suite
+```
+
+```bash
+# The W5 D4 Lambda is a separate Maven build over com.uptimecrew.tax_liability.lambda only.
+mvn -B -ntp test                          # JUnit 5 + Mockito + AssertJ, no AWS needed
+sam validate --lint --region us-east-1    # cfn-lint over the transformed template
+sam build --use-container                 # build inside the AWS Lambda java21 parity image
+sam local invoke TaxpayerLookupFunction --event events/get-taxpayer.json
 ```
 
 ```bash
