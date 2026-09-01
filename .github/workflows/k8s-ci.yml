@@ -43,6 +43,10 @@ jobs:
         uses: AbsaOSS/k3d-action@v2
         with:
           cluster-name: taxcalc-ci
+          # Pinned: the action's own default (v5.4.6) 404s on install - that
+          # release's asset naming no longer matches upstream k3d-io/k3d's
+          # install script (confirmed via a real failed CI run on this branch).
+          k3d-version: v5.9.0
           args: --servers 1 --agents 2 --port "8080:80@loadbalancer" --k3s-arg "--disable=traefik@server:0"
 
       - name: Deploy ingress-nginx
