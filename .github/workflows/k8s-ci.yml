@@ -68,6 +68,21 @@ jobs:
         env:
           CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
 
+      - name: Compute config/secret checksums into the Deployment's pod template
+        # A ConfigMap/Secret content change alone doesn't trigger a rollout -
+        # Kubernetes only restarts pods when the *pod template* changes, so
+        # these two annotations exist purely to give the template something
+        # that changes in lockstep with the data it reads via envFrom.
+        run: |
+          CONFIG_HASH=$(sha256sum manifests/30-taxcalc-api.configmap.yaml | cut -d' ' -f1)
+          SECRET_HASH=$(printf '%s' "$CI_PG_PASSWORD" | sha256sum | cut -d' ' -f1)
+          sed -i "s|checksum/config: \".*\"|checksum/config: \"${CONFIG_HASH}\"|" \
+            manifests/10-taxcalc-api.deployment.yaml
+          sed -i "s|checksum/secret: \".*\"|checksum/secret: \"${SECRET_HASH}\"|" \
+            manifests/10-taxcalc-api.deployment.yaml
+        env:
+          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+
       # ----- 3. Server-side admission + apply -------------------------------
       - name: Server-side dry-run
         run: kubectl apply -f manifests/ --dry-run=server
