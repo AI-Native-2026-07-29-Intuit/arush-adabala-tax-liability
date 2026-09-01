@@ -1,0 +1,101 @@
+# .github/workflows/k8s-ci.yml - kubeconform + k3d + apply + rollout + smoke (W5 D3).
+name: taxcalc-api k8s-ci
+
+on:
+  pull_request:
+    paths:
+      - 'manifests/**'
+      - 'scripts/k8s-*.sh'
+      - 'taxcalc-api/**'
+      - '.github/workflows/k8s-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  manifests-validate-and-deploy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----- 1. Static validation (no cluster yet) ------------------------
+      - name: Install kubeconform
+        run: |
+          curl -sSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: kubeconform manifests/
+        run: kubeconform -strict -summary -schema-location default manifests/
+
+      # ----- 2. Spin up k3d ------------------------------------------------
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build taxcalc-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: uptimecrew/taxcalc-api:${{ github.sha }}
+
+      - name: Spin up k3d cluster
+        uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: taxcalc-ci
+          args: --servers 1 --agents 2 --port "8080:80@loadbalancer" --k3s-arg "--disable=traefik@server:0"
+
+      - name: Deploy ingress-nginx
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
+          kubectl -n ingress-nginx wait --for=condition=available --timeout=180s deploy/ingress-nginx-controller
+
+      - name: Import image into the cluster
+        run: k3d image import uptimecrew/taxcalc-api:${{ github.sha }} -c taxcalc-ci
+
+      - name: Patch image tag in Deployment manifest
+        run: |
+          sed -i "s|uptimecrew/taxcalc-api:[^\"[:space:]]*|uptimecrew/taxcalc-api:${{ github.sha }}|" \
+            manifests/10-taxcalc-api.deployment.yaml
+
+      - name: Seed Secret from CI value (NOT from the committed placeholder)
+        run: |
+          kubectl create namespace taxcalc-dev || true
+          kubectl create secret generic taxcalc-api-secrets \
+            -n taxcalc-dev \
+            --from-literal=SPRING_DATASOURCE_PASSWORD="$CI_PG_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        env:
+          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+
+      # ----- 3. Server-side admission + apply -------------------------------
+      - name: Server-side dry-run
+        run: kubectl apply -f manifests/ --dry-run=server
+
+      - name: Apply
+        run: kubectl apply -f manifests/
+
+      - name: Wait for rollout (gates the build)
+        run: |
+          kubectl rollout status \
+            deploy/taxcalc-api -n taxcalc-dev --timeout=8m
+
+      # ----- 4. Smoke -------------------------------------------------------
+      - name: Smoke test through the Ingress
+        run: ./scripts/k8s-smoke.sh
+
+      # ----- 5. Diagnostics on failure ---------------------------------------
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all -n taxcalc-dev
+          kubectl describe deploy/taxcalc-api -n taxcalc-dev
+          kubectl logs deploy/taxcalc-api -n taxcalc-dev \
+            --tail=200 > pod-logs.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: k8s-diagnostics
+          path: pod-logs.txt
+          retention-days: 14
