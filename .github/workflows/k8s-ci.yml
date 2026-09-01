@@ -52,6 +52,13 @@ jobs:
       - name: Deploy ingress-nginx
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
+          # The upstream manifest's ValidatingWebhookConfiguration requires its
+          # own cert-gen Jobs to finish AND the controller's webhook port to be
+          # reachable before the admission Service has endpoints - until then
+          # every `kubectl apply` of an Ingress object 500s against it. Not
+          # needed for this lab (nothing here relies on Ingress admission
+          # validation), so it's dropped rather than raced against.
+          kubectl delete validatingwebhookconfiguration ingress-nginx-admission --ignore-not-found
           kubectl -n ingress-nginx wait --for=condition=available --timeout=180s deploy/ingress-nginx-controller
 
       - name: Import image into the cluster
