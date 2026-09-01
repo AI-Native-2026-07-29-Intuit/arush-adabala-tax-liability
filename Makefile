@@ -1,7 +1,7 @@
 # Makefile - the four-command surface every engineer uses daily.
 # Targets are designed to be idempotent and friction-free.
 
-.PHONY: up down logs ps smoke clean nuke dev test e2e
+.PHONY: up down logs ps smoke clean nuke dev test e2e build-TaxpayerLookupFunction
 
 up: ## Bring the core stack to healthy.
 	docker compose up -d --wait --wait-timeout 90
@@ -36,3 +36,22 @@ clean: ## Stop containers; remove anonymous volumes; keep named volumes + images
 
 nuke: ## DANGEROUS: stop containers AND wipe named volumes + locally-built images.
 	docker compose down --volumes --remove-orphans --rmi local
+
+# --- W5 D4: `sam build` custom build method -----------------------------------------------------
+# Invoked by SAM, not by hand: template.yaml marks TaxpayerLookupFunction with
+# `Metadata: { BuildMethod: makefile }`, which makes SAM run `make build-<LogicalId>` with
+# ARTIFACTS_DIR set to the directory the deployment zip is assembled from.
+#
+# Why this rather than letting SAM pick a workflow: SAM chooses its Java workflow by looking for a
+# build file in the CodeUri directory, and it checks build.gradle BEFORE pom.xml. In this repo the
+# root holds both, so `sam build` silently selected JavaGradleWorkflow and tried to build the whole
+# Spring Boot application - failing on the app's own (Lambda-irrelevant) dependency graph. A
+# makefile build method takes that guess out of SAM's hands.
+#
+# The shaded jar goes into lib/, not the artifact root: the Lambda Java runtime puts
+# /var/task/lib/*.jar on the classpath, but a jar sitting loose at the root of the zip is never
+# added to it - the function would deploy cleanly and then fail at ClassNotFoundException.
+build-TaxpayerLookupFunction:
+	mvn -B -ntp clean package -DskipTests
+	mkdir -p "$(ARTIFACTS_DIR)/lib"
+	cp target/taxcalc-taxpayer-lookup-1.0.0.jar "$(ARTIFACTS_DIR)/lib/"

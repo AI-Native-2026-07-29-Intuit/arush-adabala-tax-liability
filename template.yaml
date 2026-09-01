@@ -77,10 +77,17 @@ Resources:
   # --- The Function ----------------------------------------------------------------------------
   TaxpayerLookupFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      # `sam build` picks its Java workflow from the build file it finds in CodeUri, and it looks
+      # for build.gradle BEFORE pom.xml. This repo's root has both (Gradle owns the Spring Boot
+      # service, Maven owns this Lambda), so the default selection built the wrong project
+      # entirely. A makefile build method makes the choice explicit: SAM runs
+      # `make build-TaxpayerLookupFunction`, which is the Maven build and nothing else.
+      BuildMethod: makefile
     Properties:
       FunctionName: !Sub "taxcalc-taxpayer-lookup-${StageName}"
       Handler: com.uptimecrew.tax_liability.lambda.TaxpayerLookupHandler::handleRequest
-      CodeUri: target/taxcalc-taxpayer-lookup-1.0.0.jar
+      CodeUri: .
       Environment:
         Variables:
           # Externalised config only - the handler hardcodes neither the table name nor a region

@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -39,7 +40,7 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
  *   <li><strong>400</strong> - no {@code taxpayerId} path parameter</li>
  *   <li><strong>404</strong> - no item in the table for that id</li>
  *   <li><strong>200</strong> - the JSON-serialised {@link TaxpayerRecord}</li>
- *   <li><strong>500</strong> - serialisation failure</li>
+ *   <li><strong>500</strong> - DynamoDB or serialisation failure</li>
  * </ul>
  *
  * <p>Every response, success or error, carries an {@code x-correlation-id} header and every log
@@ -89,7 +90,18 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
             return errorResponse(400, "missing taxpayerId path parameter", correlationId);
         }
 
-        TaxpayerRecord record = loadFromDynamo(taxpayerId);
+        TaxpayerRecord record;
+        try {
+            record = loadFromDynamo(taxpayerId);
+        } catch (SdkException | IllegalStateException e) {
+            // Letting this propagate would end the invocation as an unhandled Lambda error, and
+            // API Gateway turns that into an opaque 502/500 with no body and, critically, no
+            // x-correlation-id header - losing the trace at exactly the point the caller most
+            // needs it. Confirmed against `sam local invoke`, where an expired token surfaced as
+            // a raw DynamoDbException stack trace instead of an HTTP response.
+            LOG.error("dynamodb lookup failed correlationId={} taxpayerId={}", correlationId, taxpayerId, e);
+            return errorResponse(500, "taxpayer lookup failed", correlationId);
+        }
         if (record == null) {
             return errorResponse(404, "taxpayer not found", correlationId);
         }
