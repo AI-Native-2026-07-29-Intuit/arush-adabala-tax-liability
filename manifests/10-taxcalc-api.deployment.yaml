@@ -2,7 +2,7 @@
 # Pin the image by tag (NOT a moving label); set zero-downtime rollout
 # defaults; use the three-probe pattern from Topic 7; surface the
 # non-root UID from the W5 D1 distroless image; wire envFrom both the
-# ConfigMap and Secret. Resources + HPA land in Task 3.
+# ConfigMap and Secret.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -49,6 +49,15 @@ spec:
           envFrom:
             - configMapRef: { name: taxcalc-api-config }
             - secretRef:    { name: taxcalc-api-secrets }
+          env:
+            # Make the JVM respect the cgroup memory limit, not host RAM.
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
+
+          # ----- resources (requests = scheduler floor; limits = kubelet kill line)
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   {            memory: 1Gi   }   # CPU limit omitted on purpose (Topic 6)
 
           # ----- three probes (Topic 7) -----------------------------------
           startupProbe:                               # owns boot grace
