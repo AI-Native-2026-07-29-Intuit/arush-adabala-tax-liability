@@ -1,0 +1,31 @@
+{
+  "version": "2.0",
+  "routeKey": "GET /taxpayers/{taxpayerId}",
+  "rawPath": "/taxpayers/txp_synth_001",
+  "rawQueryString": "",
+  "headers": {
+    "accept": "application/json",
+    "x-correlation-id": "local-smoke-corr-1"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "local-invoke",
+    "domainName": "local.invoke",
+    "http": {
+      "method": "GET",
+      "path": "/taxpayers/txp_synth_001",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "sam-local-invoke"
+    },
+    "requestId": "local-smoke-req-1",
+    "routeKey": "GET /taxpayers/{taxpayerId}",
+    "stage": "$default",
+    "time": "01/Sep/2026:00:00:00 +0000",
+    "timeEpoch": 1788220800000
+  },
+  "pathParameters": {
+    "taxpayerId": "txp_synth_001"
+  },
+  "isBase64Encoded": false
+}

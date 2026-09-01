@@ -12,6 +12,13 @@ secrets/*
 !secrets/.gitkeep
 compose-logs.txt
 
+# SAM build state (W5 D4). NEVER commit any of these.
+.aws-sam/
+samconfig.toml
+events/*.local.json
+/tmp/sam-smoke-body
+target/
+
 # Kubernetes-managed dev state (W5 D3). NEVER commit any of these.
 manifests/*.local.yaml
 pod-logs.txt
