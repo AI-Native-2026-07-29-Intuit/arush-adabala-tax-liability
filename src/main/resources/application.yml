@@ -132,13 +132,17 @@ management:
       group:
         # (8d) W5 D3: without an explicit group, Boot's readiness group is just
         # `readinessState` - identical in substance to liveness, so a downstream
-        # Postgres/Redis/Kafka/Mongo outage never pulls the pod out of a Service's
+        # Postgres/Redis/Mongo outage never pulls the pod out of a Service's
         # endpoints. liveness stays a pure "is the JVM alive" heartbeat on purpose -
         # it must NOT depend on external services, or a transient dependency blip
         # triggers a pointless container restart instead of the intended fix
         # (readiness removes it from load balancing until the dependency recovers).
+        # `kafka` deliberately excluded: this app doesn't register a `kafka`
+        # health contributor (verified empirically - listing it here throws
+        # NoSuchHealthContributorException and kills startup on every profile,
+        # not just where its indicator is disabled), so there's nothing to group.
         readiness:
-          include: readinessState,db,redis,mongo,kafka
+          include: readinessState,db,redis,mongo
         liveness:
           include: livenessState
 
@@ -222,31 +226,26 @@ spring:
   # Kubernetes DNS (`<svc>.<namespace>.svc.cluster.local`), never `localhost` or the
   # Compose `docker` profile's `host.docker.internal` - those hostnames are baked
   # into the ConfigMap itself so they can change per-environment without an image
-  # rebuild. Kept here (rather than removed) for shape-parity with a real cluster:
-  # Postgres/Redis/Kafka/Mongo aren't deployed in this lab's k3d namespace (out of
-  # scope - W5 D2's Compose stack already covers standing those up), so the health
-  # group below disables the corresponding checks the same way the `test` profile
-  # does when its backing service isn't actually running.
+  # rebuild. Postgres/Redis/Mongo are deployed alongside taxcalc-api in this lab's
+  # k3d namespace (manifests/05-dev-dependencies.yaml - a deliberate gap outside
+  # the graded Task 1-4 manifest list, same reasoning as W5 D2's Mongo addition:
+  # Flyway/JPA validate need a real, reachable Postgres at context startup on every
+  # profile, so readiness can never turn UP without one). Kafka's broker is NOT
+  # deployed - only a bare Service exists so its bootstrap hostname still
+  # resolves (KafkaConsumer's constructor resolves it synchronously and kills
+  # context startup if it can't; the later TCP connect is async/tolerated).
+  # There's no `kafka` health contributor to disable here (see the base
+  # readiness group's comment above).
   datasource:
-    url: jdbc:postgresql://postgres.taxcalc-dev.svc.cluster.local:5432/taxcalc
+    url: jdbc:postgresql://postgres.taxcalc-dev.svc.cluster.local:5432/taxcalc_dev
+    username: taxcalc_dev
   data:
     mongodb:
-      uri: mongodb://mongo.taxcalc-dev.svc.cluster.local:27017/taxcalc
+      uri: mongodb://mongo.taxcalc-dev.svc.cluster.local:27017/taxcalc_dev
     redis:
       host: redis.taxcalc-dev.svc.cluster.local
   kafka:
     bootstrap-servers: kafka.taxcalc-dev.svc.cluster.local:9092
-
-management:
-  health:
-    db:
-      enabled: false
-    mongo:
-      enabled: false
-    redis:
-      enabled: false
-    kafka:
-      enabled: false
 
 ---
 spring:

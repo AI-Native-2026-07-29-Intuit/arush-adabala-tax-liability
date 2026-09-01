@@ -1,7 +1,8 @@
 # manifests/10-taxcalc-api.deployment.yaml - the workload.
 # Pin the image by tag (NOT a moving label); set zero-downtime rollout
-# defaults; surface the non-root UID from the W5 D1 distroless image.
-# ConfigMap/Secret wiring + probes land in Task 2; resources + HPA in Task 3.
+# defaults; use the three-probe pattern from Topic 7; surface the
+# non-root UID from the W5 D1 distroless image; wire envFrom both the
+# ConfigMap and Secret. Resources + HPA land in Task 3.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -29,6 +30,11 @@ spec:
         app.kubernetes.io/name:      taxcalc-api   # MUST match selector
         app.kubernetes.io/component: api
         app.kubernetes.io/part-of:   taxcalc
+      annotations:
+        # Restart on config / secret content change. CI computes the
+        # hash; this placeholder is rewritten at apply time.
+        checksum/config: "replace-at-apply-time"
+        checksum/secret: "replace-at-apply-time"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -40,3 +46,26 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8080 }
+          envFrom:
+            - configMapRef: { name: taxcalc-api-config }
+            - secretRef:    { name: taxcalc-api-secrets }
+
+          # ----- three probes (Topic 7) -----------------------------------
+          startupProbe:                               # owns boot grace
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds:    5
+            failureThreshold: 30                       # 30 x 5s = 150s grace
+            timeoutSeconds:   3
+          livenessProbe:                               # "still alive?"
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds:       10
+            timeoutSeconds:      3
+            failureThreshold:    3
+            initialDelaySeconds: 0                      # startupProbe owns boot
+          readinessProbe:                               # "ready for traffic?"
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds:       5
+            timeoutSeconds:      3
+            failureThreshold:    3
+            successThreshold:    1
+            initialDelaySeconds: 0
