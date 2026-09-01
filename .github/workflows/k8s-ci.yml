@@ -62,7 +62,34 @@ jobs:
           kubectl -n ingress-nginx wait --for=condition=available --timeout=180s deploy/ingress-nginx-controller
 
       - name: Import image into the cluster
-        run: k3d image import uptimecrew/taxcalc-api:${{ github.sha }} -c taxcalc-ci
+        # `k3d image import` has a real reliability gap in this environment:
+        # it writes the image to a shared volume, then execs into every node
+        # to load it from there - and on a cold multi-node cluster the exec
+        # can race the volume write, failing with "no such file or
+        # directory" on EVERY node while k3d still prints "Successfully
+        # imported image(s)" and exits 0 (confirmed via a real failed CI run:
+        # the misleading success message, then every taxcalc-api pod stuck
+        # in ImagePullBackOff because the image was never actually there).
+        # Retry, and verify the digest actually landed in each node's
+        # containerd store rather than trusting k3d's own exit code.
+        run: |
+          IMAGE="uptimecrew/taxcalc-api:${{ github.sha }}"
+          for attempt in 1 2 3; do
+            echo "Import attempt ${attempt}..."
+            k3d image import "${IMAGE}" -c taxcalc-ci || true
+            missing=0
+            for node in k3d-taxcalc-ci-server-0 k3d-taxcalc-ci-agent-0 k3d-taxcalc-ci-agent-1; do
+              docker exec "${node}" crictl inspecti "${IMAGE}" >/dev/null 2>&1 || missing=1
+            done
+            if [ "${missing}" -eq 0 ]; then
+              echo "Image present on every node."
+              exit 0
+            fi
+            echo "Import incomplete, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::${IMAGE} missing from at least one node after 3 import attempts"
+          exit 1
 
       - name: Patch image tag in Deployment manifest
         run: |
