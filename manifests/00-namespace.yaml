@@ -7,7 +7,10 @@ kind: Namespace
 metadata:
   name: taxcalc-dev
   labels:
-    app.kubernetes.io/part-of: taxcalc
+    app.kubernetes.io/name:       taxcalc-dev
+    app.kubernetes.io/component:  namespace
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
 
 ---
 apiVersion: v1
@@ -15,6 +18,11 @@ kind: ResourceQuota
 metadata:
   name: taxcalc-dev-quota
   namespace: taxcalc-dev
+  labels:
+    app.kubernetes.io/name:       taxcalc-dev-quota
+    app.kubernetes.io/component:  namespace
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
 spec:
   hard:
     requests.cpu:    "4"
@@ -29,6 +37,11 @@ kind: LimitRange
 metadata:
   name: taxcalc-dev-defaults
   namespace: taxcalc-dev
+  labels:
+    app.kubernetes.io/name:       taxcalc-dev-defaults
+    app.kubernetes.io/component:  namespace
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
 spec:
   limits:
     - type: Container

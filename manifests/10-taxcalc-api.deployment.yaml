@@ -43,7 +43,7 @@ spec:
         fsGroup:      65532
       containers:
         - name:  taxcalc-api
-          image: uptimecrew/taxcalc-api:0.1.1
+          image: uptimecrew/taxcalc-api:0.1.3
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8080 }
