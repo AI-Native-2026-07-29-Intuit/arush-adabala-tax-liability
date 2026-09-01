@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -87,14 +88,29 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     @Override
     public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context ctx) {
         String correlationId = resolveCorrelationId(event, ctx);
+        // MDC, not a {} placeholder in every message: the JsonTemplateLayout promotes each
+        // thread-context key to a top-level field, so correlationId becomes something Logs
+        // Insights can filter on (`fields correlationId | filter correlationId = "..."`) instead
+        // of a substring that has to be regex-matched out of the message text. Cleared in the
+        // finally block because execution environments - and therefore threads - are reused
+        // across invocations, and a leaked id would mislabel the next request's logs.
+        MDC.put("correlationId", correlationId);
+        try {
+            return handleRequestInternal(event, ctx, correlationId);
+        } finally {
+            MDC.remove("correlationId");
+        }
+    }
 
+    private APIGatewayV2HTTPResponse handleRequestInternal(
+            APIGatewayV2HTTPEvent event, Context ctx, String correlationId) {
         String taxpayerId = Optional.ofNullable(event)
                 .map(APIGatewayV2HTTPEvent::getPathParameters)
                 .map(p -> p.get("taxpayerId"))
                 .orElse(null);
 
-        LOG.info("lookup attempt correlationId={} taxpayerId={} remainingMs={}",
-                correlationId, taxpayerId, ctx == null ? -1 : ctx.getRemainingTimeInMillis());
+        LOG.info("lookup attempt taxpayerId={} remainingMs={}",
+                taxpayerId, ctx == null ? -1 : ctx.getRemainingTimeInMillis());
 
         if (taxpayerId == null || taxpayerId.isBlank()) {
             return errorResponse(400, "missing taxpayerId path parameter", correlationId);
@@ -112,7 +128,7 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
             // IllegalArgumentException covers the other half: a row written with a missing or
             // mistyped attribute is a data problem, not a client problem, so it is a 500 too -
             // but a *shaped* one that still says which request it happened on.
-            LOG.error("dynamodb lookup failed correlationId={} taxpayerId={}", correlationId, taxpayerId, e);
+            LOG.error("dynamodb lookup failed taxpayerId={}", taxpayerId, e);
             return errorResponse(500, "taxpayer lookup failed", correlationId);
         }
         if (record == null) {
@@ -123,8 +139,8 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         try {
             String body = JSON.writeValueAsString(record);
             emitMetric("TaxpayerLookupSuccess", correlationId);
-            LOG.info("lookup hit correlationId={} taxpayerId={} liabilities={}",
-                    correlationId, taxpayerId, record.getLiabilities().size());
+            LOG.info("lookup hit taxpayerId={} liabilities={}",
+                    taxpayerId, record.getLiabilities().size());
             return APIGatewayV2HTTPResponse.builder()
                     .withStatusCode(200)
                     .withHeaders(Map.of(
@@ -133,7 +149,7 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
                     .withBody(body)
                     .build();
         } catch (Exception e) {
-            LOG.error("serialisation failure correlationId={}", correlationId, e);
+            LOG.error("serialisation failure", e);
             return errorResponse(500, "serialisation failure", correlationId);
         }
     }
@@ -203,7 +219,7 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     }
 
     private APIGatewayV2HTTPResponse errorResponse(int status, String msg, String correlationId) {
-        LOG.warn("error response status={} msg={} correlationId={}", status, msg, correlationId);
+        LOG.warn("error response status={} msg={}", status, msg);
         return APIGatewayV2HTTPResponse.builder()
                 .withStatusCode(status)
                 .withHeaders(Map.of(

@@ -28,6 +28,7 @@
         <aws.sdk.version>2.29.52</aws.sdk.version>
         <jackson.version>2.18.2</jackson.version>
         <slf4j.version>2.0.16</slf4j.version>
+        <log4j.version>2.24.3</log4j.version>
         <junit.version>5.11.4</junit.version>
         <mockito.version>5.14.2</mockito.version>
         <assertj.version>3.26.3</assertj.version>
@@ -39,6 +40,24 @@
                 <groupId>software.amazon.awssdk</groupId>
                 <artifactId>bom</artifactId>
                 <version>${aws.sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!--
+              REQUIRED, and its absence fails silently. aws-lambda-java-log4j2:1.6.0 pulls
+              log4j-api:2.17.1 transitively; Maven's nearest-wins resolution then pairs that old
+              api with the 2.24.x log4j-core declared below. Log4j2 changed how core registers its
+              Provider between those versions, so the mismatched pair cannot find each other and
+              Log4j2 falls back to its internal SimpleLogger with only a StatusLogger line on
+              stderr ("Log4j2 could not find a logging implementation") - the build stays green,
+              the tests stay green, and the deployed function quietly emits unstructured text
+              instead of the JSON envelopes LogFormat: JSON is supposed to produce. Importing the
+              BOM forces every log4j artifact, transitive ones included, onto one version.
+            -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-bom</artifactId>
+                <version>${log4j.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -108,15 +127,40 @@
             <version>${slf4j.version}</version>
         </dependency>
         <!--
-          slf4j-simple, not Logback: the Lambda runtime's own log router is what turns a line on
-          stdout into a CloudWatch event, and the function's LoggingConfig.LogFormat: JSON then
-          wraps that line in a JSON envelope. A second layout engine underneath would only add
-          INIT cost and a competing timestamp. See src/main/resources-lambda/simplelogger.properties.
+          Log4j2 behind the SLF4J API, NOT slf4j-simple.
+
+          This is not a style preference, it is the only way LoggingConfig.LogFormat: JSON does
+          anything for a Java function. Lambda only emits structured-JSON *application* logs for
+          code that logs through LambdaLogger or Log4j2 (docs: "Configuring JSON and plain text
+          log formats" -> supported runtimes and logging methods). Anything else - including
+          slf4j-simple writing to stdout - is captured verbatim as plain text, so the function
+          would report LogFormat: JSON while every application line stayed unstructured.
+
+          aws-lambda-java-log4j2 supplies the <Lambda> appender that switches layout on
+          AWS_LAMBDA_LOG_FORMAT and injects AWSRequestId; log4j-layout-template-json supplies the
+          JsonTemplateLayout it uses in JSON mode. Version floors matter here: AWS calls out
+          aws-lambda-java-log4j2 >= 1.5.0 / Log4j2 >= 2.17.0 as the CVE-2021-44228 remediation
+          line, and these are well past both.
         -->
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-simple</artifactId>
-            <version>${slf4j.version}</version>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-log4j2</artifactId>
+            <version>1.6.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j2-impl</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-layout-template-json</artifactId>
+            <version>${log4j.version}</version>
         </dependency>
 
         <dependency>
@@ -190,6 +234,21 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
                 <version>3.6.0</version>
+                <dependencies>
+                    <!--
+                      Supplies Log4j2PluginCacheFileTransformer, used below. Log4j2 finds its
+                      plugins (every PatternLayout converter, the appenders, the layouts) through
+                      a binary index at
+                      META-INF/org/apache/logging/log4j/core/config/plugins/Log4j2Plugins.dat,
+                      and every log4j jar ships its own copy. A plain shade keeps exactly one, so
+                      the registry ends up nearly empty.
+                    -->
+                    <dependency>
+                        <groupId>org.apache.logging.log4j</groupId>
+                        <artifactId>log4j-transform-maven-shade-plugin-extensions</artifactId>
+                        <version>0.2.0</version>
+                    </dependency>
+                </dependencies>
                 <executions>
                     <execution>
                         <phase>package</phase>
@@ -207,6 +266,18 @@
                                 -->
                                 <transformer
                                     implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <!--
+                                  Merges the per-jar Log4j2Plugins.dat indexes into one. Without
+                                  this the deployed function starts, logs nothing useful, and
+                                  prints "Unrecognized conversion specifier" for %d, %level,
+                                  %msg and friends - Log4j2 cannot even find its own core
+                                  plugins, so the <Lambda> appender never loads and the JSON
+                                  layout never runs. Caught by invoking the shaded artifact;
+                                  `mvn test` cannot see it, because tests run against the
+                                  unshaded classpath where every .dat file is still separate.
+                                -->
+                                <transformer
+                                    implementation="org.apache.logging.log4j.maven.plugins.shade.transformer.Log4j2PluginCacheFileTransformer"/>
                             </transformers>
                             <filters>
                                 <filter>

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Log4j2 configuration for the taxcalc-taxpayer-lookup Lambda (W5 D4).
+
+  This file is what makes template.yaml's `LoggingConfig: { LogFormat: JSON }` actually produce
+  JSON. Lambda emits structured-JSON *application* logs only for functions that log through
+  LambdaLogger or Log4j2; any other library (slf4j-simple, a bare System.out) is captured as
+  plain text no matter what LogFormat says, so the function would advertise JSON while every
+  application line stayed unstructured.
+
+  The <Lambda> appender comes from aws-lambda-java-log4j2. It reads AWS_LAMBDA_LOG_FORMAT - the
+  env var the runtime sets from LoggingConfig - and picks the matching layout, so one config
+  covers both settings and local runs (where the var is absent and TEXT is the default).
+-->
+<Configuration>
+  <Appenders>
+    <Lambda name="Lambda" format="${env:AWS_LAMBDA_LOG_FORMAT:-TEXT}">
+      <LambdaTextFormat>
+        <PatternLayout>
+          <pattern>%d{yyyy-MM-dd HH:mm:ss} %X{AWSRequestId} %-5p %c{1} - %m%n</pattern>
+        </PatternLayout>
+      </LambdaTextFormat>
+      <LambdaJSONFormat>
+        <!-- LambdaLayout.json ships inside aws-lambda-java-log4j2 and emits the
+             timestamp/level/message/AWSRequestId envelope Lambda documents, plus every
+             thread-context (MDC) key as a top-level field - which is how correlationId
+             becomes a filterable field in Logs Insights instead of text inside a message. -->
+        <JsonTemplateLayout eventTemplateUri="classpath:LambdaLayout.json"/>
+      </LambdaJSONFormat>
+    </Lambda>
+  </Appenders>
+  <Loggers>
+    <!-- AWS_LAMBDA_LOG_LEVEL is set by the runtime from LoggingConfig.ApplicationLogLevel, so
+         the level stays owned by the template rather than duplicated here. -->
+    <Root level="${env:AWS_LAMBDA_LOG_LEVEL:-INFO}">
+      <AppenderRef ref="Lambda"/>
+    </Root>
+    <!-- The SDK is chatty at INFO and none of it is actionable for this one GetItem. -->
+    <Logger name="software.amazon.awssdk" level="WARN"/>
+  </Loggers>
+</Configuration>
