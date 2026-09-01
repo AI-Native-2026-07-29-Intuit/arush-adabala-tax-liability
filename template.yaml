@@ -104,6 +104,9 @@ Resources:
           # Externalised config only - the handler hardcodes neither the table name nor a region
           # (AWS_REGION is supplied by the runtime).
           TAXPAYERS_TABLE: !Ref TaxpayersTable
+          # The EMF namespace the handler stamps onto its custom metrics. An env var rather than
+          # a constant so a stage can be split out of the shared namespace without a code change.
+          METRICS_NAMESPACE: TaxcalcDev
       Policies:
         # Least-privilege: SAM's DynamoDBReadPolicy connector expands to the specific read verbs
         # (GetItem, BatchGetItem, Query, Scan, ...) scoped to this one table's ARN plus its index

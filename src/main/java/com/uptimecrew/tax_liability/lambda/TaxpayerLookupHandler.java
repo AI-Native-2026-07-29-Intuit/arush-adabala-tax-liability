@@ -52,6 +52,9 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     /** Request/response header the correlation id travels on. */
     static final String CORRELATION_ID_HEADER = "x-correlation-id";
 
+    /** Fallback namespace when {@code METRICS_NAMESPACE} is unset (i.e. outside the SAM stack). */
+    private static final String DEFAULT_METRICS_NAMESPACE = "TaxcalcDev";
+
     // --- INIT PHASE: everything below runs once per execution environment. -------------------
 
     private static final Logger LOG = LoggerFactory.getLogger(TaxpayerLookupHandler.class);
@@ -67,6 +70,12 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
 
     /** Table name, injected by template.yaml as {@code !Ref TaxpayersTable}. Never hardcoded. */
     private static final String TABLE = System.getenv("TAXPAYERS_TABLE");
+
+    private static final String METRICS_NAMESPACE =
+            Optional.ofNullable(System.getenv("METRICS_NAMESPACE")).orElse(DEFAULT_METRICS_NAMESPACE);
+
+    /** Dimension value on every emitted metric; {@code ENV} is {@code !Ref StageName}. */
+    private static final String STAGE = Optional.ofNullable(System.getenv("ENV")).orElse("unknown");
 
     /**
      * Handles one API Gateway HTTP API (payload format 2.0) request.
@@ -103,11 +112,13 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
             return errorResponse(500, "taxpayer lookup failed", correlationId);
         }
         if (record == null) {
+            emitMetric("TaxpayerNotFound", correlationId);
             return errorResponse(404, "taxpayer not found", correlationId);
         }
 
         try {
             String body = JSON.writeValueAsString(record);
+            emitMetric("TaxpayerLookupSuccess", correlationId);
             LOG.info("lookup hit correlationId={} taxpayerId={} liabilities={}",
                     correlationId, taxpayerId, record.getLiabilities().size());
             return APIGatewayV2HTTPResponse.builder()
@@ -196,6 +207,51 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
                         CORRELATION_ID_HEADER, correlationId))
                 .withBody("{\"error\":\"" + msg + "\",\"correlationId\":\"" + correlationId + "\"}")
                 .build();
+    }
+
+    /**
+     * Publishes one custom CloudWatch metric using the embedded metric format (EMF).
+     *
+     * <p>EMF rather than a {@code cloudwatch:PutMetricData} call for two reasons: PutMetricData is
+     * a synchronous, network-bound API call that adds its own latency to every invocation, and it
+     * would force a second IAM permission onto an execution role this deliverable deliberately
+     * scopes to one DynamoDB table. An EMF line is just structured output - CloudWatch extracts
+     * the metric from the log event asynchronously, at no invocation cost and no extra permission.
+     *
+     * <p>Written straight to {@code System.out} rather than through SLF4J so nothing wraps or
+     * re-encodes the payload on the way out: the EMF parser looks for {@code _aws} at the root of
+     * the emitted object.
+     *
+     * @param metricName    the metric to increment by one
+     * @param correlationId echoed into the blob as a searchable property (not a dimension - a
+     *                      per-request dimension value would mint a distinct metric per request,
+     *                      which is both useless and billable)
+     */
+    private void emitMetric(String metricName, String correlationId) {
+        System.out.println(buildEmf(metricName, correlationId, System.currentTimeMillis()));
+    }
+
+    /**
+     * Builds the EMF payload. Split out of {@link #emitMetric} and given an injected timestamp
+     * purely so it is testable: this is the one piece of hand-assembled JSON in the codebase, and
+     * a single missing brace would fail silently - CloudWatch would accept the log line and simply
+     * never publish a metric, with nothing anywhere reporting an error.
+     *
+     * @param metricName    the metric name, which is also the key holding its value
+     * @param correlationId the request's correlation id
+     * @param timestampMs   epoch millis EMF stamps the datapoint with
+     * @return a single-line EMF document
+     */
+    static String buildEmf(String metricName, String correlationId, long timestampMs) {
+        // Hand-written rather than pulled in via aws-lambda-powertools-metrics: that library's
+        // ergonomic path is an @Metrics annotation woven by aspectj, i.e. a build plugin plus a
+        // runtime weaving agent added to a function whose entire metric surface is two counters.
+        return "{\"_aws\":{\"Timestamp\":" + timestampMs
+                + ",\"CloudWatchMetrics\":[{\"Namespace\":\"" + METRICS_NAMESPACE
+                + "\",\"Dimensions\":[[\"Stage\"]],\"Metrics\":[{\"Name\":\"" + metricName
+                + "\",\"Unit\":\"Count\"}]}]},\"Stage\":\"" + STAGE
+                + "\",\"correlationId\":\"" + correlationId
+                + "\",\"" + metricName + "\":1}";
     }
 
     /**

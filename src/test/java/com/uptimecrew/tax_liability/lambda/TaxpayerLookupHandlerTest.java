@@ -5,6 +5,8 @@ import java.util.Map;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -94,5 +96,29 @@ class TaxpayerLookupHandlerTest {
 
         assertThat(resp.getHeaders())
                 .containsEntry(TaxpayerLookupHandler.CORRELATION_ID_HEADER, "aws-req-x");
+    }
+
+    @Test
+    void emfPayloadIsWellFormedJsonWithAwsAtTheRoot() throws Exception {
+        // The one piece of hand-assembled JSON in this codebase, and its failure mode is silent:
+        // CloudWatch accepts a malformed EMF line as an ordinary log event and simply publishes
+        // no metric, with nothing anywhere raising an error. So it gets parsed in a test.
+        String emf = TaxpayerLookupHandler.buildEmf("TaxpayerLookupSuccess", "corr-9", 1_788_220_800_000L);
+
+        JsonNode root = new ObjectMapper().readTree(emf);
+
+        assertThat(root.has("_aws")).isTrue();
+        assertThat(root.path("_aws").path("Timestamp").asLong()).isEqualTo(1_788_220_800_000L);
+        JsonNode directive = root.path("_aws").path("CloudWatchMetrics").get(0);
+        assertThat(directive.path("Namespace").asText()).isEqualTo("TaxcalcDev");
+        assertThat(directive.path("Metrics").get(0).path("Name").asText()).isEqualTo("TaxpayerLookupSuccess");
+        assertThat(directive.path("Metrics").get(0).path("Unit").asText()).isEqualTo("Count");
+        // The dimension key must resolve to a real member of the same object, or CloudWatch drops
+        // the whole directive.
+        assertThat(directive.path("Dimensions").get(0).get(0).asText()).isEqualTo("Stage");
+        assertThat(root.has("Stage")).isTrue();
+        // The metric name doubles as the key holding the value.
+        assertThat(root.path("TaxpayerLookupSuccess").asInt()).isEqualTo(1);
+        assertThat(root.path("correlationId").asText()).isEqualTo("corr-9");
     }
 }
