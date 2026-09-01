@@ -1,0 +1,42 @@
+# manifests/10-taxcalc-api.deployment.yaml - the workload.
+# Pin the image by tag (NOT a moving label); set zero-downtime rollout
+# defaults; surface the non-root UID from the W5 D1 distroless image.
+# ConfigMap/Secret wiring + probes land in Task 2; resources + HPA in Task 3.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taxcalc-api
+  namespace: taxcalc-dev
+  labels:
+    app.kubernetes.io/name:       taxcalc-api
+    app.kubernetes.io/component:  api
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: taxcalc-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # never drop below `replicas` during a rollout
+      maxSurge:       1   # at most one extra pod during a rollout
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name:      taxcalc-api   # MUST match selector
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of:   taxcalc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    65532   # the distroless UID from W5 D1
+        fsGroup:      65532
+      containers:
+        - name:  taxcalc-api
+          image: uptimecrew/taxcalc-api:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }

@@ -129,6 +129,18 @@ management:
                                          #      detects a K8s environment, but a plain `docker run`
                                          #      HEALTHCHECK (and the Docker Compose / Kubernetes
                                          #      probes W5 D2-D3 wire up) need the same two routes.
+      group:
+        # (8d) W5 D3: without an explicit group, Boot's readiness group is just
+        # `readinessState` - identical in substance to liveness, so a downstream
+        # Postgres/Redis/Kafka/Mongo outage never pulls the pod out of a Service's
+        # endpoints. liveness stays a pure "is the JVM alive" heartbeat on purpose -
+        # it must NOT depend on external services, or a transient dependency blip
+        # triggers a pointless container restart instead of the intended fix
+        # (readiness removes it from load balancing until the dependency recovers).
+        readiness:
+          include: readinessState,db,redis,mongo,kafka
+        liveness:
+          include: livenessState
 
 springdoc:
   api-docs:
@@ -200,6 +212,41 @@ spring:
       host: host.docker.internal
   kafka:
     bootstrap-servers: host.docker.internal:9092
+
+---
+spring:
+  config:
+    activate:
+      on-profile: k8s
+  # Set via the ConfigMap's SPRING_PROFILES_ACTIVE (W5 D3). In-cluster Services use
+  # Kubernetes DNS (`<svc>.<namespace>.svc.cluster.local`), never `localhost` or the
+  # Compose `docker` profile's `host.docker.internal` - those hostnames are baked
+  # into the ConfigMap itself so they can change per-environment without an image
+  # rebuild. Kept here (rather than removed) for shape-parity with a real cluster:
+  # Postgres/Redis/Kafka/Mongo aren't deployed in this lab's k3d namespace (out of
+  # scope - W5 D2's Compose stack already covers standing those up), so the health
+  # group below disables the corresponding checks the same way the `test` profile
+  # does when its backing service isn't actually running.
+  datasource:
+    url: jdbc:postgresql://postgres.taxcalc-dev.svc.cluster.local:5432/taxcalc
+  data:
+    mongodb:
+      uri: mongodb://mongo.taxcalc-dev.svc.cluster.local:27017/taxcalc
+    redis:
+      host: redis.taxcalc-dev.svc.cluster.local
+  kafka:
+    bootstrap-servers: kafka.taxcalc-dev.svc.cluster.local:9092
+
+management:
+  health:
+    db:
+      enabled: false
+    mongo:
+      enabled: false
+    redis:
+      enabled: false
+    kafka:
+      enabled: false
 
 ---
 spring:

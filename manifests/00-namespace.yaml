@@ -1,0 +1,36 @@
+# manifests/00-namespace.yaml - the bounded blast radius for taxcalc-api.
+# A ResourceQuota caps total resource use; a LimitRange supplies defaults
+# so pods that omit requests/limits still get sane numbers.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: taxcalc-dev
+  labels:
+    app.kubernetes.io/part-of: taxcalc
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: taxcalc-dev-quota
+  namespace: taxcalc-dev
+spec:
+  hard:
+    requests.cpu:    "4"
+    requests.memory: 8Gi
+    limits.cpu:      "8"
+    limits.memory:   16Gi
+    pods:            "20"
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: taxcalc-dev-defaults
+  namespace: taxcalc-dev
+spec:
+  limits:
+    - type: Container
+      default:        { cpu: 500m, memory: 768Mi }   # if the pod omits limits
+      defaultRequest: { cpu: 100m, memory: 256Mi }    # if the pod omits requests
