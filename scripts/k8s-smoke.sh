@@ -31,16 +31,18 @@ fi
 # in CI as curl exit 52 "Empty reply from server", which --retry-connrefused
 # alone does not cover (it only widens retries to connection-refused, not
 # every transient failure).
-RETRY_ARGS="--retry 15 --retry-delay 2 --retry-all-errors"
+# An array, not a string: a bare ${RETRY_ARGS} relies on word splitting, which
+# breaks silently under `set -u`-adjacent refactors and trips shellcheck SC2086.
+RETRY_ARGS=(--retry 15 --retry-delay 2 --retry-all-errors)
 
 echo "Smoke 1/3: GET /actuator/health/readiness via Ingress"
-curl --silent --show-error --fail ${RETRY_ARGS} \
+curl --silent --show-error --fail "${RETRY_ARGS[@]}" \
   -H "Host: ${HOST}" \
   "http://localhost:${HOST_PORT}/actuator/health/readiness" \
   | grep -q '"status":"UP"'
 
 echo "Smoke 2/3: GET /api/v1/taxpayers/txp_synth_001 (200/401/404 all acceptable - JWT-gated, see W5 D2's smoke.sh)"
-status=$(curl --silent --output /dev/null --write-out '%{http_code}' ${RETRY_ARGS} \
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' "${RETRY_ARGS[@]}" \
   -H "Host: ${HOST}" \
   "http://localhost:${HOST_PORT}/api/v1/taxpayers/txp_synth_001")
 if [ "${status}" != "200" ] && [ "${status}" != "401" ] && [ "${status}" != "404" ]; then
@@ -49,7 +51,7 @@ if [ "${status}" != "200" ] && [ "${status}" != "401" ] && [ "${status}" != "404
 fi
 
 echo "Smoke 3/3: GET /actuator/health/liveness via Ingress"
-curl --silent --show-error --fail ${RETRY_ARGS} \
+curl --silent --show-error --fail "${RETRY_ARGS[@]}" \
   -H "Host: ${HOST}" \
   "http://localhost:${HOST_PORT}/actuator/health/liveness" \
   | grep -q '"status":"UP"'

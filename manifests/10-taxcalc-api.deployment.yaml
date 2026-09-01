@@ -56,9 +56,25 @@ spec:
               value: "-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
 
           # ----- resources (requests = scheduler floor; limits = kubelet kill line)
+          #
+          # NOTE - `limits.cpu` is deliberately omitted here (Topic 6: a CPU
+          # limit causes CFS throttling on burst), but that intent does NOT
+          # survive admission in this namespace: 00-namespace.yaml's LimitRange
+          # carries `default: { cpu: 500m }`, and a LimitRange default is
+          # applied per-resource to any container that leaves that resource
+          # unset. The admitted pods therefore run with `limits.cpu: 500m`
+          # regardless of what this file says - verified with
+          # `kubectl get pod -o jsonpath='{...resources}'`, which reports
+          # limits {cpu: 500m, memory: 1Gi}. Both halves are required by the
+          # W5 D3 brief (Task 1 specifies the LimitRange's exact defaults;
+          # Task 3 specifies omitting limits.cpu) and Kubernetes offers no way
+          # to opt a container out of a LimitRange default - there is no
+          # "unlimited" sentinel. To actually get an unthrottled container,
+          # drop `cpu` from the LimitRange's `default:` block. See the README's
+          # W5 D3 section for the full write-up.
           resources:
             requests: { cpu: 250m, memory: 512Mi }
-            limits:   {            memory: 1Gi   }   # CPU limit omitted on purpose (Topic 6)
+            limits:   {            memory: 1Gi   }   # see NOTE above re: limits.cpu
 
           # ----- three probes (Topic 7) -----------------------------------
           startupProbe:                               # owns boot grace

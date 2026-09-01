@@ -6,7 +6,16 @@ on:
     paths:
       - 'manifests/**'
       - 'scripts/k8s-*.sh'
-      - 'taxcalc-api/**'
+      # This job builds the image from source, so the sources that go into it
+      # have to be triggers too. (The reference workflow listed 'taxcalc-api/**'
+      # for a repo whose Gradle module sits in a subdirectory; here the module
+      # is the repo root, so that pattern matched nothing at all.)
+      - 'src/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle/**'
+      - 'Dockerfile'
+      - 'docker/**'
       - '.github/workflows/k8s-ci.yml'
 
 permissions:
@@ -15,7 +24,12 @@ permissions:
 jobs:
   manifests-validate-and-deploy:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    # Headroom over the inner budgets (8m rollout + 3m ingress wait + image
+    # build): a deliberately-failed run measured 12m37s end to end, which left
+    # almost nothing under the previous 15m cap - and hitting the JOB timeout
+    # kills the run before the rollout timeout can produce a clean failure and
+    # its diagnostics artifact.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -86,11 +100,16 @@ jobs:
         # containerd store rather than trusting k3d's own exit code.
         run: |
           IMAGE="uptimecrew/taxcalc-api:${{ github.sha }}"
+          # Node names are discovered, not hardcoded - a hardcoded list silently
+          # goes stale the moment the cluster's --agents count changes.
+          NODES=$(k3d node list --no-headers \
+            | awk '$1 ~ /^k3d-taxcalc-ci-/ && $2 != "loadbalancer" { print $1 }')
+          echo "Verifying against nodes: ${NODES}"
           for attempt in 1 2 3; do
             echo "Import attempt ${attempt}..."
             k3d image import "${IMAGE}" -c taxcalc-ci || true
             missing=0
-            for node in k3d-taxcalc-ci-server-0 k3d-taxcalc-ci-agent-0 k3d-taxcalc-ci-agent-1; do
+            for node in ${NODES}; do
               docker exec "${node}" crictl inspecti "${IMAGE}" >/dev/null 2>&1 || missing=1
             done
             if [ "${missing}" -eq 0 ]; then
@@ -123,15 +142,33 @@ jobs:
         # Kubernetes only restarts pods when the *pod template* changes, so
         # these two annotations exist purely to give the template something
         # that changes in lockstep with the data it reads via envFrom.
+        #
+        # Both values are the live object's metadata.resourceVersion, which the
+        # API server bumps on every write that actually changes the object and
+        # leaves alone on a no-op re-apply - exactly the "changes iff the data
+        # changed" property this needs. Deliberately NOT a hash of the secret
+        # material: an earlier revision used sha256($CI_PG_PASSWORD), which
+        # writes an unsalted, offline-crackable verifier for the real DB
+        # password into an annotation readable by anyone who can
+        # `get deployment` (far broader RBAC than `get secret`). Hashing
+        # `.data` would be no better - that payload is only base64, not
+        # encryption. resourceVersion leaks nothing about the value at all.
+        # It also fixes an accuracy bug in the previous file-hash approach,
+        # which hashed the manifest's comments too and so forced a pointless
+        # rollout on any comment-only edit.
+        #
+        # The ConfigMap has to exist before it can be read, so it's applied
+        # here (idempotently; the full `kubectl apply -f manifests/` follows).
         run: |
-          CONFIG_HASH=$(sha256sum manifests/30-taxcalc-api.configmap.yaml | cut -d' ' -f1)
-          SECRET_HASH=$(printf '%s' "$CI_PG_PASSWORD" | sha256sum | cut -d' ' -f1)
+          kubectl apply -f manifests/30-taxcalc-api.configmap.yaml
+          CONFIG_HASH=$(kubectl get configmap taxcalc-api-config -n taxcalc-dev \
+            -o jsonpath='{.metadata.resourceVersion}')
+          SECRET_HASH=$(kubectl get secret taxcalc-api-secrets -n taxcalc-dev \
+            -o jsonpath='{.metadata.resourceVersion}')
           sed -i "s|checksum/config: \".*\"|checksum/config: \"${CONFIG_HASH}\"|" \
             manifests/10-taxcalc-api.deployment.yaml
           sed -i "s|checksum/secret: \".*\"|checksum/secret: \"${SECRET_HASH}\"|" \
             manifests/10-taxcalc-api.deployment.yaml
-        env:
-          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
 
       # ----- 3. Server-side admission + apply -------------------------------
       - name: Server-side dry-run
@@ -152,15 +189,33 @@ jobs:
       # ----- 5. Diagnostics on failure ---------------------------------------
       - name: Capture diagnostics on failure
         if: failure()
+        # `|| true` on EVERY command, not just the last: the step runs under
+        # `bash -e`, so when the cluster never came up the first kubectl call
+        # aborted the whole step before anything was written - observed for real
+        # (run 33467921042: step failed, and the upload warned "No files were
+        # found with the provided path: pod-logs.txt").
+        #
+        # Everything is tee'd into files as well as stdout, so the artifact
+        # actually contains the `describe` output too - previously `get all` and
+        # `describe` went to the job log only and the artifact held nothing but
+        # pod logs.
         run: |
-          kubectl get all -n taxcalc-dev
-          kubectl describe deploy/taxcalc-api -n taxcalc-dev
-          kubectl logs deploy/taxcalc-api -n taxcalc-dev \
-            --tail=200 > pod-logs.txt || true
+          mkdir -p k8s-diagnostics
+          kubectl get all -n taxcalc-dev \
+            2>&1 | tee k8s-diagnostics/get-all.txt || true
+          kubectl describe deploy/taxcalc-api -n taxcalc-dev \
+            2>&1 | tee k8s-diagnostics/describe-deploy.txt || true
+          kubectl describe pod -l app.kubernetes.io/name=taxcalc-api -n taxcalc-dev \
+            2>&1 | tee k8s-diagnostics/describe-pods.txt || true
+          kubectl get events -n taxcalc-dev --sort-by=.lastTimestamp \
+            2>&1 | tee k8s-diagnostics/events.txt || true
+          kubectl logs deploy/taxcalc-api -n taxcalc-dev --tail=200 \
+            2>&1 | tee k8s-diagnostics/pod-logs.txt || true
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: k8s-diagnostics
-          path: pod-logs.txt
+          path: k8s-diagnostics/
           retention-days: 14
+          if-no-files-found: warn

@@ -239,6 +239,13 @@ spring:
   # Service exists so its bootstrap hostname still resolves (KafkaConsumer's
   # constructor resolves it synchronously and kills context startup if it can't;
   # the later TCP connect is async/tolerated).
+  #
+  # The datasource/mongo/redis/kafka values below are duplicated by
+  # manifests/30-taxcalc-api.configmap.yaml, which injects them as env vars.
+  # Env vars win over profile YAML in Spring's property precedence, so the
+  # ConfigMap is the authoritative source in-cluster and these are the
+  # fallback for running the k8s profile outside Kubernetes. Change both, or
+  # the ConfigMap silently wins and this block becomes a lie.
   datasource:
     url: jdbc:postgresql://postgres.taxcalc-dev.svc.cluster.local:5432/taxcalc_dev
     username: taxcalc_dev
