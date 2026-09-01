@@ -7,24 +7,46 @@ set -euo pipefail
 STACK="${STACK:-taxcalc-lambda-${STAGE:-dev}}"
 STAGE="${STAGE:-dev}"
 REGION="${AWS_REGION:-us-east-1}"
+
+# Both of these default to real-AWS behaviour; they exist so the same script can also be pointed
+# at a local emulator (floci/LocalStack) without a second, drifting copy of these checks.
+#
+#   HTTP_API_URL          - skip stack-output resolution and use this base URL instead. An
+#                           emulator's CloudFormation still reports the real-AWS-shaped
+#                           execute-api hostname in its Outputs, which does not resolve locally;
+#                           floci serves the same API at http://localhost:4566/execute-api/{id}/{stage}.
+#   EXPECT_RUNTIME_REPORT - whether to require a REPORT line in CloudWatch Logs. Those are
+#                           emitted by the real Lambda runtime, not by the function, so an
+#                           emulator can faithfully carry every application log line and still
+#                           produce none. Never set this to false for a real AWS smoke run: the
+#                           check exists to catch a function and a log group that have drifted
+#                           apart, which is invisible from the HTTP response alone.
+HTTP_API_URL="${HTTP_API_URL:-}"
+EXPECT_RUNTIME_REPORT="${EXPECT_RUNTIME_REPORT:-true}"
+
 BODY_FILE="$(mktemp -t sam-smoke-body)"
-trap 'rm -f "${BODY_FILE}"' EXIT
+trap 'rm -f "${BODY_FILE}" "${BODY_FILE}.hdr"' EXIT
 
 # 1. Resolve the HttpApiUrl from the stack's own outputs rather than hardcoding it: the API id
 #    is regenerated whenever the stack is deleted and recreated, which this deliverable does
 #    deliberately and repeatedly.
-# shellcheck disable=SC2016  # JMESPath backticks are literal, not shell expansion.
-URL=$(aws cloudformation describe-stacks \
-  --stack-name "${STACK}" \
-  --region "${REGION}" \
-  --query 'Stacks[0].Outputs[?OutputKey==`HttpApiUrl`].OutputValue' \
-  --output text)
+if [ -n "${HTTP_API_URL}" ]; then
+  URL="${HTTP_API_URL}"
+  echo "HttpApiUrl (overridden): ${URL}"
+else
+  # shellcheck disable=SC2016  # JMESPath backticks are literal, not shell expansion.
+  URL=$(aws cloudformation describe-stacks \
+    --stack-name "${STACK}" \
+    --region "${REGION}" \
+    --query 'Stacks[0].Outputs[?OutputKey==`HttpApiUrl`].OutputValue' \
+    --output text)
 
-if [ -z "${URL}" ] || [ "${URL}" = "None" ]; then
-  echo "ERROR: HttpApiUrl output not found on stack ${STACK}."
-  exit 1
+  if [ -z "${URL}" ] || [ "${URL}" = "None" ]; then
+    echo "ERROR: HttpApiUrl output not found on stack ${STACK}."
+    exit 1
+  fi
+  echo "HttpApiUrl: ${URL}"
 fi
-echo "HttpApiUrl: ${URL}"
 
 CORR="ci-smoke-$(date +%s)"
 
@@ -71,6 +93,12 @@ fi
 # 4. Smoke 3/3: a REPORT line for a recent invocation is present in CloudWatch Logs. A 200 with
 #    no logs behind it means the explicit LogGroup and the function have drifted apart - which
 #    is invisible from the HTTP response alone.
+if [ "${EXPECT_RUNTIME_REPORT}" != "true" ]; then
+  echo "Smoke 3/3: SKIPPED (EXPECT_RUNTIME_REPORT=${EXPECT_RUNTIME_REPORT})"
+  echo ""
+  echo "Smoke OK (2/3 checks; runtime REPORT check skipped)."
+  exit 0
+fi
 echo "Smoke 3/3: at least one REPORT line in CloudWatch for the function"
 # shellcheck disable=SC2016  # JMESPath backticks are literal, not shell expansion.
 FN_NAME=$(aws cloudformation describe-stacks \
