@@ -965,6 +965,8 @@ All three build commands now exit 0 on this machine, `--use-container` included.
 sam delete --stack-name taxcalc-lambda-dev --region "$AWS_REGION"   # teardown is part of the deliverable, not an afterthought
 ```
 
+## Week 5 Day 5
+
 ## Build and Test
 
 ```bash
