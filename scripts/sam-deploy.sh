@@ -16,13 +16,12 @@ echo "==> stack=${STACK} stage=${STAGE} region=${REGION}"
 echo "==> sam validate --lint"
 sam validate --lint --region "${REGION}"
 
-# 2a. Produce the deployment artefact. template.yaml marks the function SkipBuild and points
-#     CodeUri straight at the shaded jar, so Maven - not `sam build` - is what compiles it.
-#     A pure-Java jar is byte-identical whether built on this host or in a container, so there
-#     is nothing for a Lambda-parity image to correct here (that matters for runtimes with
-#     native extensions, not for Java bytecode).
-echo "==> mvn package"
-mvn -B -ntp clean package
+# 2a. Produce the deployment artefact INSIDE the Lambda build image. template.yaml marks the
+#     function SkipBuild and points CodeUri straight at the shaded jar, so `sam build` stages
+#     rather than compiles - which is why the container build happens here instead. See the
+#     header of build-lambda.sh for why the literal CodeUri forces that split.
+echo "==> build-lambda.sh (compiles in public.ecr.aws/sam/build-java21)"
+./scripts/build-lambda.sh
 
 # 2b. `sam build` now just stages that jar and rewrites CodeUri for the deploy. --use-container
 #     is kept because it costs nothing here and keeps the command identical to CI's.
