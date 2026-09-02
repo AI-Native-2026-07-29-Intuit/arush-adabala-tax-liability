@@ -17,13 +17,33 @@ set -euo pipefail
 
 REPO="${REPO:-AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability}"
 BRANCH="${BRANCH:-main}"
+
+# The `sub` claim the trust policy pins to. DO NOT assume the textbook
+# "repo:<org>/<repo>:ref:refs/heads/<branch>" form - this organisation customises the OIDC
+# subject to embed numeric ids, observed live from a token minted by the workflow's own
+# "Inspect OIDC token claims" step:
+#
+#   repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:pull_request
+#
+# A policy pinned to the plain form would never match, and the failure is opaque:
+# "Not authorized to perform sts:AssumeRoleWithWebIdentity". So take the value from a real
+# token rather than constructing it. The default below is the textbook form and is almost
+# certainly wrong HERE; override it:
+#
+#   SUBJECT='repo:ORG@123/REPO@456:ref:refs/heads/main' ./scripts/oidc-bootstrap.sh
+#
+# Note the deploy job only runs on push to main, so the subject to pin ends in
+# ":ref:refs/heads/main" - NOT the ":pull_request" seen on PR runs. Confirm that by reading
+# the claims off a push-to-main run before locking the policy down.
+SUBJECT="${SUBJECT:-repo:${REPO}:ref:refs/heads/${BRANCH}}"
 ROLE_NAME="${ROLE_NAME:-taxcalc-serverless-deploy}"
 REGION="${AWS_REGION:-us-east-1}"
 
 ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
 PROVIDER_ARN="arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com"
 
-echo "==> account=${ACCOUNT} repo=${REPO} branch=${BRANCH} role=${ROLE_NAME}"
+echo "==> account=${ACCOUNT} role=${ROLE_NAME}"
+echo "==> pinning sub: ${SUBJECT}"
 
 # 1. The OIDC provider. One per account; creating it twice is an error, so tolerate that.
 echo "==> ensuring the GitHub OIDC provider exists"
@@ -50,7 +70,7 @@ TRUST=$(cat <<JSON
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:${REPO}:ref:refs/heads/${BRANCH}"
+          "token.actions.githubusercontent.com:sub": "${SUBJECT}"
         }
       }
     }

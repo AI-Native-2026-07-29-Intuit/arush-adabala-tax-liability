@@ -853,6 +853,57 @@ the `deploy-sandbox` job, which a PR can never reach because it requires OIDC cr
 job now captures its own diagnostics on failure, so the artefact exists on exactly the run Task 4
 says to produce it on.
 
+### OIDC, and a claim shape that would have broken the trust policy
+
+The OIDC requirement has two halves, and only one needs an AWS account.
+
+**The GitHub half is verified on every run.** A workflow step mints a real OIDC token for the
+`sts.amazonaws.com` audience and prints its claims — never the token, which is passed to
+`core.setSecret` because it is a live credential. That proves `permissions: id-token: write` is
+actually in effect, and it surfaced something that would otherwise have cost hours:
+
+```json
+{ "iss": "https://token.actions.githubusercontent.com",
+  "aud": "sts.amazonaws.com",
+  "sub": "repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:pull_request",
+  "repository": "AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability",
+  "ref": "refs/pull/34/merge" }
+```
+
+**This organisation embeds numeric ids in the subject claim.** The textbook trust-policy condition
+`repo:<org>/<repo>:ref:refs/heads/main` would never match, and the failure mode is opaque —
+`Not authorized to perform sts:AssumeRoleWithWebIdentity`, with nothing saying why. The only way
+to know is to read a real token. (Note also that PR runs carry `:pull_request`, not
+`:ref:refs/heads/main`; the deploy job runs on push to `main`, so the subject to pin ends in the
+latter. Confirm it against a push-to-`main` run before locking the policy down.)
+
+**The AWS half is one command.** `scripts/oidc-bootstrap.sh` creates the OIDC provider and the
+deploy role, pins the trust policy to a `SUBJECT` you pass in, attaches a deploy policy scoped to
+the services this stack creates (not `PowerUserAccess`; `iam:*` narrowed to `role/taxcalc-lambda-*`),
+and prints the role ARN plus the `gh variable set` commands. It runs against a real account to do
+the setup, or against floci to author and inspect the policy without one — which is how the
+policy above was produced.
+
+`vars.AWS_REGION` is set on the repository. `vars.AWS_DEPLOY_ROLE_ARN` is deliberately **not** set:
+a placeholder ARN would turn a clear "variable is missing" error into a confusing assume-role
+failure. It gets set when a real account exists.
+
+### Teardown — both stacks
+
+```
+sam delete --stack-name taxcalc-lambda-dev      --region $AWS_REGION   -> Deleted successfully
+sam delete --stack-name taxcalc-lambda-sandbox  --region $AWS_REGION   -> Deleted successfully
+
+describe-stacks taxcalc-lambda-dev      -> Stack with id taxcalc-lambda-dev does not exist
+describe-stacks taxcalc-lambda-sandbox  -> Stack with id taxcalc-lambda-sandbox does not exist
+
+list-tables / list-functions / get-apis / describe-log-groups / describe-alarms -> all empty
+```
+
+`taxcalc-lambda-sandbox` is normally created by the CI deploy job, which cannot run without the
+role ARN — so it was stood up under that exact name and torn down alongside `dev`, proving the
+teardown path works for both. Emulator, with the same caveat as everywhere else on this page.
+
 **Still genuinely open — these need real AWS and nothing else will do:**
 
 | Graded artefact | Why an emulator cannot stand in |
