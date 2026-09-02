@@ -84,6 +84,7 @@ Resources:
       SkipBuild: true
     Properties:
       FunctionName: !Sub "taxcalc-taxpayer-lookup-${StageName}"
+      Handler: com.uptimecrew.tax_liability.lambda.TaxpayerLookupHandler::handleRequest
       CodeUri: target/taxcalc-taxpayer-lookup-1.0.0.jar
       SnapStart:
         # A JVM snapshot is taken after INIT and restored on cold start, so the handler's
