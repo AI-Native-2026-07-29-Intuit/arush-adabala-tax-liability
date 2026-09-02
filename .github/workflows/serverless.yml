@@ -62,6 +62,18 @@ jobs:
       - name: sam build
         run: sam build --use-container
 
+      # ----- 3b. arm64 emulation ------------------------------------------
+      # template.yaml pins Architectures: [arm64], but GitHub's ubuntu-22.04
+      # runners are x86_64. Without QEMU registered, `sam local invoke` fails
+      # building its emulation image with
+      #   The command '/bin/sh -c mv /var/rapid/aws-lambda-rie-arm64 ...'
+      #   returned a non-zero code: 255
+      # because it cannot execute the arm64 RIE binary at all.
+      - name: Set up QEMU (arm64 emulation for the Lambda runtime image)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       # ----- 4. Local invoke against the synthetic event ------------------
       # An integration test of the built artifact inside the real runtime
       # image: it proves the Handler string in template.yaml actually resolves
@@ -75,6 +87,28 @@ jobs:
             --event events/get-taxpayer.json \
             | tee /tmp/local-invoke.json
           grep -q '"statusCode"' /tmp/local-invoke.json
+
+      # Task 4 asks for a deliberately-broken template to fail this job AND leave
+      # a diagnostics artefact. The deploy job's artefact is unreachable from a
+      # PR (it needs OIDC), so the PR job captures its own. `|| true` on every
+      # line: whichever step failed, the others may not have produced a file,
+      # and a failing capture would mask the real failure.
+      - name: Capture build diagnostics on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/diag
+          sam validate --lint --region us-east-1 > /tmp/diag/sam-validate.txt 2>&1 || true
+          cp /tmp/local-invoke.json /tmp/diag/ 2>/dev/null || true
+          cp .aws-sam/build.toml /tmp/diag/ 2>/dev/null || true
+          mvn -B -ntp validate > /tmp/diag/mvn-validate.txt 2>&1 || true
+          ls -la target/ > /tmp/diag/target-listing.txt 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: sam-diagnostics
+          path: /tmp/diag
+          retention-days: 14
 
       - name: Upload sam build artifact
         uses: actions/upload-artifact@v4
