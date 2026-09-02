@@ -48,6 +48,32 @@ jobs:
       - name: sam validate --lint
         run: sam validate --lint --region us-east-1
 
+      # ----- 1b. OIDC: verify the GitHub half of the trust relationship ----
+      # Mints a real OIDC token for the sts.amazonaws.com audience and prints only
+      # its claims. This proves `permissions: id-token: write` is actually in effect
+      # and, more usefully, prints the exact `sub` value the IAM role's trust policy
+      # has to match - the single most common thing to get wrong when wiring OIDC.
+      # The token itself is registered as a secret and never printed: it is a live
+      # credential, even though it is short-lived and audience-restricted.
+      - name: Inspect OIDC token claims (no AWS call)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            core.setSecret(token);
+            const claims = JSON.parse(
+              Buffer.from(token.split('.')[1], 'base64').toString('utf8'));
+            const shown = {
+              iss: claims.iss, aud: claims.aud, sub: claims.sub,
+              repository: claims.repository, ref: claims.ref,
+            };
+            core.info(JSON.stringify(shown, null, 2));
+            core.summary
+              .addHeading('OIDC token claims', 3)
+              .addCodeBlock(JSON.stringify(shown, null, 2), 'json')
+              .addRaw('Pin the IAM trust policy to this `sub`.')
+              .write();
+
       # ----- 2. Unit tests (JUnit 5 + Mockito + AssertJ) ------------------
       - name: mvn test
         run: mvn -B -ntp test
