@@ -263,6 +263,39 @@ into the workflow - out of scope for this deliverable.
   prod manifests (Compose, Kubernetes, ECS). Deploys reference the digest:
   `uptimecrew/taxcalc-api@sha256:...`.
 
+## Trivy waiver addendum — 2026-09-02 (libexpat1, CVE-2026-56408)
+
+One CVE was published after the 2026-08-27 waiver below and turned the
+`build-scan-smoke` gate red on a branch that changed nothing about the image.
+
+**Confirmed environmental, not a regression.** `libexpat1` is an OS package inside
+the pinned distroless base and is referenced nowhere in `Dockerfile`,
+`build.gradle` or `pom.xml`. Re-running *main's own* last-green docker run
+(`33534774002`, commit `f55a156`, green on 2026-09-01) against the following day's
+Trivy database reproduced the identical failure — same commit, same code, opposite
+result, with the vulnerability feed as the only variable.
+
+**Why a waiver rather than a base-image bump.** The bump is the preferred fix and
+was checked first: the advisory names `2.5.0-1+deb12u3` as fixed, but
+`gcr.io/distroless/java-base-debian12:nonroot` still resolves to
+`sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c` — the
+digest already pinned. Google has not published a rebuilt image, so there is no
+newer digest to move to.
+
+**Exposure.** libexpat is an XML parser pulled in as a transitive OS dependency of
+the java-base image; this service parses JSON and GraphQL, not XML, and exposes no
+route that feeds attacker-controlled input to a system XML parser. The integer
+overflow in `copyString` needs untrusted XML to reach expat, which this
+application does not provide.
+
+| CVE | Package | Installed | Fixed in | Why waived | Re-evaluate |
+|---|---|---|---|---|---|
+| CVE-2026-56408 | libexpat1 (base image) | 2.5.0-1+deb12u2 | 2.5.0-1+deb12u3 | No rebuilt distroless image exists yet — `:nonroot` still resolves to the pinned digest. No app code path reaches expat. | 2026-09-27 |
+
+On the expiry date, re-scan first: if a newer distroless digest carries deb12u3,
+bump the pin in the `Dockerfile` and delete the `.trivyignore` line rather than
+renewing it.
+
 ## Trivy scan waiver — 2026-08-27
 
 ### Why a waiver instead of 0 HIGH / 0 CRITICAL

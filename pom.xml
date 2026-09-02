@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven build for the W5 D4 serverless slice ONLY (the taxcalc-taxpayer-lookup Lambda).
+
+  The rest of this repository is a Gradle/Spring Boot application and stays that way: this POM
+  deliberately compiles nothing outside com/uptimecrew/tax_liability/lambda/**, and build.gradle
+  mirrors the split by excluding that same package from its own source sets. Two build tools in
+  one repo is unusual, but AWS SAM's `sam build` for the java21 runtime shells out to Maven or
+  Gradle based on which build file sits next to the CodeUri - and the Lambda needs a completely
+  different (tiny, shaded, Spring-free) dependency closure than the API service does.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.uptimecrew</groupId>
+    <artifactId>taxcalc-taxpayer-lookup</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>taxcalc-taxpayer-lookup</name>
+    <description>GET /taxpayers/{taxpayerId} as an AWS Lambda behind an API Gateway HTTP API.</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>21</maven.compiler.release>
+
+        <aws.sdk.version>2.29.52</aws.sdk.version>
+        <jackson.version>2.18.2</jackson.version>
+        <slf4j.version>2.0.16</slf4j.version>
+        <log4j.version>2.24.3</log4j.version>
+        <junit.version>5.11.4</junit.version>
+        <mockito.version>5.14.2</mockito.version>
+        <assertj.version>3.26.3</assertj.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws.sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!--
+              REQUIRED, and its absence fails silently. aws-lambda-java-log4j2:1.6.0 pulls
+              log4j-api:2.17.1 transitively; Maven's nearest-wins resolution then pairs that old
+              api with the 2.24.x log4j-core declared below. Log4j2 changed how core registers its
+              Provider between those versions, so the mismatched pair cannot find each other and
+              Log4j2 falls back to its internal SimpleLogger with only a StatusLogger line on
+              stderr ("Log4j2 could not find a logging implementation") - the build stays green,
+              the tests stay green, and the deployed function quietly emits unstructured text
+              instead of the JSON envelopes LogFormat: JSON is supposed to produce. Importing the
+              BOM forces every log4j artifact, transitive ones included, onto one version.
+            -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-bom</artifactId>
+                <version>${log4j.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!--
+          provided: the Lambda Java runtime already has aws-lambda-java-core (Context,
+          RequestHandler) on the classpath, so shading a second copy into the deployment
+          artifact only makes the jar bigger and the INIT phase slower.
+        -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-core</artifactId>
+            <version>1.2.3</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- NOT provided: the event POJOs (APIGatewayV2HTTPEvent/Response) must be bundled. -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-events</artifactId>
+            <version>3.14.0</version>
+        </dependency>
+
+        <!--
+          url-connection-client instead of the SDK default (Netty's netty-nio-client): the
+          default async client spins up an event-loop group at build() time, which is pure
+          INIT-phase cost for a handler that makes exactly one blocking GetItem per invocation.
+          The JDK's HttpURLConnection-backed client has no such warm-up.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>apache-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <!-- Registered by ObjectMapper.findAndRegisterModules(); serialises Instant as ISO-8601. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+        <!--
+          Log4j2 behind the SLF4J API, NOT slf4j-simple.
+
+          This is not a style preference, it is the only way LoggingConfig.LogFormat: JSON does
+          anything for a Java function. Lambda only emits structured-JSON *application* logs for
+          code that logs through LambdaLogger or Log4j2 (docs: "Configuring JSON and plain text
+          log formats" -> supported runtimes and logging methods). Anything else - including
+          slf4j-simple writing to stdout - is captured verbatim as plain text, so the function
+          would report LogFormat: JSON while every application line stayed unstructured.
+
+          aws-lambda-java-log4j2 supplies the <Lambda> appender that switches layout on
+          AWS_LAMBDA_LOG_FORMAT and injects AWSRequestId; log4j-layout-template-json supplies the
+          JsonTemplateLayout it uses in JSON mode. Version floors matter here: AWS calls out
+          aws-lambda-java-log4j2 >= 1.5.0 / Log4j2 >= 2.17.0 as the CVE-2021-44228 remediation
+          line, and these are well past both.
+        -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-log4j2</artifactId>
+            <version>1.6.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j2-impl</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-layout-template-json</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!--
+          NOT src/main/resources: that directory belongs to the Spring Boot application
+          (application.yml, the Flyway migrations, the GraphQL schema). Copying it into the
+          Lambda jar would ship megabytes of irrelevant config and, worse, put a second
+          application.yml on a classpath that has no Spring on it. The Lambda's only resource
+          is its logging config, so it gets a directory of its own.
+        -->
+        <resources>
+            <resource>
+                <directory>src/main/resources-lambda</directory>
+            </resource>
+        </resources>
+
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <!--
+                      The source roots are shared with the Gradle build, so scope this compile
+                      to the Lambda package. Without these includes Maven would try to compile
+                      the whole Spring Boot application against a dependency closure that does
+                      not contain a single Spring jar.
+                    -->
+                    <includes>
+                        <include>com/uptimecrew/tax_liability/lambda/**</include>
+                    </includes>
+                    <testIncludes>
+                        <testInclude>com/uptimecrew/tax_liability/lambda/**</testInclude>
+                    </testIncludes>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+
+            <!--
+              Lambda takes a flat jar with every runtime dependency inside it, so the shaded jar
+              replaces the thin one as the build's main artifact. That keeps the path stable at
+              target/taxcalc-taxpayer-lookup-1.0.0.jar, which is exactly what template.yaml's
+              CodeUri points at.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <dependencies>
+                    <!--
+                      Supplies Log4j2PluginCacheFileTransformer, used below. Log4j2 finds its
+                      plugins (every PatternLayout converter, the appenders, the layouts) through
+                      a binary index at
+                      META-INF/org/apache/logging/log4j/core/config/plugins/Log4j2Plugins.dat,
+                      and every log4j jar ships its own copy. A plain shade keeps exactly one, so
+                      the registry ends up nearly empty.
+                    -->
+                    <dependency>
+                        <groupId>org.apache.logging.log4j</groupId>
+                        <artifactId>log4j-transform-maven-shade-plugin-extensions</artifactId>
+                        <version>0.2.0</version>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <!--
+                                  The AWS SDK splits its service/codec registry across a
+                                  META-INF/services entry per jar; a naive shade keeps only the
+                                  last one and the client fails at runtime with a missing
+                                  provider. This transformer concatenates them instead.
+                                -->
+                                <transformer
+                                    implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <!--
+                                  Merges the per-jar Log4j2Plugins.dat indexes into one. Without
+                                  this the deployed function starts, logs nothing useful, and
+                                  prints "Unrecognized conversion specifier" for %d, %level,
+                                  %msg and friends - Log4j2 cannot even find its own core
+                                  plugins, so the <Lambda> appender never loads and the JSON
+                                  layout never runs. Caught by invoking the shaded artifact;
+                                  `mvn test` cannot see it, because tests run against the
+                                  unshaded classpath where every .dat file is still separate.
+                                -->
+                                <transformer
+                                    implementation="org.apache.logging.log4j.maven.plugins.shade.transformer.Log4j2PluginCacheFileTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

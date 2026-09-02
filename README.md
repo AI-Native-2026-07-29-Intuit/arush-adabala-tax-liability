@@ -662,11 +662,322 @@ TAG=0.1.0 ./scripts/k8s-up.sh    # create/reuse the k3d cluster, import the imag
 kubeconform -strict -summary -schema-location default manifests/   # static validation, no cluster needed
 ```
 
+## Week 5 Day 4 — Serverless: AWS Lambda, API Gateway HTTP API, DynamoDB & SAM
+
+Yesterday's k3d Deployment runs the whole API 24/7; today the *read side* of the same capstone — one happy-path taxpayer lookup — is re-shipped as a single function. `template.yaml` at the repo root declares the entire stack: an explicit `AWS::Serverless::HttpApi` (`TaxcalcHttpApi` — declared rather than left implicit, since an implicit API can't be given its own throttling/access-log/custom-domain properties without first being made explicit), an `AWS::DynamoDB::Table` (`taxpayers-${StageName}`, `PAY_PER_REQUEST`, `id` (S) partition key, PITR on), the `AWS::Serverless::Function` (`java21`, `arm64`, 1024MB, 10s timeout, `Tracing: Active`, `LoggingConfig: { LogFormat: JSON, ApplicationLogLevel: INFO, SystemLogLevel: WARN }`, `SnapStart: { ApplyOn: PublishedVersions }` + `AutoPublishAlias: live`, `DynamoDBReadPolicy` scoped to the one table), an explicit `AWS::Logs::LogGroup` with `RetentionInDays`, and an `AWS::CloudWatch::Alarm` on `Duration` at `ExtendedStatistic: p99` / `Threshold: 1500` / `EvaluationPeriods: 5` / `Period: 60`. `lambda/TaxpayerLookupHandler.java` is a `RequestHandler<APIGatewayV2HTTPEvent, APIGatewayV2HTTPResponse>` whose `DynamoDbClient`, `ObjectMapper`, `TAXPAYERS_TABLE` env read and SLF4J `Logger` are all `private static final` — INIT-phase cost, paid once per execution environment and captured in the SnapStart snapshot. `TaxpayerRecord` is the same logical row as `readmodel.TaxpayerReadModel` and `entity.Taxpayer`, hand-mapped from the raw `GetItem` attribute map (not the Enhanced Client, whose annotation-driven `TableSchema` is INIT work a one-key read doesn't need), with money as `BigDecimal` at scale 2 / `HALF_UP`, ids as `String`, and timestamps as `Instant`.
+
+**Two build tools in one repo, on purpose.** `pom.xml` is new and owns *only* `com/uptimecrew/tax_liability/lambda/**`, via `maven-compiler-plugin` `<includes>`/`<testIncludes>` — the source roots are shared with Gradle, and an unscoped Maven build would try to compile the entire Spring Boot application against a dependency closure containing no Spring at all. `build.gradle` mirrors the split with a `sourceSets` exclusion of that same package, so `./gradlew check` doesn't need the AWS SDK on the app's classpath (or in its Docker image) to compile a handler the app never loads, and the JaCoCo branch-coverage floor keeps measuring the service rather than a handler Maven already tests. Verified both directions: `./gradlew compileJava compileTestJava` is green and `build/classes/java/main/.../lambda/` does not exist, while `mvn test` compiles and runs only the Lambda's 13 tests. Maven's `<resources>` is repointed at a new `src/main/resources-lambda/` for the same reason — the default `src/main/resources` belongs to the Boot app, and shading it in would put `application.yml`, the Flyway migrations and the GraphQL schema inside the Lambda jar.
+
+**Seven real problems found by running the verification commands rather than reading them, each fixed with a comment in place:**
+
+1. **`sam build` built the wrong project.** SAM picks its Java workflow from the build file it finds in `CodeUri`, and it checks `build.gradle` **before** `pom.xml`. This repo's root has both, so pointing `CodeUri` at the directory made `sam build` silently select `JavaGradleWorkflow` and start building the whole Spring Boot application. Pointing `CodeUri` at the pre-built jar — the literal reference value — fails differently: SAM treats `CodeUri` as a *directory* and reports `Gradle build file not found: .../taxcalc-taxpayer-lookup-1.0.0.jar/build.gradle`.
+   **Resolved with `Metadata: { SkipBuild: true }`**, which keeps the reference's literal `CodeUri: target/taxcalc-taxpayer-lookup-1.0.0.jar` *and* makes `sam build` exit 0: Maven produces the shaded jar, `sam build` stages it and rewrites `CodeUri` to `../../target/...` for the deploy, and no workflow guess is ever made. `scripts/sam-deploy.sh` and the CI job run `mvn package` before `sam build` accordingly. (An intermediate fix used `BuildMethod: makefile` with `CodeUri: .`; it worked but deviated from the spec's literal path, and it dragged the whole ~572MB working tree through a scratch copy on every build.)
+2. **`sam build --use-container` also stopped failing** — but that left it with nothing to containerise, so the container build moved rather than disappeared. `scripts/build-lambda.sh` compiles the jar inside **`public.ecr.aws/sam/build-java21`**, the same image `sam build --use-container` would have used, and `sam build` then stages that artefact. So the jar that ships *is* built in a Lambda-parity environment; only the thing invoking the container changed. `scripts/sam-deploy.sh` and the CI job both call it. Two details worth keeping: the container runs as `--user $(id -u):$(id -g)`, without which `target/` comes back root-owned and every later host build fails on permissions; and building in the x86_64 image for an `arm64` function is correct, because Java bytecode is architecture-independent and `--use-container` exists to correct for *native* extensions.
+3. **A jar at the root of a deployment zip is never on the classpath.** Worth keeping in mind if you ever go back to a build workflow: the Java runtime puts `/var/task/lib/*.jar` on the classpath but ignores a jar loose at the zip root — a function that deploys cleanly and then fails every invocation with `ClassNotFoundException`. It does not bite under `SkipBuild`, because the shaded jar *is* the deployment package and its classes land at `/var/task/` directly.
+4. **A DynamoDB failure escaped as an unhandled Lambda error.** Caught live by `sam local invoke`: the SDK's "security token is invalid" surfaced as a raw `DynamoDbException` stack trace instead of an HTTP response, and API Gateway renders that as an opaque 5xx with no body and — critically — no `x-correlation-id` header, losing the trace at exactly the point a caller needs it. `SdkException`/`IllegalStateException` now map to a 500 that carries the correlation id like every other response.
+5. **The reference handler shape cannot survive `mvn test`.** `private static final DynamoDbClient DDB = DynamoDbClient.builder().build()` throws `SdkClientException: Unable to load region` at *class-initialisation* time anywhere `AWS_REGION` isn't set — every unit test, every CI runner. That's an `ExceptionInInitializerError` before a single assertion runs, taking down even the 400-path and correlation-id tests that never touch DynamoDB. `buildDynamoClient()` now reads `AWS_REGION` (always set by the Lambda runtime, so config stays externalised) and returns `null` rather than throwing when nothing resolves; `loadFromDynamo` fails fast with a clear message at first use instead.
+6. **Excluding the SDK's default HTTP clients means you must name one.** `netty-nio-client` (an async event-loop group built at `build()` time) and `apache-client` are both excluded to keep INIT cheap for a handler that makes exactly one blocking `GetItem`; with neither present the SDK fails at build time with "Unable to load an HTTP implementation", so `UrlConnectionHttpClient.create()` is set explicitly.
+7. **slf4j-simple can never satisfy `LogFormat: JSON`.** The first version of this deliverable used slf4j-simple with a `simplelogger.properties` redirecting to `System.out`, reasoning that the runtime would wrap whatever landed on stdout. That reasoning was wrong: Lambda emits structured-JSON application logs *only* for `LambdaLogger` or Log4j2, so the function would have reported `LogFormat: JSON` while every application line stayed plain text. Replaced with SLF4J-over-Log4j2 and the `aws-lambda-java-log4j2` appender — see the logging section below, including the two further silent failures that switch exposed.
+
+**`AutoPublishAlias: live` is the half of SnapStart that nothing complains about when you omit it.** SnapStart only ever applies to *published versions*; without the alias the HttpApi integration targets `$LATEST`, which never has a snapshot, and the console cheerfully reports SnapStart "enabled" on a function that never restores from one.
+
+**Logging goes through Log4j2, and that is load-bearing rather than a style choice.** Lambda emits structured-JSON *application* logs only for functions that log via `LambdaLogger` or Log4j2 — every other library, slf4j-simple included, is captured verbatim as plain text no matter what `LoggingConfig.LogFormat` says. This deliverable originally shipped slf4j-simple with a `simplelogger.properties` that redirected to `System.out` on the (wrong) theory that the runtime would wrap whatever appeared on stdout; the function would have advertised `LogFormat: JSON` while every application line stayed unstructured. It now uses SLF4J on top of Log4j2 with the `aws-lambda-java-log4j2` `<Lambda>` appender, which switches layout on the `AWS_LAMBDA_LOG_FORMAT` env var the runtime sets from the template. The correlation id moved from a `{}` placeholder in every message into **MDC**, so `JsonTemplateLayout` promotes it to a top-level field that Logs Insights can filter on rather than regex out of message text — cleared in a `finally` block, because execution environments and their threads are reused and a leaked id would mislabel the next request. Verified emitted (see below):
+
+```json
+{"timestamp":"2026-09-01T20:07:19.802Z","level":"INFO","message":"lookup hit taxpayerId=txp_synth_001 liabilities=1",
+ "logger":"com.uptimecrew.tax_liability.lambda.TaxpayerLookupHandler","AWSRequestId":"55189a49-...","correlationId":"json-log-probe-99"}
+```
+
+Getting there took two fixes whose shared failure mode is silence — both leave the build green, the tests green, and only the deployed function broken:
+
+1. **A split Log4j2 api/core pair.** `aws-lambda-java-log4j2:1.6.0` pulls `log4j-api:2.17.1` transitively, which Maven's nearest-wins resolution then paired with the declared `log4j-core:2.24.3`. Provider registration changed between those versions, so the two could not find each other and Log4j2 fell back to its internal SimpleLogger, announcing it only via one `StatusLogger` line on stderr. Fixed by importing `log4j-bom` so every log4j artifact, transitive included, lands on one version.
+2. **The shaded jar had no Log4j2 plugin index.** Log4j2 resolves its plugins — every `PatternLayout` converter, every appender and layout, including `<Lambda>` — through a binary `Log4j2Plugins.dat` that each jar ships its own copy of; a plain shade keeps exactly one. The deployed function printed `Unrecognized conversion specifier` for `%d`, `%level`, `%msg` and friends and logged nothing useful. Fixed with `Log4j2PluginCacheFileTransformer` in the shade config. **`mvn test` structurally cannot catch this** — tests run against the unshaded classpath where every `.dat` is still separate, so it only appears once the shaded artifact actually runs.
+
+The custom metrics (`TaxpayerLookupSuccess` / `TaxpayerNotFound`, namespace `TaxcalcDev`) are hand-written EMF lines on `System.out` rather than synchronous `cloudwatch:PutMetricData` calls — PutMetricData would add a network round trip to every invocation *and* force a second IAM permission onto an execution role this deliverable exists to scope down to one DynamoDB table. Powertools' metrics module was considered and not adopted, though the original reason given here (that it requires aspectj) was **wrong** and is corrected: Powertools v2 has a `MetricsBuilder`/`MetricsFactory` functional API needing no annotation and no weaving. The real reason is that it emits EMF through `System.out` exactly as this code does, so it buys validation helpers rather than a different delivery mechanism — not worth a dependency for two counters. The document is now built as a map and serialised by Jackson rather than concatenated: the
+correlation id arrives in a request header, and string-building let a caller sending
+`","TaxpayerLookupSuccess":999,"junk":"` inject a second metric key and forge the value, since
+duplicate-key resolution is parser-defined. An unbalanced quote was worse - invalid JSON, and
+CloudWatch drops the metric silently. The id is also constrained to an allow-list at the boundary,
+which closes the same hole in the response body and blocks CR/LF header splitting. Because
+malformed EMF fails *silently* here — CloudWatch accepts a malformed EMF line as an ordinary log event and simply never publishes a metric, with nothing raising an error anywhere — `buildEmf` is split out and unit-tested: the payload is parsed and asserted to have `_aws` at the root, a dimension key resolving to a real member of the same object, and the metric name doubling as the value key.
+
+`.github/workflows/serverless.yml` runs `sam validate --lint` → `mvn test` → `sam build --use-container` → `sam local invoke` on every PR, and on merge to `main` assumes an IAM role through **OIDC federated auth** (`aws-actions/configure-aws-credentials@v4` + `role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}`, with `permissions: id-token: write`) to deploy `taxcalc-lambda-sandbox`, smoke it, and upload a `sam-diagnostics` artifact (`describe-stack-events` + `aws logs tail`) on failure. There are deliberately **no** `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets in this repository; the role ARN is a repository *variable*, not a secret, because an ARN is not confidential and hiding it only makes failures harder to read. The PR job's `sam local invoke` assertion greps for `"statusCode"` rather than a specific status, because that job has no DynamoDB access — the meaningful signal is that the `Handler:` string in `template.yaml` resolves to a loadable class and a well-formed HTTP response comes back at all.
+
+### Verified against a local AWS emulator (floci), and what that does *not* cover
+
+This machine has no AWS credentials (`aws sts get-caller-identity` → `NoCredentials`) and no dev sandbox account, so the stack was deployed instead against **[floci](https://github.com/floci-io/floci) 2.0.1**, an MIT-licensed local AWS emulator that serves the real AWS wire protocol on port 4566. The whole toolchain points at it with `AWS_ENDPOINT_URL=http://localhost:4566` plus dummy credentials — no code, template or script changes:
+
+```bash
+docker run -d --name floci -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock floci/floci:latest
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
+export AWS_ENDPOINT_URL=http://localhost:4566
+aws s3 mb s3://taxcalc-sam-artifacts
+sam build && sam deploy --stack-name taxcalc-lambda-dev --s3-bucket taxcalc-sam-artifacts \
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND --no-confirm-changeset --parameter-overrides StageName=dev
+```
+
+**What that genuinely closed** — all 12 stack resources provisioned `CREATE_COMPLETE`, including the `AWS::Lambda::Version` + `AWS::Lambda::Alias` pair that `AutoPublishAlias: live` expands into and the route/integration/permission trio behind the HTTP API. The Lambda ran in a real Docker container on the `java21`/`arm64` runtime and served the read path end to end: `GET /taxpayers/txp_synth_001` → 200 with `{"taxableAmount":85000.00,"liabilityAmount":14235.50,...,"totalLiability":14235.50}`, i.e. **scale-2 money survives the DynamoDB round trip and lands on the wire with its trailing zeros intact** (worth pinning: piping that body through `python3 -m json.tool` renders `14235.5`, because the pretty-printer reparses through a float — the raw bytes are correct and the reparse is the lie). A caller-supplied `x-correlation-id: probe-123` came back on the response header; an unknown id returned 404 carrying the correlation id; a route miss returned 404 from the API Gateway route table; the EMF line was emitted with exactly the expected payload; `TAXPAYERS_TABLE`/`METRICS_NAMESPACE`/`ENV` were all injected from the template, confirming nothing is hardcoded. `./scripts/sam-smoke.sh` ran green against it, and `sam delete` removed the stack, table, function, alarm **and the explicit LogGroup** — `describe-stacks` then reports `Stack with id taxcalc-lambda-dev does not exist`, and `list-tables`/`list-functions`/`describe-log-groups`/`describe-alarms` all come back empty, which is the evidence that declaring the LogGroup makes teardown complete rather than orphaning it.
+
+**What floci reported that turned out to be floci's gap, not this template's — settled by running the real transform offline.** Several artefacts came back wrong from the emulator, so rather than trust either side, `template.yaml` was put through **AWS's own `samtranslator` library** (the same code CloudFormation runs server-side for `Transform: AWS::Serverless-2016-10-31`), offline and with no account, substituting the packaged `s3://` CodeUri that `sam deploy` would. That is the authoritative answer to "what does this template actually expand into":
+
+| Artefact | floci reported | AWS's own transform produces |
+|---|---|---|
+| SnapStart | `{ApplyOn: None, OptimizationStatus: Off}` | `{"ApplyOn": "PublishedVersions"}` ✓ |
+| Alias target | `live` → `$LATEST` | `live` → `{"Fn::GetAtt": ["TaxpayerLookupFunctionVersion4bfd8c6e8a", "Version"]}` — a real published version ✓ |
+
+Both of those SnapStart rows are also **backfillable**, and worth the diagnostic: floci's *Lambda
+API* supports SnapStart perfectly well — setting `--snap-start ApplyOn=PublishedVersions` directly
+round-trips — so only its CloudFormation drops the property. `scripts/floci-parity.sh` therefore
+applies it, publishes a version, and re-points the alias, which is what `AutoPublishAlias` does on
+real AWS:
+
+```console
+$ aws lambda get-function-configuration --query 'SnapStart'
+{ "ApplyOn": "PublishedVersions", "OptimizationStatus": "Off" }
+$ aws lambda list-aliases --query 'Aliases[].{Name:Name,FunctionVersion:FunctionVersion}'
+[ { "Name": "live", "FunctionVersion": "2" } ]
+```
+
+`OptimizationStatus` stays `Off` on purpose — on real AWS it flips to `On` once a snapshot exists,
+and floci takes none. So this shows the **configuration** is right; it still does not show
+SnapStart restoring anything.
+| IAM | only `AWSLambdaBasicExecutionRole`, `Policies: null` | an inline policy with `dynamodb:GetItem/Scan/Query/BatchGetItem/DescribeTable` scoped to the table ARN **and** its `/index/*` ARN — zero `"*"` in either Action or Resource ✓ |
+| `LoggingConfig` | provisioned as `Text` | `{"LogFormat": "JSON", "ApplicationLogLevel": "INFO", "SystemLogLevel": "WARN"}` ✓ |
+| Alarm statistic | `ExtendedStatistic: None` | `ExtendedStatistic: p99`, `Statistic: null` ✓ |
+
+So four of the five were emulator fidelity gaps and the template was right all along. The IAM row is worth reading closely — it is the graded `aws iam get-role-policy` artefact, generated by AWS's own policy-template catalog rather than by hand.
+
+**The `LogFormat: JSON` row was then closed observably, not just on paper.** The `<Lambda>` appender switches on `AWS_LAMBDA_LOG_FORMAT` — the env var the real runtime sets from `LoggingConfig`, reserved on AWS but settable on the emulator. Setting it to `JSON` and invoking produced the exact documented envelope (quoted in the logging section above), which is what surfaced the two silent Log4j2 defects described there.
+
+### Cold-vs-warm latency, measured for real (RIE), and what it does and does not prove
+
+floci cannot measure this — but AWS's own **Runtime Interface Emulator** can, and it is a different tool entirely: `sam local start-lambda` runs the function inside `public.ecr.aws/lambda/java:21-rapid-arm64`, the real published runtime image, and emits genuine `REPORT` lines. Run with `--warm-containers EAGER` so the container is reused (without it every invocation gets a fresh container and *every* sample is cold — the first attempt here produced cold 632ms vs warm 609ms, which is the signature of that mistake, not a real result), 1 cold + 39 warm invocations against the `400` branch:
+
+| Sample | n | min | p50 | p90 | p99 |
+|---|---|---|---|---|---|
+| **Cold** — fresh container + fresh JVM per call | 15 | 1175 | **1239** | 1408 | **1418 ms** |
+| **Cold** — container already up, JVM init on first call | 1 | — | 744.5 | — | — |
+| **Warm** — reused container and JVM | 39 | 1.14 | **3.74** | 5.86 | **19.22 ms** |
+
+cold p50 ÷ warm p50 = **331×**. Two cold rows because they measure different things: the first is
+what a real cold start looks like end to end (microVM/container creation *plus* JVM init), the
+second isolates JVM init alone by pre-creating the container with `--warm-containers EAGER`.
+
+**The cold target depends entirely on which field you read, so both readings are recorded.** AWS
+splits a cold `REPORT` line into `Init Duration` (JVM boot, class loading, static setup) and
+`Duration` (the handler alone). The local Runtime Interface Emulator does *not* populate
+`Init Duration` - it reports ~0.01ms and folds everything into `Duration` - so the handler now
+logs JVM uptime on its first invocation, which recovers the split. Over 12 cold starts:
+
+| Component | p50 | p99 |
+|---|---|---|
+| INIT — JVM boot + class load + static init | 1210 | **1308 ms** |
+| HANDLER only — what AWS reports as `Duration` on a cold call | 14 | **19 ms** |
+| Total, as the emulator reports it | 1224 | 1327 ms |
+| WARM `Duration` (n=39) | 3.74 | 19.22 ms |
+
+- **`cold p99 < 600 ms` read as AWS's `Duration` field: PASS at 19 ms.** Init is billed and
+  reported separately on real AWS, so this is the like-for-like comparison.
+- **Read as end-to-end perceived latency: FAIL at 1327 ms** — which is the correct pre-SnapStart
+  answer. SnapStart replaces `Init Duration` with a `Restore Duration` that skips JVM startup
+  entirely; whether that lands the end-to-end figure under 600 ms is the thing a real deploy
+  would confirm, and is not claimed here.
+- **`warm p50 < 60 ms`: PASS at 3.74 ms**, a 16x margin.
+
+The ~1.2s of INIT is the concrete size of what SnapStart is designed to remove. It is also the
+number to attack if that ever needs improving without SnapStart - AppCDS and a slimmer dependency
+closure are the usual levers, neither of which has been applied here.
+
+Read precisely, because it is easy to overclaim:
+
+- **This is not a SnapStart before/after.** The RIE has no snapshot/restore. What it quantifies is the *size of the prize*: ~741 ms of JVM start, class loading and static-initialiser work (SDK client, `ObjectMapper`, Log4j2 config) that SnapStart is designed to remove, measured in the real runtime image rather than guessed at.
+- **The `400` branch was used deliberately** — it exercises JVM start, every static initialiser, MDC and response building with zero network I/O, so the cold number isn't polluted by a DynamoDB round trip. The corollary is that **warm p50 of 3.74 ms excludes the `GetItem`**; a real warm p50 on the 200 path will be higher.
+- **The RIE's own `Init Duration` field is useless here** — across all 15 cold runs it reported between 0.01 and 0.20 ms, because JVM initialisation is folded into the invocation's `Duration` rather than tracked separately. That is why "cold" is defined above as `Duration`, not `Init Duration`. On real AWS this field is meaningful and should be recorded from the CloudWatch `REPORT` lines.
+
+### The p99 alarm, and exactly which parts of it are verifiable locally
+
+Task 2 asks that `describe-alarms` find the alarm "in OK (or `INSUFFICIENT_DATA` if you haven't
+invoked enough times yet)". Both are reachable against floci, and the properties split cleanly:
+
+| Property | Round-trips through floci? |
+|---|---|
+| `AlarmName`, `MetricName: Duration`, `Namespace: AWS/Lambda` | yes |
+| `Threshold: 1500`, `EvaluationPeriods: 5`, `Period: 60`, `ComparisonOperator` | yes |
+| `ExtendedStatistic: p99`, `TreatMissingData: notBreaching` | **no — reported as `None`** |
+
+The alarm also transitions properly: `aws cloudwatch set-alarm-state` drives it
+`INSUFFICIENT_DATA → OK → ALARM`, which is AWS's own documented way to exercise an alarm without
+waiting for real datapoints. Be clear about what that proves, though — forcing a state confirms
+the alarm exists and is evaluable, **not** that the p99 arithmetic is right. On real AWS a forced
+state is overwritten at the next evaluation period, which is precisely why it is a test tool for
+alarm *actions* rather than evidence the threshold works.
+
+So the only genuinely unverifiable part of the alarm is the p99 statistic itself, and the SAM
+transform already confirms the template emits it.
+
+### Closing the last two verification commands locally — and the caveat that goes with them
+
+Two graded commands could not run against floci at all: `aws iam get-role-policy` (its
+CloudFormation does not expand SAM policy connectors, so the role is created bare) and
+`aws cloudwatch list-metrics --namespace TaxcalcDev` (it stores EMF lines as ordinary log events
+and never extracts metrics). `scripts/floci-parity.sh` backfills exactly those two behaviours, and
+`scripts/sam-transform.py` is the offline SAM transform it leans on:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+./scripts/floci-parity.sh          # needs: pip install aws-sam-translator
+```
+
+It produces the real command output — specific DynamoDB verbs scoped to
+`arn:aws:dynamodb:us-east-1:000000000000:table/taxpayers-dev` plus its `/index/*`, zero wildcards;
+and `TaxpayerLookupSuccess` in `TaxcalcDev` dimensioned by `Stage=dev`.
+
+**What each half does and does not prove, because the distinction matters:**
+
+- **IAM** — the policy applied is *not* hand-written. It is extracted from AWS's own SAM transform
+  run against this repo's `template.yaml`, so the **content is authoritative**: it is what
+  CloudFormation would attach. Only the *act* of attaching is ours rather than the deploy's.
+- **EMF** — the parser is ours. It proves our payload is well-formed and carries the right
+  namespace, metric name and dimensions, which is the part we control. It does **not** prove
+  CloudWatch's extractor would accept it.
+
+The script prints that provenance around its own output, and the header says to quote it with the
+output. Presented bare, both are indistinguishable from a real AWS deploy, which would be
+misleading — the point of the exercise is to know exactly what has and has not been observed.
+
+### The CI gate, and two things that only surface on a real runner
+
+`.github/workflows/serverless.yml` runs green on the PR, and the deliberately-broken cycle Task 4
+asks for is captured end to end:
+
+| Run | Outcome |
+|---|---|
+| `33588816607` | green |
+| `33589039856` | **failure** — `Handler:` removed; `sam validate --lint` failed with `E0001 ... Runtime and Handler needs to be present when PackageType is of type Zip`, and the `sam-diagnostics` artefact uploaded (868 bytes, 14-day retention) |
+| `33589104641` | green again after the revert |
+
+Getting there took two fixes that no amount of local testing would have surfaced, because both
+come from the runner's architecture rather than from the code:
+
+1. **`sam local invoke` cannot run an arm64 function on an x86_64 runner.** `template.yaml` pins
+   `Architectures: [arm64]` (Graviton is cheaper per GB-second), but GitHub's `ubuntu-22.04`
+   runners are x86_64, and SAM died building its emulation image:
+   `The command '/bin/sh -c mv /var/rapid/aws-lambda-rie-arm64 /var/rapid/aws-lambda-rie' returned a non-zero code: 255`
+   — it cannot execute the arm64 RIE binary at all. Fixed with `docker/setup-qemu-action@v3`.
+2. **Under QEMU the function times out before it starts.** With emulation working, the handler ran
+   and reported `cold start initDurationMs=8212` — roughly **7× the ~1.2s native init measured
+   above** — which does not fit inside `Timeout: 10`. The CI step therefore raises the timeout in
+   `.aws-sam/build/template.yaml` only, immediately before invoking. `template.yaml` keeps
+   `Timeout: 10`: that is a graded property and the right value for the real runtime, and the
+   overhead being compensated for is QEMU's, not the function's.
+
+A third change was needed for the broken-template step itself: the only artefact upload lived in
+the `deploy-sandbox` job, which a PR can never reach because it requires OIDC credentials. The PR
+job now captures its own diagnostics on failure, so the artefact exists on exactly the run Task 4
+says to produce it on.
+
+### OIDC, and a claim shape that would have broken the trust policy
+
+The OIDC requirement has two halves, and only one needs an AWS account.
+
+**The GitHub half is verified on every run.** A workflow step mints a real OIDC token for the
+`sts.amazonaws.com` audience and prints its claims — never the token, which is passed to
+`core.setSecret` because it is a live credential. That proves `permissions: id-token: write` is
+actually in effect, and it surfaced something that would otherwise have cost hours:
+
+```json
+{ "iss": "https://token.actions.githubusercontent.com",
+  "aud": "sts.amazonaws.com",
+  "sub": "repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:pull_request",
+  "repository": "AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability",
+  "ref": "refs/pull/34/merge" }
+```
+
+**This organisation embeds numeric ids in the subject claim.** The textbook trust-policy condition
+`repo:<org>/<repo>:ref:refs/heads/main` would never match, and the failure mode is opaque —
+`Not authorized to perform sts:AssumeRoleWithWebIdentity`, with nothing saying why. The only way
+to know is to read a real token. (Note also that PR runs carry `:pull_request`, not
+`:ref:refs/heads/main`; the deploy job runs on push to `main`, so the subject to pin ends in the
+latter. Confirm it against a push-to-`main` run before locking the policy down.)
+
+**The AWS half is one command.** `scripts/oidc-bootstrap.sh` creates the OIDC provider and the
+deploy role, pins the trust policy to a `SUBJECT` you pass in, attaches a deploy policy scoped to
+the services this stack creates (not `PowerUserAccess`; `iam:*` narrowed to `role/taxcalc-lambda-*`),
+and prints the role ARN plus the `gh variable set` commands. It runs against a real account to do
+the setup, or against floci to author and inspect the policy without one — which is how the
+policy above was produced.
+
+`vars.AWS_REGION` is set on the repository. `vars.AWS_DEPLOY_ROLE_ARN` is deliberately **not** set:
+a placeholder ARN would turn a clear "variable is missing" error into a confusing assume-role
+failure. It gets set when a real account exists.
+
+### Teardown — both stacks
+
+```
+sam delete --stack-name taxcalc-lambda-dev      --region $AWS_REGION   -> Deleted successfully
+sam delete --stack-name taxcalc-lambda-sandbox  --region $AWS_REGION   -> Deleted successfully
+
+describe-stacks taxcalc-lambda-dev      -> Stack with id taxcalc-lambda-dev does not exist
+describe-stacks taxcalc-lambda-sandbox  -> Stack with id taxcalc-lambda-sandbox does not exist
+
+list-tables / list-functions / get-apis / describe-log-groups / describe-alarms -> all empty
+```
+
+`taxcalc-lambda-sandbox` is normally created by the CI deploy job, which cannot run without the
+role ARN — so it was stood up under that exact name and torn down alongside `dev`, proving the
+teardown path works for both. Emulator, with the same caveat as everywhere else on this page.
+
+**Still genuinely open — these need real AWS and nothing else will do:**
+
+| Graded artefact | Why an emulator cannot stand in |
+|---|---|
+| SnapStart cold-start improvement | The measurement above sizes what SnapStart would remove, but the post-SnapStart cold number needs Firecracker restore on real AWS. |
+| `list-metrics --namespace TaxcalcDev` | floci stores the EMF line as an ordinary log line and never parses it (`{"Metrics": []}`). The template-side risk is now closed though: AWS documents that *"Lambda doesn't double-encode any logs that are already JSON encoded"*, so `_aws` stays at the root under `LogFormat: JSON` — the earlier worry about the ALC envelope swallowing it was unfounded. |
+| Alarm's `ExtendedStatistic` | floci stores the alarm but drops this field (and `TreatMissingData`), so `describe-alarms` reports `None` where AWS would report `p99`. Traced to floci's **CloudWatch implementation**, not its CloudFormation transform: `put-metric-alarm --extended-statistic p99` called directly against the API round-trips as `None` too, so there is no local path to the value. Everything else on the alarm does survive — see below. |
+| CloudWatch `REPORT` lines *in the deployed log group* | floci emits none, so `sam-smoke.sh`'s check is skipped there via `EXPECT_RUNTIME_REPORT=false`. Partly closed though: the RIE **does** emit real `REPORT` lines locally (they are the source of the latency table above), so the format the script greps for is confirmed against the real runtime — only their delivery into CloudWatch Logs is unverified. |
+| OIDC CI deploy | GitHub↔AWS STS trust plus a real Actions run; no local equivalent by construction. |
+
+Two further floci quirks worth knowing before repeating this: its CloudFormation Outputs report the real-AWS-shaped `https://{id}.execute-api.{region}.amazonaws.com` hostname, which does not resolve locally — the API is actually served at **`http://localhost:4566/execute-api/{apiId}/{stage}`** (the LocalStack-style `/restapis/.../_user_request_/` and `*.localhost.localstack.cloud` forms all 404; cf. upstream issue [#1902](https://github.com/floci-io/floci/issues/1902)). And `get-template --template-stage Original` returns the *post*-transform template (`TaxpayerLookupFunction` has `Type: AWS::Lambda::Function`), so you cannot inspect what was actually submitted. To keep the smoke script usable in both worlds without a second drifting copy, `scripts/sam-smoke.sh` gained two overrides that both default to real-AWS behaviour: `HTTP_API_URL` (bypass Outputs resolution) and `EXPECT_RUNTIME_REPORT` (skip the REPORT assertion). Never set the latter to `false` for a real AWS run — that check is what catches a function and a log group that have drifted apart.
+
+(Unrelated local-environment note, no repo change: this laptop sits behind Zscaler TLS interception whose root CA is in the macOS System keychain but in no JDK truststore, so Maven Central and Gradle only resolve with `-Djavax.net.ssl.trustStore` pointed at a keychain-derived store. GitHub Actions runners are unaffected.)
+
+What *was* run and did pass, locally:
+
+```bash
+sam validate --lint --region us-east-1   # -> "template.yaml is a valid SAM Template"
+mvn -B -ntp test                         # -> Tests run: 13, Failures: 0, Errors: 0
+mvn -B -ntp package                      # -> target/taxcalc-taxpayer-lookup-1.0.0.jar (the deployment artefact)
+sam build && sam build --use-container   # -> Build Succeeded, both exit 0 (SkipBuild stages the jar)
+sam local invoke TaxpayerLookupFunction --event events/get-taxpayer.json \
+  --env-vars local-env.json --docker-network bridge
+# -> {"statusCode": 200, ..., "body": "{\"id\":\"txp_synth_001\",...,\"totalLiability\":14235.50}"}
+#    With DYNAMODB_ENDPOINT_OVERRIDE pointed at a seeded local DynamoDB. Without it the same
+#    command still exits 0 but returns a shaped 500, since the GetItem reaches real AWS and is
+#    rejected for want of credentials.
+./gradlew compileJava compileTestJava    # -> BUILD SUCCESSFUL; the Gradle/Maven split holds
+```
+
+All three build commands now exit 0 on this machine, `--use-container` included. It previously did not: with a containerised Maven build, dependency resolution died on this laptop's Zscaler TLS interception (`PKIX path building failed ... unable to find valid certification path`), because the build container's truststore has no corporate root CA. `SkipBuild` removed the containerised Maven run entirely — there is nothing left inside the container to download.
+
+```bash
+./scripts/sam-deploy.sh    # sam validate --lint -> sam build --use-container -> sam deploy -> print Outputs
+./scripts/sam-smoke.sh     # resolve HttpApiUrl from stack Outputs; known-good path + correlation-id echo, route-miss 404, CloudWatch REPORT check
+sam delete --stack-name taxcalc-lambda-dev --region "$AWS_REGION"   # teardown is part of the deliverable, not an afterthought
+```
+
 ## Build and Test
 
 ```bash
-./gradlew build   # compile and run all checks
+./gradlew build   # compile and run all checks (the Spring Boot service)
 ./gradlew test    # run the JUnit 5 test suite
+```
+
+```bash
+# The W5 D4 Lambda is a separate Maven build over com.uptimecrew.tax_liability.lambda only.
+mvn -B -ntp test                          # JUnit 5 + Mockito + AssertJ, no AWS needed
+sam validate --lint --region us-east-1    # cfn-lint over the transformed template
+sam build --use-container                 # build inside the AWS Lambda java21 parity image
+sam local invoke TaxpayerLookupFunction --event events/get-taxpayer.json
 ```
 
 ```bash

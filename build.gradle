@@ -33,6 +33,26 @@ repositories {
     mavenCentral()
 }
 
+// The W5 D4 serverless slice (com.uptimecrew.tax_liability.lambda) is built by pom.xml, not by
+// Gradle: it is packaged as a shaded jar for the AWS Lambda java21 runtime and its dependency
+// closure (aws-lambda-java-events + the DynamoDB SDK, no Spring at all) has nothing in common
+// with this application's. Leaving it in Gradle's source sets would only mean adding the whole
+// AWS SDK to the Boot application's classpath - and to its Docker image - to compile code the
+// application never loads. Excluded from `test` too, so the JaCoCo branch-coverage floor keeps
+// measuring the service, not a handler Maven already tests.
+sourceSets {
+    main {
+        java {
+            exclude 'com/uptimecrew/tax_liability/lambda/**'
+        }
+    }
+    test {
+        java {
+            exclude 'com/uptimecrew/tax_liability/lambda/**'
+        }
+    }
+}
+
 // Trivy (docker/SECURITY.md scan) flagged HIGH/CRITICAL CVEs against the Tomcat and Netty
 // versions Spring Boot 3.3.13's BOM manages by default. Both projects publish patch releases
 // within their existing 3.3-compatible lines (10.1.x, 4.1.x respectively), so Spring Boot's

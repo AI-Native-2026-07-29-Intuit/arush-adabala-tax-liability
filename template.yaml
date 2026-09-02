@@ -1,0 +1,179 @@
+# template.yaml - the SAM stack for the taxcalc-taxpayer-lookup Lambda (W5 D4).
+#
+# One HTTP API + one DynamoDB table + one Function + one explicit LogGroup + one p99 alarm, in a
+# single CloudFormation stack. The AWS::Serverless-2016-10-31 transform expands AWS::Serverless::*
+# into the full graph (the Function's execution role, the Lambda permission API Gateway needs to
+# invoke it, the version/alias pair AutoPublishAlias implies, and the route/integration wiring)
+# at change-set time.
+#
+# Every resource here is owned by the stack, which is the entire point: `sam delete` takes the
+# table, the API, the function, the log group, the alarm, and the generated IAM role with it.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  taxcalc-taxpayer-lookup Lambda + HTTP API + DynamoDB read model
+  (Week 5 Day 4 capstone deliverable).
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stage, prod]
+    Description: Deployment stage; suffixes every physical resource name.
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch log retention. Explicit, because the implicit default is "Never expire".
+
+Globals:
+  Function:
+    Runtime: java21
+    MemorySize: 1024
+    Timeout: 10
+    # arm64 (Graviton2): ~20% cheaper per GB-second than x86_64 and, for a JIT-heavy Java 21
+    # workload, no slower.
+    Architectures: [arm64]
+    # X-Ray on every function. W5 D5 layers AWS Distro for OpenTelemetry on top of these
+    # subsegments, feeding the same Jaeger/Prometheus/Loki stack the K8s side already talks to.
+    Tracing: Active
+    LoggingConfig:
+      # Advanced logging controls: the runtime emits a JSON envelope per log line instead of a
+      # plain-text one, so CloudWatch Logs Insights can filter on fields rather than regexes.
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      # WARN, not INFO: the runtime's own START/END/REPORT lines are always emitted regardless,
+      # and INFO-level system logs add per-invocation noise with no diagnostic value here.
+      SystemLogLevel: WARN
+    Environment:
+      Variables:
+        ENV: !Ref StageName
+
+Resources:
+
+  # --- API Gateway HTTP API (v2; cheaper and simpler than REST v1) ------------------------------
+  # Declared explicitly rather than left to SAM's implicit "ServerlessHttpApi": an implicit API
+  # cannot be given its own properties (throttling, a custom domain, an access-log destination)
+  # without first being made explicit, so it starts explicit.
+  TaxcalcHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+
+  # --- DynamoDB read model ---------------------------------------------------------------------
+  TaxpayersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "taxpayers-${StageName}"
+      # PAY_PER_REQUEST: no capacity planning, and no idle cost between the handful of
+      # invocations this stack sees between `sam deploy` and `sam delete`.
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: id, KeyType: HASH }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # --- The Function ----------------------------------------------------------------------------
+  TaxpayerLookupFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      # The deployment artefact is the shaded jar Maven already produces, so `sam build` has
+      # nothing to do but carry it through. SkipBuild says exactly that.
+      SkipBuild: true
+    Properties:
+      FunctionName: !Sub "taxcalc-taxpayer-lookup-${StageName}"
+      Handler: com.uptimecrew.tax_liability.lambda.TaxpayerLookupHandler::handleRequest
+      CodeUri: target/taxcalc-taxpayer-lookup-1.0.0.jar
+      SnapStart:
+        # A JVM snapshot is taken after INIT and restored on cold start, so the handler's
+        # `private static final` fields (SDK client, ObjectMapper, env reads) are paid for once
+        # at publish time rather than on every cold invocation.
+        ApplyOn: PublishedVersions
+      # REQUIRED, not cosmetic: SnapStart only ever applies to published versions. Without an
+      # alias the HttpApi integration targets $LATEST, which never has a snapshot - SnapStart
+      # would read as "enabled" in the console and do nothing at all. With the alias set, SAM
+      # points the integration at the alias and each deploy publishes a new version behind it.
+      AutoPublishAlias: live
+      Environment:
+        Variables:
+          # Externalised config only - the handler hardcodes neither the table name nor a region
+          # (AWS_REGION is supplied by the runtime).
+          TAXPAYERS_TABLE: !Ref TaxpayersTable
+          # The EMF namespace the handler stamps onto its custom metrics. An env var rather than
+          # a constant so a stage can be split out of the shared namespace without a code change.
+          METRICS_NAMESPACE: TaxcalcDev
+          # Empty in every deployed stage; the handler skips a blank value and uses normal AWS
+          # endpoint resolution. Declared only so `sam local invoke --env-vars` can override it -
+          # SAM silently drops any variable the template does not already declare, so an
+          # undeclared name cannot be injected locally at all.
+          #
+          # NOT named AWS_ENDPOINT_URL_DYNAMODB on purpose. The SDK reads that variable itself,
+          # and declaring it empty made every deployed call fail with "protocol must not be null"
+          # (an empty endpoint has no scheme). A name only our own code reads is safe to leave
+          # blank.
+          DYNAMODB_ENDPOINT_OVERRIDE: ""
+      Policies:
+        # Least-privilege: SAM's DynamoDBReadPolicy connector expands to the specific read verbs
+        # (GetItem, BatchGetItem, Query, Scan, ...) scoped to this one table's ARN plus its index
+        # ARN. NOT a hand-written `dynamodb:*` statement, NOT AmazonDynamoDBFullAccess, and NOT
+        # Resource: "*" - `aws iam get-role-policy` on the generated role is a graded artefact
+        # precisely because those three are the usual shortcuts.
+        - DynamoDBReadPolicy:
+            TableName: !Ref TaxpayersTable
+      Events:
+        GetTaxpayer:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref TaxcalcHttpApi
+            Method: GET
+            Path: /taxpayers/{taxpayerId}
+
+  # --- Explicit LogGroup -----------------------------------------------------------------------
+  # Without this the runtime auto-creates /aws/lambda/<fn> on first invocation with retention
+  # "Never expire", and that group is not owned by the stack - so `sam delete` leaves it (and its
+  # bill) behind. Declaring it makes retention explicit AND makes teardown complete.
+  TaxpayerLookupFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/taxcalc-taxpayer-lookup-${StageName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # --- p99 latency alarm -----------------------------------------------------------------------
+  TaxpayerLookupFunctionP99Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "taxcalc-taxpayer-lookup-p99-${StageName}"
+      AlarmDescription: >
+        p99 invocation duration above 1.5s over 5 consecutive minutes - the cold-start tail
+        SnapStart is meant to be flattening.
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions: [{ Name: FunctionName, Value: !Ref TaxpayerLookupFunction }]
+      # ExtendedStatistic: p99, NOT Statistic: Average. The Lambda console defaults to Average,
+      # which is exactly the view that hides a cold-start tail: a handful of multi-second restores
+      # averaged against hundreds of 40ms warm invocations never crosses any threshold worth
+      # setting. Always alarm on the SLO percentile.
+      ExtendedStatistic: p99
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1500
+      ComparisonOperator: GreaterThanThreshold
+      # A function with no traffic emits no Duration datapoints at all; without this the alarm
+      # sits in INSUFFICIENT_DATA rather than OK whenever the stack is idle.
+      TreatMissingData: notBreaching
+
+Outputs:
+  HttpApiUrl:
+    Description: Base URL of the HTTP API stage.
+    Value: !Sub "https://${TaxcalcHttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  FunctionName:
+    Description: The deployed function's physical name.
+    Value: !Ref TaxpayerLookupFunction
+  TableName:
+    Description: The DynamoDB read-model table backing the lookup.
+    Value: !Ref TaxpayersTable
+  P99AlarmName:
+    Description: The p99 latency alarm guarding the cold-start tail.
+    Value: !Ref TaxpayerLookupFunctionP99Alarm

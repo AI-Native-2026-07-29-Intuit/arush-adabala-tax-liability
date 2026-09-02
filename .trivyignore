@@ -14,6 +14,20 @@
 # OS package (liblcms2-2, base image - gcr.io/distroless/java-base-debian12)
 CVE-2026-41254 exp:2026-09-27
 
+# OS package (libexpat1, base image - gcr.io/distroless/java-base-debian12).
+# Added 2026-09-02. Published after the 2026-08-27 waiver, which is why this file
+# needed a second pass rather than being wrong originally: the CI gate went red on
+# a branch that changed nothing in the image. Confirmed environmental, not a
+# regression - re-running main's own last-green docker run (33534774002, commit
+# f55a156) against the same day's Trivy DB reproduced the identical failure.
+#
+# Cannot be fixed by bumping the base digest: 2.5.0-1+deb12u3 carries the fix, but
+# `gcr.io/distroless/java-base-debian12:nonroot` still resolves to the exact digest
+# already pinned here (sha256:a9930cad...), i.e. Google has not published a rebuilt
+# image yet. Re-check on the expiry date; if a newer digest exists by then, bump the
+# pin in the Dockerfile instead of renewing this line.
+CVE-2026-56408 exp:2026-09-27
+
 # commons-fileupload, commons-io
 CVE-2025-48976 exp:2026-09-27
 CVE-2024-47554 exp:2026-09-27
