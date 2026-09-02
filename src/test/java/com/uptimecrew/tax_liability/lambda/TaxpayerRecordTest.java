@@ -136,6 +136,25 @@ class TaxpayerRecordTest {
     }
 
     @Test
+    void rejectsAFractionalTaxYearAsAnIllegalArgument() {
+        // BigDecimal.intValueExact() throws ArithmeticException, which is NOT an
+        // IllegalArgumentException - so a row stored with a fractional taxYear escaped the
+        // handler's catch entirely and ended the invocation as an unhandled Lambda error:
+        // an opaque 5xx with no body and no correlation id.
+        Map<String, AttributeValue> fractionalYear = Map.of(
+                "taxYear", n("2025.5"),
+                "bracketId", s("brk-fed-2025-22"),
+                "taxableAmount", n("100.00"),
+                "liabilityAmount", n("10.00"),
+                "computedAt", s("2026-01-20T08:00:00Z"));
+
+        assertThatThrownBy(() -> TaxpayerRecord.LiabilityLine.fromItem(fractionalYear))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("taxYear")
+                .hasCauseInstanceOf(ArithmeticException.class);
+    }
+
+    @Test
     void rejectsANegativeLiabilityAmount() {
         assertThatThrownBy(() -> new TaxpayerRecord.LiabilityLine(
                 2025, "brk-fed-2025-22",

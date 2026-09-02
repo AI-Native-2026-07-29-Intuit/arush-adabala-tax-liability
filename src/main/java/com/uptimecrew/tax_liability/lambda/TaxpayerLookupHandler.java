@@ -2,6 +2,8 @@ package com.uptimecrew.tax_liability.lambda;
 
 import java.lang.management.ManagementFactory;
 import java.net.URI;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -10,6 +12,7 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -18,7 +21,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
-import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -59,6 +61,12 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
 
     /** Fallback namespace when {@code METRICS_NAMESPACE} is unset (i.e. outside the SAM stack). */
     private static final String DEFAULT_METRICS_NAMESPACE = "TaxcalcDev";
+
+    /** The single EMF dimension key; also a top-level member of the document, as EMF requires. */
+    private static final String DIMENSION_STAGE = "Stage";
+
+    /** Cap on a caller-supplied correlation id. Long enough for a UUID or an X-Ray trace id. */
+    private static final int MAX_CORRELATION_ID_LENGTH = 128;
 
     // --- INIT PHASE: everything below runs once per execution environment. -------------------
 
@@ -110,14 +118,7 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     private APIGatewayV2HTTPResponse handleRequestInternal(
             APIGatewayV2HTTPEvent event, Context ctx, String correlationId) {
         if (COLD_START.compareAndSet(true, false)) {
-            // JVM uptime at the first invocation is a close stand-in for the INIT phase AWS
-            // reports as `Init Duration`: everything from process start through class loading and
-            // this class's static initialisers has already happened by the time we get here.
-            // Emitted because the local Runtime Interface Emulator does NOT populate the real
-            // Init Duration field (it reports ~0.01ms and folds the cost into Duration instead),
-            // so without this there is no way to separate startup cost from handler cost off-AWS.
-            LOG.info("cold start initDurationMs={}",
-                    ManagementFactory.getRuntimeMXBean().getUptime());
+            reportColdStart();
         }
 
         String taxpayerId = Optional.ofNullable(event)
@@ -135,15 +136,18 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         TaxpayerRecord record;
         try {
             record = loadFromDynamo(taxpayerId);
-        } catch (SdkException | IllegalStateException | IllegalArgumentException e) {
+        } catch (RuntimeException e) {
             // Letting any of these propagate would end the invocation as an unhandled Lambda
             // error, and API Gateway turns that into an opaque 5xx with no body and, critically,
             // no x-correlation-id header - losing the trace at exactly the point the caller most
             // needs it. Confirmed against `sam local invoke`, where an invalid token surfaced as
             // a raw DynamoDbException stack trace instead of an HTTP response.
-            // IllegalArgumentException covers the other half: a row written with a missing or
-            // mistyped attribute is a data problem, not a client problem, so it is a 500 too -
-            // but a *shaped* one that still says which request it happened on.
+            // RuntimeException, not an enumerated list. The list was SdkException |
+            // IllegalStateException | IllegalArgumentException, and an ArithmeticException from
+            // BigDecimal.intValueExact() (a row with a fractional taxYear) slipped straight past
+            // it - reintroducing the exact bug this catch exists to prevent. Any failure mapping
+            // a stored row is a data problem, and every one of them should become a shaped 500
+            // that still names the request rather than an opaque 5xx with no correlation id.
             LOG.error("dynamodb lookup failed taxpayerId={}", taxpayerId, e);
             return errorResponse(500, "taxpayer lookup failed", correlationId);
         }
@@ -171,6 +175,37 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     }
 
     /**
+     * Logs the INIT cost once per execution environment.
+     *
+     * <p>JVM uptime at the first invocation stands in for the phase AWS reports as
+     * {@code Init Duration}, which the local Runtime Interface Emulator does not populate (it
+     * reports ~0.01ms and folds the cost into {@code Duration}) - so without this there is no way
+     * to separate startup cost from handler cost off-AWS.
+     *
+     * <p><strong>It is deliberately not reported on a SnapStart restore.</strong> The snapshot is
+     * taken after INIT, so a restored environment resumes a JVM whose start time predates the
+     * snapshot: {@code getUptime()} would include however long the snapshot sat in storage, which
+     * could be hours. AWS reports {@code Restore Duration} on the REPORT line for that case, and
+     * that is the number to read.
+     *
+     * <p>{@code AWS_LAMBDA_INITIALIZATION_TYPE} is read here rather than cached in a static field
+     * for the same reason the metric is suppressed: a static read happens during INIT, before the
+     * snapshot, so it would be frozen as {@code on-demand} and every restored environment would
+     * report the wrong type.
+     */
+    private static void reportColdStart() {
+        String initType = Optional.ofNullable(System.getenv("AWS_LAMBDA_INITIALIZATION_TYPE"))
+                .orElse("unknown");
+        if ("snap-start".equals(initType)) {
+            LOG.info("cold start initializationType={} (init duration not reported; "
+                    + "read Restore Duration from the REPORT line)", initType);
+        } else {
+            LOG.info("cold start initializationType={} initDurationMs={}",
+                    initType, ManagementFactory.getRuntimeMXBean().getUptime());
+        }
+    }
+
+    /**
      * Resolves the id this request is traced by: the caller's {@code x-correlation-id} header when
      * present, otherwise the Lambda request id.
      *
@@ -188,11 +223,45 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         String fromHeader = Optional.ofNullable(event)
                 .map(APIGatewayV2HTTPEvent::getHeaders)
                 .map(TaxpayerLookupHandler::findCorrelationHeader)
+                .map(TaxpayerLookupHandler::sanitiseCorrelationId)
                 .orElse(null);
         if (fromHeader != null && !fromHeader.isBlank()) {
             return fromHeader;
         }
-        return ctx == null ? "no-context" : ctx.getAwsRequestId();
+        // getAwsRequestId() is never null on a real invocation, but a null here would reach
+        // Map.of() when the response headers are built, and Map.of rejects null values - turning
+        // a missing id into a NullPointerException instead of a degraded response.
+        String requestId = ctx == null ? null : ctx.getAwsRequestId();
+        return requestId == null || requestId.isBlank() ? "no-context" : requestId;
+    }
+
+    /**
+     * Constrains a caller-supplied correlation id to characters that are safe everywhere it is
+     * subsequently placed.
+     *
+     * <p>This value arrives in a request header, so it is attacker-controlled, and it ends up in
+     * three places that all trust it: an HTTP response header, a JSON response body, and the EMF
+     * metric document. Serialising the latter two through Jackson (see {@link #errorResponse} and
+     * {@link #buildEmf}) already prevents structural injection, but a correlation id has no
+     * legitimate need for quotes, braces or control characters, and a CR/LF would still be a
+     * header-splitting attempt. Constraining it at the boundary is the cheaper guarantee.
+     *
+     * @param raw the header value; may be null
+     * @return the id with unsafe characters removed and length capped, or {@code null} if nothing
+     *         usable remains - in which case the caller falls back to the Lambda request id
+     */
+    private static String sanitiseCorrelationId(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        // Deliberately an allow-list. A deny-list of "dangerous" characters is the thing that
+        // gets outgrown; the set below covers every id format actually in use here (UUIDs,
+        // `ci-smoke-<epoch>`, `probe-123`, X-Ray trace ids).
+        String cleaned = raw.replaceAll("[^A-Za-z0-9_.:@=+/-]", "");
+        if (cleaned.length() > MAX_CORRELATION_ID_LENGTH) {
+            cleaned = cleaned.substring(0, MAX_CORRELATION_ID_LENGTH);
+        }
+        return cleaned.isBlank() ? null : cleaned;
     }
 
     private static String findCorrelationHeader(Map<String, String> headers) {
@@ -236,12 +305,29 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
 
     private APIGatewayV2HTTPResponse errorResponse(int status, String msg, String correlationId) {
         LOG.warn("error response status={} msg={}", status, msg);
+        String body;
+        try {
+            // Serialised, NOT concatenated. correlationId originates in a request header, and
+            // string-building this document let a caller sending `","x":"` inject arbitrary keys
+            // into the response body.
+            // LinkedHashMap, not Map.of: Map.of iteration order is unspecified and would make
+            // the error body's key order vary between invocations for no reason.
+            Map<String, String> payload = new LinkedHashMap<>();
+            payload.put("error", msg);
+            payload.put("correlationId", correlationId);
+            body = JSON.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            // A constant, so this cannot recurse back into errorResponse the way calling the
+            // serialiser again would.
+            LOG.error("could not serialise error body", e);
+            body = "{\"error\":\"internal error\"}";
+        }
         return APIGatewayV2HTTPResponse.builder()
                 .withStatusCode(status)
                 .withHeaders(Map.of(
                         "Content-Type", "application/json",
                         CORRELATION_ID_HEADER, correlationId))
-                .withBody("{\"error\":\"" + msg + "\",\"correlationId\":\"" + correlationId + "\"}")
+                .withBody(body)
                 .build();
     }
 
@@ -279,15 +365,34 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
      * @return a single-line EMF document
      */
     static String buildEmf(String metricName, String correlationId, long timestampMs) {
-        // Hand-written rather than pulled in via aws-lambda-powertools-metrics: that library's
-        // ergonomic path is an @Metrics annotation woven by aspectj, i.e. a build plugin plus a
-        // runtime weaving agent added to a function whose entire metric surface is two counters.
-        return "{\"_aws\":{\"Timestamp\":" + timestampMs
-                + ",\"CloudWatchMetrics\":[{\"Namespace\":\"" + METRICS_NAMESPACE
-                + "\",\"Dimensions\":[[\"Stage\"]],\"Metrics\":[{\"Name\":\"" + metricName
-                + "\",\"Unit\":\"Count\"}]}]},\"Stage\":\"" + STAGE
-                + "\",\"correlationId\":\"" + correlationId
-                + "\",\"" + metricName + "\":1}";
+        // Built as a map and serialised, NOT concatenated. correlationId originates in a request
+        // header: with string-building, a caller sending
+        //   x-correlation-id: ","TaxpayerLookupSuccess":999,"junk":"
+        // injected a second TaxpayerLookupSuccess key into the document and could forge the
+        // metric value, since duplicate-key resolution is parser-defined. An unbalanced quote was
+        // worse still - invalid JSON, and CloudWatch drops the metric with no error anywhere.
+        //
+        // A library (aws-lambda-powertools-metrics) is still not warranted for two counters, but
+        // hand-assembling the *structure* was the wrong economy; only the shape is ours now.
+        Map<String, Object> directive = Map.of(
+                "Namespace", METRICS_NAMESPACE,
+                "Dimensions", List.of(List.of(DIMENSION_STAGE)),
+                "Metrics", List.of(Map.of("Name", metricName, "Unit", "Count")));
+
+        // LinkedHashMap: EMF does not require key order, but keeping _aws first keeps the line
+        // readable in a log tail, which is where these are actually eyeballed.
+        Map<String, Object> document = new LinkedHashMap<>();
+        document.put("_aws", Map.of("Timestamp", timestampMs, "CloudWatchMetrics", List.of(directive)));
+        document.put(DIMENSION_STAGE, STAGE);
+        document.put("correlationId", correlationId);
+        document.put(metricName, 1);
+
+        try {
+            return JSON.writeValueAsString(document);
+        } catch (JsonProcessingException e) {
+            LOG.error("could not serialise EMF payload for metric={}", metricName, e);
+            return null;
+        }
     }
 
     /**
@@ -364,10 +469,14 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
         // "SdkClientException: Unable to marshall request to JSON: protocol must not be null".
         // A name only this code reads can be declared empty harmlessly. The AWS-standard names
         // are still honoured as fallbacks for anyone who sets them properly.
+        // Deliberately NOT falling back to the global AWS_ENDPOINT_URL: that variable redirects
+        // every service, so anything setting it for an unrelated reason would silently reroute
+        // DynamoDB traffic too. The service-specific name is the only safe one to honour, and the
+        // SDK reads it natively anyway - this call is what lets `sam local invoke` inject an
+        // override through a name the template declares.
         String endpoint = firstNonBlank(
                 System.getenv("DYNAMODB_ENDPOINT_OVERRIDE"),
-                System.getenv("AWS_ENDPOINT_URL_DYNAMODB"),
-                System.getenv("AWS_ENDPOINT_URL"));
+                System.getenv("AWS_ENDPOINT_URL_DYNAMODB"));
         if (endpoint != null) {
             LOG.info("using DynamoDB endpoint override endpoint={}", endpoint);
             builder.endpointOverride(URI.create(endpoint));

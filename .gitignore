@@ -13,6 +13,9 @@ secrets/*
 compose-logs.txt
 
 # SAM build state (W5 D4). NEVER commit any of these.
+# (`/tmp/sam-smoke-body` is kept verbatim from the deliverable's appendix. Note a leading slash
+#  anchors to the repo root, so it matches <repo>/tmp/... rather than the real /tmp - and
+#  sam-smoke.sh uses mktemp now anyway, so it matches nothing. Harmless, left for parity.)
 .aws-sam/
 samconfig.toml
 events/*.local.json

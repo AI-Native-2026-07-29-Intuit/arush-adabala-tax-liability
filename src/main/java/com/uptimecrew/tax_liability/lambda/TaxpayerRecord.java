@@ -236,7 +236,7 @@ public final class TaxpayerRecord {
         public static LiabilityLine fromItem(Map<String, AttributeValue> item) {
             Objects.requireNonNull(item, "item must not be null");
             return new LiabilityLine(
-                    Integer.valueOf(requiredNumber(item, "taxYear").intValueExact()),
+                    requiredWholeNumber(item, "taxYear"),
                     requiredString(item, "bracketId"),
                     requiredNumber(item, "taxableAmount"),
                     requiredNumber(item, "liabilityAmount"),
@@ -287,6 +287,29 @@ public final class TaxpayerRecord {
             return "LiabilityLine{taxYear=" + taxYear + ", bracketId=" + bracketId
                     + ", taxableAmount=" + taxableAmount + ", liabilityAmount=" + liabilityAmount
                     + ", computedAt=" + computedAt + "}";
+        }
+
+        /**
+         * Reads a numeric attribute that must have no fractional part.
+         *
+         * @param item the attribute map
+         * @param key  the attribute name
+         * @return the value as an {@link Integer}
+         * @throws IllegalArgumentException if the attribute is missing, not a number, or has a
+         *         fractional part. That last case is why this exists: {@code intValueExact()}
+         *         throws {@link ArithmeticException}, which is neither an
+         *         {@code IllegalArgumentException} nor anything else the handler used to catch,
+         *         so a row stored with {@code taxYear: 2025.5} escaped as an unhandled Lambda
+         *         error - an opaque 5xx with no correlation id.
+         */
+        private static Integer requiredWholeNumber(Map<String, AttributeValue> item, String key) {
+            BigDecimal value = requiredNumber(item, key);
+            try {
+                return value.intValueExact();
+            } catch (ArithmeticException e) {
+                throw new IllegalArgumentException(
+                        "attribute " + key + " is not a whole number: " + value, e);
+            }
         }
 
         private static BigDecimal requiredNumber(Map<String, AttributeValue> item, String key) {

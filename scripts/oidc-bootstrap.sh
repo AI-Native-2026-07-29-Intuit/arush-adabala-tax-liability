@@ -91,7 +91,13 @@ fi
 # 3. Deploy permissions. Scoped to the services this stack actually creates rather than
 #    PowerUserAccess - the same least-privilege argument as the function's own execution role,
 #    applied to the thing that builds it. iam:* is unavoidable here because the SAM transform
-#    generates the execution role, but it is scoped to this account's roles.
+#    generates the execution role, but it is scoped to role/taxcalc-lambda-*.
+#
+#    NOTE the deliberate looseness: the first statement uses Resource "*". A deploy role has to
+#    create resources whose ARNs do not exist yet, so it cannot be ARN-scoped the way the
+#    function's execution role is. The boundary that matters for this role is the TRUST policy
+#    above - only this repo, on this branch, can assume it - not the permission set. If you want
+#    it tighter, add aws:ResourceTag conditions and tag the stack.
 DEPLOY_POLICY=$(cat <<'JSON'
 {
   "Version": "2012-10-17",

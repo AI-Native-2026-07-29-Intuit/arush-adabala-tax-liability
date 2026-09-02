@@ -99,6 +99,65 @@ class TaxpayerLookupHandlerTest {
     }
 
     @Test
+    void hostileCorrelationIdCannotInjectKeysIntoTheEmfDocument() throws Exception {
+        // The header is attacker-controlled. When this document was built by string concatenation,
+        // this exact value injected a second "TaxpayerLookupSuccess": 999 key and let a caller
+        // forge the metric value, since duplicate-key resolution is parser-defined.
+        String hostile = "\",\"TaxpayerLookupSuccess\":999,\"junk\":\"";
+
+        String emf = TaxpayerLookupHandler.buildEmf("TaxpayerLookupSuccess", hostile, 1_788_300_000_000L);
+        JsonNode root = new ObjectMapper().readTree(emf);
+
+        // The metric keeps the value WE set, and the hostile text stays inside a single string.
+        assertThat(root.path("TaxpayerLookupSuccess").asInt()).isEqualTo(1);
+        assertThat(root.path("correlationId").asText()).isEqualTo(hostile);
+        assertThat(root.has("junk")).isFalse();
+    }
+
+    @Test
+    void hostileCorrelationIdIsStrippedBeforeItReachesHeadersOrBody() {
+        APIGatewayV2HTTPEvent event = new APIGatewayV2HTTPEvent();
+        // Quotes would corrupt a concatenated JSON body; CR/LF is a header-splitting attempt.
+        event.setHeaders(Map.of(TaxpayerLookupHandler.CORRELATION_ID_HEADER,
+                "abc\",\"evil\":\"x\r\nX-Injected: 1"));
+
+        APIGatewayV2HTTPResponse resp = handler.handleRequest(event, ctx);
+
+        String echoed = resp.getHeaders().get(TaxpayerLookupHandler.CORRELATION_ID_HEADER);
+        assertThat(echoed).doesNotContain("\"").doesNotContain("\r").doesNotContain("\n");
+        // ':' survives on purpose - it is legal in a correlation id (X-Ray trace ids use it) and
+        // harmless in both a header value and a JSON string. Quotes and CR/LF do not.
+        assertThat(echoed).isEqualTo("abcevil:xX-Injected:1");
+    }
+
+    @Test
+    void errorBodyStaysWellFormedJsonForAnyCorrelationId() throws Exception {
+        APIGatewayV2HTTPEvent event = new APIGatewayV2HTTPEvent();
+        event.setHeaders(Map.of(TaxpayerLookupHandler.CORRELATION_ID_HEADER, "probe-9"));
+
+        APIGatewayV2HTTPResponse resp = handler.handleRequest(event, ctx);
+        JsonNode body = new ObjectMapper().readTree(resp.getBody());
+
+        assertThat(body.path("error").asText()).isEqualTo("missing taxpayerId path parameter");
+        assertThat(body.path("correlationId").asText()).isEqualTo("probe-9");
+    }
+
+    @Test
+    void fallsBackToNoContextWhenTheRequestIdIsNull() {
+        // Map.of rejects null values, so a null request id used to surface as a
+        // NullPointerException while the response headers were being built.
+        Context nullIdCtx = Mockito.mock(Context.class);
+        Mockito.when(nullIdCtx.getAwsRequestId()).thenReturn(null);
+        Mockito.when(nullIdCtx.getRemainingTimeInMillis()).thenReturn(9_000);
+
+        APIGatewayV2HTTPResponse resp = handler.handleRequest(new APIGatewayV2HTTPEvent(), nullIdCtx);
+
+        assertThat(resp.getStatusCode()).isEqualTo(400);
+        assertThat(resp.getHeaders())
+                .containsEntry(TaxpayerLookupHandler.CORRELATION_ID_HEADER, "no-context");
+    }
+
+    @Test
     void emfPayloadIsWellFormedJsonWithAwsAtTheRoot() throws Exception {
         // The one piece of hand-assembled JSON in this codebase, and its failure mode is silent:
         // CloudWatch accepts a malformed EMF line as an ordinary log event and simply publishes
