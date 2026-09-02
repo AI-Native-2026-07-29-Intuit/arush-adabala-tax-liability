@@ -91,6 +91,41 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
      */
     private static final AtomicBoolean COLD_START = new AtomicBoolean(true);
 
+    // --- Per-instance collaborators, defaulted to the INIT-phase singletons above -------------
+    //
+    // These exist so the DynamoDB paths can be tested. The fields above stay `private static
+    // final` - the INIT phase still builds the client exactly once per execution environment and
+    // SnapStart still snapshots it - but reading them through instance fields gives a seam a test
+    // can substitute. Without it, `handleRequest`'s 200 and 404 branches are unreachable from a
+    // unit test: the client is a static built during class initialisation, so there is nothing to
+    // mock, and the table name is a static env read that is null off-Lambda.
+    //
+    // That gap was real and shipped: every test exercised only the 400 path and the
+    // correlation-id logic, and the omission was rationalised in a comment as "the DynamoDB read
+    // is covered by the smoke script against a deployed stack" - which was hollow, because no
+    // deployed stack existed. A structural limitation had been written up as a testing strategy.
+
+    private final DynamoDbClient dynamo;
+
+    private final String tableName;
+
+    /** The constructor the Lambda runtime uses; binds the INIT-phase singletons. */
+    public TaxpayerLookupHandler() {
+        this(DDB, TABLE);
+    }
+
+    /**
+     * Test seam. Package-private on purpose: it is not part of the function's contract with the
+     * runtime, which only ever calls the no-arg constructor.
+     *
+     * @param dynamo    the DynamoDB client to read through
+     * @param tableName the table to read from; may be null, which surfaces as a shaped 500
+     */
+    TaxpayerLookupHandler(DynamoDbClient dynamo, String tableName) {
+        this.dynamo = dynamo;
+        this.tableName = tableName;
+    }
+
     /**
      * Handles one API Gateway HTTP API (payload format 2.0) request.
      *
@@ -282,21 +317,21 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
      *                               could be built (i.e. the function is misconfigured)
      */
     private TaxpayerRecord loadFromDynamo(String id) {
-        if (TABLE == null || TABLE.isBlank()) {
+        if (tableName == null || tableName.isBlank()) {
             throw new IllegalStateException("TAXPAYERS_TABLE env var is not set");
         }
-        if (DDB == null) {
+        if (dynamo == null) {
             throw new IllegalStateException("no DynamoDB client: AWS region could not be resolved at INIT");
         }
         GetItemRequest req = GetItemRequest.builder()
-                .tableName(TABLE)
+                .tableName(tableName)
                 .key(Map.of("id", AttributeValue.builder().s(id).build()))
                 // Eventually-consistent: this is a read-only lookup of a projection that is
                 // itself asynchronously updated, and a consistent read costs double the RCUs
                 // for a freshness guarantee the upstream pipeline cannot provide anyway.
                 .consistentRead(false)
                 .build();
-        GetItemResponse resp = DDB.getItem(req);
+        GetItemResponse resp = dynamo.getItem(req);
         if (!resp.hasItem() || resp.item().isEmpty()) {
             return null;
         }
