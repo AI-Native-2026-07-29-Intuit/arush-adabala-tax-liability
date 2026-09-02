@@ -83,9 +83,21 @@ jobs:
       # statusCode key rather than for a specific status.
       - name: sam local invoke (integration test against handler)
         run: |
+          # Point DynamoDB at a closed port so the GetItem fails on connection-refused
+          # immediately. Without this the SDK reaches real AWS, retries against absent
+          # credentials, and the function blows its 10s timeout - which under QEMU it
+          # cannot afford: emulated arm64 JVM init alone measures ~8.2s here versus
+          # ~1.2s native, leaving under 2s of budget for the invocation itself.
+          cat > /tmp/ci-env.json <<'JSON'
+          { "TaxpayerLookupFunction": { "DYNAMODB_ENDPOINT_OVERRIDE": "http://127.0.0.1:1" } }
+          JSON
           sam local invoke TaxpayerLookupFunction \
             --event events/get-taxpayer.json \
+            --env-vars /tmp/ci-env.json \
             | tee /tmp/local-invoke.json
+          # The assertion is that the Handler string resolved to a loadable class and a
+          # well-formed HTTP response came back - not a particular status. This job has no
+          # DynamoDB, so a shaped 500 is the correct outcome here.
           grep -q '"statusCode"' /tmp/local-invoke.json
 
       # Task 4 asks for a deliberately-broken template to fail this job AND leave
