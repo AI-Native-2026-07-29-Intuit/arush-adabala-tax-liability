@@ -1,8 +1,10 @@
 package com.uptimecrew.tax_liability.lambda;
 
+import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
@@ -80,6 +82,12 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
     private static final String STAGE = Optional.ofNullable(System.getenv("ENV")).orElse("unknown");
 
     /**
+     * Flips false on the first invocation in this execution environment, so the INIT cost is
+     * reported exactly once rather than on every warm call.
+     */
+    private static final AtomicBoolean COLD_START = new AtomicBoolean(true);
+
+    /**
      * Handles one API Gateway HTTP API (payload format 2.0) request.
      *
      * @param event the proxy event; its {@code pathParameters} must carry {@code taxpayerId}
@@ -105,6 +113,17 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
 
     private APIGatewayV2HTTPResponse handleRequestInternal(
             APIGatewayV2HTTPEvent event, Context ctx, String correlationId) {
+        if (COLD_START.compareAndSet(true, false)) {
+            // JVM uptime at the first invocation is a close stand-in for the INIT phase AWS
+            // reports as `Init Duration`: everything from process start through class loading and
+            // this class's static initialisers has already happened by the time we get here.
+            // Emitted because the local Runtime Interface Emulator does NOT populate the real
+            // Init Duration field (it reports ~0.01ms and folds the cost into Duration instead),
+            // so without this there is no way to separate startup cost from handler cost off-AWS.
+            LOG.info("cold start initDurationMs={}",
+                    ManagementFactory.getRuntimeMXBean().getUptime());
+        }
+
         String taxpayerId = Optional.ofNullable(event)
                 .map(APIGatewayV2HTTPEvent::getPathParameters)
                 .map(p -> p.get("taxpayerId"))
