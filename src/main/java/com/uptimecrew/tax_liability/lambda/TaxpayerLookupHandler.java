@@ -12,6 +12,7 @@ import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,12 +66,7 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
 
     private static final DynamoDbClient DDB = buildDynamoClient();
 
-    private static final ObjectMapper JSON = new ObjectMapper()
-            .findAndRegisterModules()
-            // Instant as an ISO-8601 string, not a float epoch: the k3d/REST side of this same
-            // capstone already serialises timestamps that way, and the contract should not change
-            // just because the deployment shape did.
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private static final ObjectMapper JSON = newObjectMapper();
 
     /** Table name, injected by template.yaml as {@code !Ref TaxpayersTable}. Never hardcoded. */
     private static final String TABLE = System.getenv("TAXPAYERS_TABLE");
@@ -307,6 +303,30 @@ public final class TaxpayerLookupHandler implements RequestHandler<APIGatewayV2H
      *         Lambda (unit tests, CI), where returning null lets the non-DynamoDB paths still be
      *         exercised instead of failing the whole class at static-init time
      */
+    /**
+     * Builds the response serialiser.
+     *
+     * <p>Package-private and separate from the field so the wire contract can be asserted in a
+     * test. Both settings below are load-bearing and both fail *silently* if wrong - a wrongly
+     * configured mapper still produces valid JSON, just with the wrong shape for money or
+     * timestamps, which no compiler or smoke test would catch.
+     *
+     * @return a mapper that writes {@link java.time.Instant} as ISO-8601 and preserves
+     *         {@link java.math.BigDecimal} scale
+     */
+    static ObjectMapper newObjectMapper() {
+        return new ObjectMapper()
+                // Explicit module, NOT findAndRegisterModules(): that scans every jar on the
+                // classpath at INIT to discover modules we already know we want. Registering it
+                // by hand also means the timestamp format cannot quietly change because some
+                // other dependency put a competing module on the classpath.
+                .registerModule(new JavaTimeModule())
+                // Instant as an ISO-8601 string, not a float epoch: the k3d/REST side of this
+                // same capstone already serialises timestamps that way, and the contract should
+                // not change just because the deployment shape did.
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    }
+
     /**
      * @param values candidate values, in precedence order; any may be null
      * @return the first value that is neither null nor blank, or {@code null} if there is none.

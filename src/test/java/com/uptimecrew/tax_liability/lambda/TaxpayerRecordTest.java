@@ -118,6 +118,24 @@ class TaxpayerRecordTest {
     }
 
     @Test
+    void serialisesMoneyAtScaleTwoAndTimestampsAsIso8601() throws Exception {
+        // The wire contract, asserted on the actual bytes. Both halves fail silently if the
+        // ObjectMapper is misconfigured: without JavaTimeModule + WRITE_DATES_AS_TIMESTAMPS
+        // disabled, createdAt serialises as a float epoch, and BigDecimal scale is the whole
+        // point of the money rule. Neither shows up as a compile error or a failed HTTP call.
+        String json = TaxpayerLookupHandler.newObjectMapper()
+                .writeValueAsString(TaxpayerRecord.fromItem(validItem()));
+
+        assertThat(json).contains("\"createdAt\":\"2026-01-15T10:30:00Z\"");
+        assertThat(json).contains("\"computedAt\":\"2026-01-20T08:00:00Z\"");
+        // Trailing zeros preserved - 14235.5 would mean the scale was lost somewhere.
+        assertThat(json).contains("\"liabilityAmount\":14235.50");
+        assertThat(json).contains("\"totalLiability\":14235.50");
+        // 85000.005 rounded HALF_UP at mapping time, then serialised at scale 2.
+        assertThat(json).contains("\"taxableAmount\":85000.01");
+    }
+
+    @Test
     void rejectsANegativeLiabilityAmount() {
         assertThatThrownBy(() -> new TaxpayerRecord.LiabilityLine(
                 2025, "brk-fed-2025-22",
