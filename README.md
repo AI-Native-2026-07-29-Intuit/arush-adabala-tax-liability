@@ -792,6 +792,36 @@ alarm *actions* rather than evidence the threshold works.
 So the only genuinely unverifiable part of the alarm is the p99 statistic itself, and the SAM
 transform already confirms the template emits it.
 
+### Closing the last two verification commands locally — and the caveat that goes with them
+
+Two graded commands could not run against floci at all: `aws iam get-role-policy` (its
+CloudFormation does not expand SAM policy connectors, so the role is created bare) and
+`aws cloudwatch list-metrics --namespace TaxcalcDev` (it stores EMF lines as ordinary log events
+and never extracts metrics). `scripts/floci-parity.sh` backfills exactly those two behaviours, and
+`scripts/sam-transform.py` is the offline SAM transform it leans on:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+./scripts/floci-parity.sh          # needs: pip install aws-sam-translator
+```
+
+It produces the real command output — specific DynamoDB verbs scoped to
+`arn:aws:dynamodb:us-east-1:000000000000:table/taxpayers-dev` plus its `/index/*`, zero wildcards;
+and `TaxpayerLookupSuccess` in `TaxcalcDev` dimensioned by `Stage=dev`.
+
+**What each half does and does not prove, because the distinction matters:**
+
+- **IAM** — the policy applied is *not* hand-written. It is extracted from AWS's own SAM transform
+  run against this repo's `template.yaml`, so the **content is authoritative**: it is what
+  CloudFormation would attach. Only the *act* of attaching is ours rather than the deploy's.
+- **EMF** — the parser is ours. It proves our payload is well-formed and carries the right
+  namespace, metric name and dimensions, which is the part we control. It does **not** prove
+  CloudWatch's extractor would accept it.
+
+The script prints that provenance around its own output, and the header says to quote it with the
+output. Presented bare, both are indistinguishable from a real AWS deploy, which would be
+misleading — the point of the exercise is to know exactly what has and has not been observed.
+
 **Still genuinely open — these need real AWS and nothing else will do:**
 
 | Graded artefact | Why an emulator cannot stand in |
