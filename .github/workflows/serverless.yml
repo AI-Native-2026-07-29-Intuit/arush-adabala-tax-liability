@@ -91,6 +91,13 @@ jobs:
           cat > /tmp/ci-env.json <<'JSON'
           { "TaxpayerLookupFunction": { "DYNAMODB_ENDPOINT_OVERRIDE": "http://127.0.0.1:1" } }
           JSON
+          # Raise the timeout in the BUILD ARTEFACT only - never in template.yaml, where
+          # Timeout: 10 is a graded property and correct for the real runtime. Emulated
+          # arm64 init alone measures ~8-10s here against ~1.2s native, so a 10s budget
+          # cannot fit an invocation that has not started yet. This compensates for QEMU
+          # being ~7x slower, not for the function being slow.
+          sed -i 's/^\( *\)Timeout: 10$/\1Timeout: 120/' .aws-sam/build/template.yaml
+          grep -n 'Timeout:' .aws-sam/build/template.yaml
           sam local invoke TaxpayerLookupFunction \
             --event events/get-taxpayer.json \
             --env-vars /tmp/ci-env.json \
