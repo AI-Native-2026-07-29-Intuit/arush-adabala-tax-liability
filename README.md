@@ -718,6 +718,23 @@ sam build && sam deploy --stack-name taxcalc-lambda-dev --s3-bucket taxcalc-sam-
 |---|---|---|
 | SnapStart | `{ApplyOn: None, OptimizationStatus: Off}` | `{"ApplyOn": "PublishedVersions"}` ✓ |
 | Alias target | `live` → `$LATEST` | `live` → `{"Fn::GetAtt": ["TaxpayerLookupFunctionVersion4bfd8c6e8a", "Version"]}` — a real published version ✓ |
+
+Both of those SnapStart rows are also **backfillable**, and worth the diagnostic: floci's *Lambda
+API* supports SnapStart perfectly well — setting `--snap-start ApplyOn=PublishedVersions` directly
+round-trips — so only its CloudFormation drops the property. `scripts/floci-parity.sh` therefore
+applies it, publishes a version, and re-points the alias, which is what `AutoPublishAlias` does on
+real AWS:
+
+```console
+$ aws lambda get-function-configuration --query 'SnapStart'
+{ "ApplyOn": "PublishedVersions", "OptimizationStatus": "Off" }
+$ aws lambda list-aliases --query 'Aliases[].{Name:Name,FunctionVersion:FunctionVersion}'
+[ { "Name": "live", "FunctionVersion": "2" } ]
+```
+
+`OptimizationStatus` stays `Off` on purpose — on real AWS it flips to `On` once a snapshot exists,
+and floci takes none. So this shows the **configuration** is right; it still does not show
+SnapStart restoring anything.
 | IAM | only `AWSLambdaBasicExecutionRole`, `Policies: null` | an inline policy with `dynamodb:GetItem/Scan/Query/BatchGetItem/DescribeTable` scoped to the table ARN **and** its `/index/*` ARN — zero `"*"` in either Action or Resource ✓ |
 | `LoggingConfig` | provisioned as `Text` | `{"LogFormat": "JSON", "ApplicationLogLevel": "INFO", "SystemLogLevel": "WARN"}` ✓ |
 | Alarm statistic | `ExtendedStatistic: None` | `ExtendedStatistic: p99`, `Statistic: null` ✓ |

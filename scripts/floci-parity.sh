@@ -13,7 +13,15 @@
 #             what CloudFormation would attach - while the ACT of attaching it is ours, not the
 #             deploy's.
 #
-#   2. EMF  - floci stores embedded-metric-format log lines as ordinary log events and never
+#   2. SnapStart - floci's CloudFormation drops SnapStart and leaves the AutoPublishAlias alias
+#             pointing at $LATEST. Its Lambda API supports both perfectly well (verified: setting
+#             them directly round-trips), so this applies the value the SAM transform says belongs
+#             on the function, publishes a version, and points the alias at it - which is what
+#             AutoPublishAlias does on real AWS. OptimizationStatus stays "Off" because floci takes
+#             no snapshot; on AWS it flips to "On" once one exists. So this shows the CONFIGURATION
+#             is right, NOT that SnapStart restores anything.
+#
+#   3. EMF  - floci stores embedded-metric-format log lines as ordinary log events and never
 #             extracts metrics from them. This script parses the function's real emitted EMF lines
 #             per the EMF spec and publishes what CloudWatch's extractor would have published.
 #             That proves OUR payload is well-formed and carries the right namespace, metric and
@@ -37,7 +45,7 @@ echo "==========================================================================
 
 # ----- 1. IAM: attach the policy AWS's transform says belongs on the role ---------------------
 echo ""
-echo "==> [1/2] IAM: extracting DynamoDBReadPolicy from the SAM transform"
+echo "==> [1/3] IAM: extracting DynamoDBReadPolicy from the SAM transform"
 TRANSFORM_PY="${TRANSFORM_PY:-python3}"
 # shellcheck disable=SC2016  # the inline Python uses ${...} CloudFormation placeholders verbatim.
 POLICY_JSON=$("${TRANSFORM_PY}" scripts/sam-transform.py template.yaml \
@@ -76,9 +84,40 @@ echo "--- aws iam get-role-policy (EMULATOR; policy content from AWS's SAM trans
 aws iam get-role-policy --role-name "${ROLE}" --policy-name "${POLICY_NAME}" \
   --region "${REGION}" --output json
 
-# ----- 2. EMF: publish what CloudWatch's extractor would have published ------------------------
+# ----- 2. SnapStart + alias: apply what the transform says the function should carry -----------
 echo ""
-echo "==> [2/2] EMF: parsing the function's emitted metric lines"
+echo "==> [2/3] SnapStart: applying the config floci's CloudFormation dropped"
+SNAP_APPLY_ON=$("${TRANSFORM_PY}" scripts/sam-transform.py template.yaml \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["Resources"]["TaxpayerLookupFunction"]["Properties"]["SnapStart"]["ApplyOn"])')
+echo "    transform says ApplyOn=${SNAP_APPLY_ON}"
+aws lambda update-function-configuration --function-name "${FUNCTION}" \
+  --region "${REGION}" --snap-start "ApplyOn=${SNAP_APPLY_ON}" >/dev/null
+sleep 2
+
+# AutoPublishAlias publishes a new version on every deploy and re-points the alias at it. floci's
+# transform creates the alias but leaves it on $LATEST, which is exactly the state in which
+# SnapStart does nothing - so the alias has to move for the configuration to mean anything.
+ALIAS_NAME=$(python3 -c '
+import re,sys
+m = re.search(r"^\s*AutoPublishAlias:\s*(\S+)", open("template.yaml").read(), re.M)
+print(m.group(1) if m else "live")')
+NEW_VERSION=$(aws lambda publish-version --function-name "${FUNCTION}" \
+  --region "${REGION}" --query 'Version' --output text)
+aws lambda update-alias --function-name "${FUNCTION}" --name "${ALIAS_NAME}" \
+  --function-version "${NEW_VERSION}" --region "${REGION}" >/dev/null
+echo "    published version ${NEW_VERSION}; alias '${ALIAS_NAME}' now points at it"
+
+echo ""
+echo "--- aws lambda get-function-configuration --query SnapStart (EMULATOR) ---"
+aws lambda get-function-configuration --function-name "${FUNCTION}" \
+  --region "${REGION}" --query 'SnapStart' --output json
+echo "--- aws lambda list-aliases (EMULATOR) ---"
+aws lambda list-aliases --function-name "${FUNCTION}" --region "${REGION}" \
+  --query 'Aliases[].{Name:Name,FunctionVersion:FunctionVersion}' --output json
+
+# ----- 3. EMF: publish what CloudWatch's extractor would have published ------------------------
+echo ""
+echo "==> [3/3] EMF: parsing the function's emitted metric lines"
 aws logs filter-log-events --log-group-name "/aws/lambda/${FUNCTION}" \
   --region "${REGION}" --query 'events[].message' --output json 2>/dev/null \
   | python3 -c '
