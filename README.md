@@ -822,6 +822,37 @@ The script prints that provenance around its own output, and the header says to 
 output. Presented bare, both are indistinguishable from a real AWS deploy, which would be
 misleading — the point of the exercise is to know exactly what has and has not been observed.
 
+### The CI gate, and two things that only surface on a real runner
+
+`.github/workflows/serverless.yml` runs green on the PR, and the deliberately-broken cycle Task 4
+asks for is captured end to end:
+
+| Run | Outcome |
+|---|---|
+| `33588816607` | green |
+| `33589039856` | **failure** — `Handler:` removed; `sam validate --lint` failed with `E0001 ... Runtime and Handler needs to be present when PackageType is of type Zip`, and the `sam-diagnostics` artefact uploaded (868 bytes, 14-day retention) |
+| `33589104641` | green again after the revert |
+
+Getting there took two fixes that no amount of local testing would have surfaced, because both
+come from the runner's architecture rather than from the code:
+
+1. **`sam local invoke` cannot run an arm64 function on an x86_64 runner.** `template.yaml` pins
+   `Architectures: [arm64]` (Graviton is cheaper per GB-second), but GitHub's `ubuntu-22.04`
+   runners are x86_64, and SAM died building its emulation image:
+   `The command '/bin/sh -c mv /var/rapid/aws-lambda-rie-arm64 /var/rapid/aws-lambda-rie' returned a non-zero code: 255`
+   — it cannot execute the arm64 RIE binary at all. Fixed with `docker/setup-qemu-action@v3`.
+2. **Under QEMU the function times out before it starts.** With emulation working, the handler ran
+   and reported `cold start initDurationMs=8212` — roughly **7× the ~1.2s native init measured
+   above** — which does not fit inside `Timeout: 10`. The CI step therefore raises the timeout in
+   `.aws-sam/build/template.yaml` only, immediately before invoking. `template.yaml` keeps
+   `Timeout: 10`: that is a graded property and the right value for the real runtime, and the
+   overhead being compensated for is QEMU's, not the function's.
+
+A third change was needed for the broken-template step itself: the only artefact upload lived in
+the `deploy-sandbox` job, which a PR can never reach because it requires OIDC credentials. The PR
+job now captures its own diagnostics on failure, so the artefact exists on exactly the run Task 4
+says to produce it on.
+
 **Still genuinely open — these need real AWS and nothing else will do:**
 
 | Graded artefact | Why an emulator cannot stand in |
