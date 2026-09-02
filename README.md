@@ -771,13 +771,34 @@ Read precisely, because it is easy to overclaim:
 - **The `400` branch was used deliberately** — it exercises JVM start, every static initialiser, MDC and response building with zero network I/O, so the cold number isn't polluted by a DynamoDB round trip. The corollary is that **warm p50 of 3.74 ms excludes the `GetItem`**; a real warm p50 on the 200 path will be higher.
 - **The RIE's own `Init Duration` field is useless here** — across all 15 cold runs it reported between 0.01 and 0.20 ms, because JVM initialisation is folded into the invocation's `Duration` rather than tracked separately. That is why "cold" is defined above as `Duration`, not `Init Duration`. On real AWS this field is meaningful and should be recorded from the CloudWatch `REPORT` lines.
 
+### The p99 alarm, and exactly which parts of it are verifiable locally
+
+Task 2 asks that `describe-alarms` find the alarm "in OK (or `INSUFFICIENT_DATA` if you haven't
+invoked enough times yet)". Both are reachable against floci, and the properties split cleanly:
+
+| Property | Round-trips through floci? |
+|---|---|
+| `AlarmName`, `MetricName: Duration`, `Namespace: AWS/Lambda` | yes |
+| `Threshold: 1500`, `EvaluationPeriods: 5`, `Period: 60`, `ComparisonOperator` | yes |
+| `ExtendedStatistic: p99`, `TreatMissingData: notBreaching` | **no — reported as `None`** |
+
+The alarm also transitions properly: `aws cloudwatch set-alarm-state` drives it
+`INSUFFICIENT_DATA → OK → ALARM`, which is AWS's own documented way to exercise an alarm without
+waiting for real datapoints. Be clear about what that proves, though — forcing a state confirms
+the alarm exists and is evaluable, **not** that the p99 arithmetic is right. On real AWS a forced
+state is overwritten at the next evaluation period, which is precisely why it is a test tool for
+alarm *actions* rather than evidence the threshold works.
+
+So the only genuinely unverifiable part of the alarm is the p99 statistic itself, and the SAM
+transform already confirms the template emits it.
+
 **Still genuinely open — these need real AWS and nothing else will do:**
 
 | Graded artefact | Why an emulator cannot stand in |
 |---|---|
 | SnapStart cold-start improvement | The measurement above sizes what SnapStart would remove, but the post-SnapStart cold number needs Firecracker restore on real AWS. |
 | `list-metrics --namespace TaxcalcDev` | floci stores the EMF line as an ordinary log line and never parses it (`{"Metrics": []}`). The template-side risk is now closed though: AWS documents that *"Lambda doesn't double-encode any logs that are already JSON encoded"*, so `_aws` stays at the root under `LogFormat: JSON` — the earlier worry about the ALC envelope swallowing it was unfounded. |
-| Alarm state / `describe-alarms` | Created, but with the p99 dropped and `INSUFFICIENT_DATA`. |
+| Alarm's `ExtendedStatistic` | floci stores the alarm but drops this field (and `TreatMissingData`), so `describe-alarms` reports `None` where AWS would report `p99`. Traced to floci's **CloudWatch implementation**, not its CloudFormation transform: `put-metric-alarm --extended-statistic p99` called directly against the API round-trips as `None` too, so there is no local path to the value. Everything else on the alarm does survive — see below. |
 | CloudWatch `REPORT` lines *in the deployed log group* | floci emits none, so `sam-smoke.sh`'s check is skipped there via `EXPECT_RUNTIME_REPORT=false`. Partly closed though: the RIE **does** emit real `REPORT` lines locally (they are the source of the latency table above), so the format the script greps for is confirmed against the real runtime — only their delivery into CloudWatch Logs is unverified. |
 | OIDC CI deploy | GitHub↔AWS STS trust plus a real Actions run; no local equivalent by construction. |
 
