@@ -186,6 +186,20 @@ dependencies {
 
     testImplementation  'io.opentelemetry:opentelemetry-sdk-testing'
 
+    // --- Micrometer Prometheus exposition + JSON logs (NEW for W5 D5) -----------------------
+    // spring-boot-starter-actuator has been on the classpath since W2 D3; adding the Prometheus
+    // registry is what makes Boot autoconfigure a PrometheusMeterRegistry and serve the text
+    // exposition format at /actuator/prometheus (the endpoint still has to be listed in
+    // management.endpoints.web.exposure.include - see application.yml).
+    implementation      'io.micrometer:micrometer-registry-prometheus'
+    // runtimeOnly, not implementation: no Java source references LogstashEncoder - only
+    // logback-spring.xml's prod/k8s profile names it, and Logback resolves appenders/encoders
+    // reflectively at configuration time. It still ships in bootJar (runtimeOnly is part of
+    // runtimeClasspath) and on the test runtime classpath, so the k8s logging profile works in
+    // the container and in tests alike.
+    runtimeOnly         'net.logstash.logback:logstash-logback-encoder:7.4'
+    testRuntimeOnly     'net.logstash.logback:logstash-logback-encoder:7.4'
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'

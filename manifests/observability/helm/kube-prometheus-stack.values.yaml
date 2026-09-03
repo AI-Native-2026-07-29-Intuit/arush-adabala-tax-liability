@@ -1,0 +1,131 @@
+# Helm values for kube-prometheus-stack (Prometheus Operator + Prometheus + Alertmanager + Grafana).
+#
+# Installed ONCE per cluster into the `monitoring` namespace - see cluster-bootstrap.md. The
+# per-application observability objects (ServiceMonitor, PrometheusRule, AlertmanagerConfig,
+# dashboard ConfigMap) all live in git under manifests/observability/ and .grafana/, and are
+# applied by scripts/observability-apply.sh; nothing here is app-specific except the datasource
+# wiring that makes the trace -> logs pivot work.
+prometheus:
+  prometheusSpec:
+    # Exemplars are how a Duration panel's p99 point carries a trace_id: Prometheus only stores
+    # them when this feature flag is on, and there is no error when it is off - the diamonds
+    # simply never appear. Needed by Task 3.
+    enableFeatures:
+      - exemplar-storage
+    # The Operator's default selectors are scoped to `release: kube-prometheus-stack`, which is
+    # why every object this repo ships carries that label. Left at the default deliberately:
+    # dropping the selector would make the Operator pick up any ServiceMonitor in the cluster.
+    #
+    # ServiceMonitors/PrometheusRules live in the taxcalc-dev namespace, NOT here, so the
+    # Operator has to be told to look outside its own release namespace.
+    serviceMonitorNamespaceSelector: {}
+    ruleNamespaceSelector: {}
+    podMonitorNamespaceSelector: {}
+    probeNamespaceSelector: {}
+    # k3d nodes have no persistent volumes worth the trouble for a dev cluster; 6h of retention
+    # is more than the burn-rate windows (1h fast / 6h slow) need.
+    retention: 6h
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits:   { memory: 2Gi }
+
+alertmanager:
+  alertmanagerSpec:
+    # Same reasoning as the Prometheus selectors above: taxcalc-api-alertmanagerconfig.yaml is
+    # applied into taxcalc-dev, so Alertmanager must look beyond the monitoring namespace.
+    alertmanagerConfigNamespaceSelector: {}
+    alertmanagerConfigSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits:   { memory: 256Mi }
+
+grafana:
+  # Dev-only credentials for a cluster that is created and destroyed per lab; there is no
+  # ingress in front of Grafana, it is reached through `kubectl port-forward`.
+  adminPassword: admin
+  sidecar:
+    dashboards:
+      enabled: true
+      # This namespace only. `ALL` needs the sidecar to watch ConfigMaps cluster-wide, which
+      # the chart's RBAC does not grant here - the sidecar's watch loop dies immediately
+      # ("Process for ALL/configmap died"), taking the whole Grafana pod into CrashLoopBackOff
+      # with no mention of permissions anywhere in the message. The dashboard ConfigMap is
+      # applied into `monitoring` for exactly this reason.
+      searchNamespace: monitoring
+      label: grafana_dashboard
+      # Dashboards land here; the provisioning provider below (allowUiUpdates: false) is what
+      # actually disables click-to-edit.
+      folder: /tmp/dashboards
+      provider:
+        name: sidecar-provider
+        folder: "Capstone"
+        disableDelete: true
+        allowUiUpdates: false
+  additionalDataSources:
+    # Loki + Tempo are separate Helm releases; Grafana needs both as datasources before the
+    # trace -> logs pivot exists at all.
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      jsonData:
+        # Grafana's "Logs for this span" button: take the trace's id and run this Loki query.
+        # The log lines carry trace_id as a JSON *field* (not a label), so the filter is a
+        # line filter plus a JSON-field matcher rather than a stream selector.
+        derivedFields:
+          - name: TraceID
+            matcherRegex: '"trace_id":"(\w+)"'
+            url: "$${__value.raw}"
+            datasourceUid: tempo
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.monitoring.svc.cluster.local:3100
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: "-5m"
+          spanEndTimeShift: "5m"
+          # Do NOT map span labels onto Loki stream selectors here: trace_id is a log FIELD,
+          # not a label (see manifests/observability/LABELS.md), so the pivot has to filter on
+          # the line body instead.
+          filterByTraceID: true
+          customQuery: false
+        tracesToMetrics:
+          datasourceUid: prometheus
+        # Exemplars point the other way: Prometheus -> Tempo.
+        nodeGraph:
+          enabled: true
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { memory: 512Mi }
+
+prometheusOperator:
+  admissionWebhooks:
+    # The webhook that validates PrometheusRule objects at admission time, plus the Job that
+    # mints its TLS certificate. Disabled here for one environment reason and one design reason:
+    # the certgen Job's image lives on registry.k8s.io, which this laptop's TLS-intercepting
+    # proxy blocks from inside the cluster (see the README's W5 D5 section); and the check it
+    # performs - "is this PromQL parseable" - is one this repo already runs earlier and harder,
+    # via `promtool check rules` in scripts/observability-apply.sh AND in the CI workflow, so a
+    # malformed rule fails before it is ever applied rather than at apply time.
+    enabled: false
+    patch:
+      enabled: false
+
+# Cluster-level exporters, off: this deliverable measures the application (RED from
+# http_server_requests, a business counter, a latency SLO), and node/pod-inventory metrics would
+# only add two DaemonSet/Deployment workloads and two more image pulls to a laptop cluster.
+nodeExporter:     { enabled: false }
+kubeStateMetrics: { enabled: false }
+
+# k3d's kubelet/controller-manager/scheduler/etcd are not reachable on the addresses the chart
+# defaults to (they run inside the k3s server container), so their scrape jobs fail noisily and
+# add nothing to this deliverable.
+kubeControllerManager: { enabled: false }
+kubeScheduler:         { enabled: false }
+kubeEtcd:              { enabled: false }
+kubeProxy:             { enabled: false }
