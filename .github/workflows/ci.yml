@@ -1,0 +1,91 @@
+# .github/workflows/ci.yml
+# The required PR gate: compile + the full JUnit 5 suite (unit + the
+# Testcontainers-backed integration tests) + the JaCoCo 70% branch-coverage
+# floor, via `./gradlew build` (build.gradle wires `check.dependsOn
+# jacocoTestCoverageVerification`, so `build` already runs everything this
+# job needs - no separate `test`/`jacocoTestReport` invocation required).
+name: taxcalc-api ci
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradlew"
+      - "gradlew.bat"
+      - "gradle/**"
+      - "Dockerfile"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradlew"
+      - "gradlew.bat"
+      - "gradle/**"
+      - "Dockerfile"
+      - ".github/workflows/ci.yml"
+
+# PR force-pushes cancel their own stale run; a main push queue serialises
+# instead (a half-finished push-to-main build/push must never be cancelled
+# mid-way by the next commit landing seconds later).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Top-level default: read-only. Individual jobs widen only what they need
+# (call-build-and-push adds id-token: write for its own OIDC step).
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build + test (taxcalc-api)
+    # NOTE: the reference spec for this deliverable pins ubuntu-24.04.
+    # GitHub-hosted runners do not work in this org: the whole GitHub
+    # Actions org hit a billing/spending-limit block during W5 D2 (see
+    # README's "Week 5 Day 2" section), and every workflow here -
+    # docker.yml, compose-ci.yml, k8s-ci.yml, observability.yml,
+    # serverless.yml, web-ci.yml - migrated to Blacksmith runners as the
+    # fix, not as a preference. Matching that here rather than reproducing
+    # a runner class that fails to even queue.
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    # Generous vs. the reference's own default: this suite boots real
+    # Testcontainers-backed Postgres/Mongo/Redis/Kafka across ~35
+    # @SpringBootTest/@DataJpaTest/@DataMongoTest classes (see README's
+    # Week 2-3 sections), not the lesson's generic unit-test-only suite.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Gradle build (compile + full test suite + JaCoCo gate)
+        run: ./gradlew --no-daemon build
+
+      - name: Upload test + coverage reports on failure
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: taxcalc-api-test-reports
+          path: |
+            build/reports/tests/
+            build/reports/jacoco/
+          retention-days: 7
+
+  # Task 2 adds a call-build-and-push job here, invoked only on push to
+  # main, once .github/workflows/_build-and-push.yml exists.
