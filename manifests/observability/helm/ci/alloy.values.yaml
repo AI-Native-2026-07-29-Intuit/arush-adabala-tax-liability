@@ -1,0 +1,12 @@
+# CI overlay for Alloy - see ci/kube-prometheus-stack.values.yaml for why these exist.
+#
+# One replica instead of a DaemonSet: Alloy reads pod logs through the Kubernetes API rather than
+# off each node's filesystem (see the base values' loki.source.kubernetes), so a single instance
+# collects everything a per-node DaemonSet would.
+controller:
+  type: deployment
+  replicas: 1
+alloy:
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits:   { memory: 384Mi }

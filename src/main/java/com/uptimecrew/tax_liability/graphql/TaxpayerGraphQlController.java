@@ -7,6 +7,7 @@ import java.util.Objects;
 import com.uptimecrew.tax_liability.llm.LlmSummaryService;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
+import com.uptimecrew.tax_liability.service.TaxpayerLookupService;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,17 +33,24 @@ public class TaxpayerGraphQlController {
     private static final Logger LOG = LoggerFactory.getLogger(TaxpayerGraphQlController.class);
 
     private final TaxLiabilityService service;
+    private final TaxpayerLookupService lookupService;
     private final LlmSummaryService llmSummary;
 
-    public TaxpayerGraphQlController(TaxLiabilityService service, LlmSummaryService llmSummary) {
+    public TaxpayerGraphQlController(TaxLiabilityService service, TaxpayerLookupService lookupService,
+            LlmSummaryService llmSummary) {
         this.service = Objects.requireNonNull(service, "service must not be null");
+        this.lookupService = Objects.requireNonNull(lookupService, "lookupService must not be null");
         this.llmSummary = Objects.requireNonNull(llmSummary, "llmSummary must not be null");
     }
 
     @QueryMapping
     public TaxpayerReadModel taxpayer(@Argument String id) {
         LOG.info("graphql query taxpayer id={}", id);
-        return service.findById(id).orElse(null);
+        // W5 D5: the same single-taxpayer read as GET /api/v1/taxpayers/{id}, so it goes through
+        // the same instrumented seam. Two entry points onto one read path that only one of them
+        // meters is how a business metric ends up quietly under-counting - and the meter that
+        // disagrees with reality is worse than no meter, because someone will trust it.
+        return lookupService.findById(id).orElse(null);
     }
 
     @QueryMapping

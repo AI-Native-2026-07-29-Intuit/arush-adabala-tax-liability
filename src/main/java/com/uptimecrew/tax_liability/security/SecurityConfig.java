@@ -44,6 +44,16 @@ public class SecurityConfig {
                         // /actuator/health/liveness), and Docker/Kubernetes probes hit those
                         // sub-paths directly, with no bearer token to present.
                         .requestMatchers("/actuator/health/**").permitAll()
+                        // (1c) W5 D5: the Prometheus scrape target. `anyRequest().denyAll()`
+                        // below is not a 401 the scraper could authenticate past - it is a flat
+                        // 403, and the Prometheus Operator reports a target that is DOWN rather
+                        // than a config error, so this matcher is what makes the ServiceMonitor
+                        // work at all. Unauthenticated on purpose: the exposition carries only
+                        // aggregate series whose labels are a deliberately bounded set (no
+                        // taxpayer ids, no user ids - see manifests/observability/LABELS.md),
+                        // and it is reachable only from inside the cluster (the Ingress routes
+                        // /api, and no rule maps /actuator).
+                        .requestMatchers("/actuator/prometheus").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         // (1a) Spring AI's MCP WebMVC server (W3 D3): the local-only tool surface
                         // Claude Code connects to over SSE. Unauthenticated like the two matchers

@@ -1,0 +1,69 @@
+# Helm values for grafana/loki - the log store behind the `{app="taxcalc-api"}` queries.
+#
+# SingleBinary mode: one pod, filesystem storage, no object store, no caches. That is the whole
+# point for a dev cluster - the distributed default (read/write/backend + memcached) wants an S3
+# bucket and several GB of RAM before it will report Ready.
+loki:
+  # No multi-tenancy: with auth_enabled true every read and write needs an X-Scope-OrgID header,
+  # which the Grafana datasource and the smoke script would both have to carry.
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    # The JSON envelope carries trace_id / span_id / correlationId as FIELDS, so the label set
+    # stays tiny by construction (see manifests/observability/LABELS.md). This cap is the
+    # backstop if someone promotes an identifier to a label anyway.
+    max_label_names_per_series: 12
+    reject_old_samples: false
+    # Loki 3.x invents a `service_name` label at ingest by sniffing the incoming labels. It is
+    # constant here and harmless, but it is a seventh label nobody declared - and LABELS.md is
+    # only worth writing if the four labels it names are the four that exist. Empty list = off.
+    discover_service_name: []
+
+deploymentMode: SingleBinary
+singleBinary:
+  replicas: 1
+  # emptyDir instead of the chart's default PersistentVolumeClaim, matching Tempo. Logs on a
+  # cluster that is created and deleted per lab do not need to outlive the pod, and the PVC path
+  # does not work here anyway: k3d's local-path provisioner creates the directory by launching a
+  # helper pod, whose busybox image has to be pulled from docker.io - which this cluster cannot
+  # reach (see scripts/observability-preload-images.sh). The PVC sits Pending on
+  # "create process timeout after 120 seconds" and the whole install blocks behind it.
+  persistence:
+    enabled: false
+  # Turning persistence off removes the PVC but does NOT substitute anything for it: the chart
+  # mounts nothing at /var/loki, the container's root filesystem is read-only, and Loki dies at
+  # startup on `mkdir /var/loki: read-only file system` while initialising ruler-storage. The
+  # emptyDir has to be supplied explicitly.
+  extraVolumes:
+    - name: storage
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: storage
+      mountPath: /var/loki
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { memory: 1Gi }
+
+# Every other topology and sidecar the chart can deploy, switched off.
+read:    { replicas: 0 }
+write:   { replicas: 0 }
+backend: { replicas: 0 }
+# Without gateway disabled the service to talk to is `loki-gateway`, not `loki`; keeping it off
+# means the datasource URL and the smoke script can both use http://loki.monitoring:3100.
+gateway:      { enabled: false }
+chunksCache:  { enabled: false }
+resultsCache: { enabled: false }
+lokiCanary:   { enabled: false }
+test:         { enabled: false }

@@ -1,0 +1,84 @@
+# Helm values for grafana/alloy - the log shipper that moves taxcalc-api's stdout into Loki.
+#
+# Alloy reads pod logs through the Kubernetes API (loki.source.kubernetes) rather than off the
+# node filesystem, which keeps it working on k3d without hostPath mounts.
+alloy:
+  configMap:
+    content: |-
+      // Only taxcalc-dev: this cluster also runs Postgres, Mongo, Redis and the whole
+      // monitoring namespace, none of which belong in the app's log store.
+      discovery.kubernetes "pods" {
+        role = "pod"
+        namespaces {
+          names = ["taxcalc-dev"]
+        }
+      }
+
+      // Exactly four labels reach Loki - app, env, level, pod - see
+      // manifests/observability/LABELS.md for why identifiers must never join them.
+      // `env` and `level` come off the JSON envelope in loki.process below; the two
+      // set here are the ones Kubernetes already knows.
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        // Drop everything that isn't the API: the dependency pods log plenty and none of it
+        // is part of this deliverable.
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          regex         = "taxcalc-api"
+          action        = "keep"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pod_logs.output
+        forward_to = [loki.process.json_envelope.receiver]
+      }
+
+      // The k8s profile's logback-spring.xml writes one JSON object per line; lift `level`
+      // and `env` out of it into labels (both are bounded sets), and leave trace_id, span_id
+      // and correlationId in the line body where they belong.
+      loki.process "json_envelope" {
+        stage.json {
+          expressions = {
+            level = "level",
+            env   = "env",
+          }
+        }
+        stage.labels {
+          values = {
+            level = "level",
+            env   = "env",
+          }
+        }
+
+        // loki.source.kubernetes attaches `instance` and `job` of its own accord, which makes
+        // the shipped stream carry six labels where LABELS.md documents four. Neither is
+        // high-cardinality, so this is not a storage problem - it is a credibility one: a label
+        // policy that the pipeline does not actually enforce is a document, not a rule.
+        stage.label_drop {
+          values = ["instance", "job"]
+        }
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }
+
+controller:
+  type: daemonset
+
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits:   { memory: 512Mi }

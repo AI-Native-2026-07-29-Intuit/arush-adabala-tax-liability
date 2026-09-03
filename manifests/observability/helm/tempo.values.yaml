@@ -1,0 +1,29 @@
+# Helm values for grafana/tempo - the trace store the OTel Collector forwards to.
+#
+# Single binary, local storage, no metrics-generator: this deliverable needs "can Grafana find
+# the trace for this request", not span metrics.
+tempo:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+  # 24h is plenty for a lab cluster and keeps the emptyDir small.
+  retention: 24h
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { memory: 1Gi }
+
+# An emptyDir is the right call for a cluster that gets deleted after the lab; traces do not
+# need to survive a pod restart here.
+persistence:
+  enabled: false

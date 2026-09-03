@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  src/main/resources/logback-spring.xml (NEW for W5 D5)
+
+  Two shapes, chosen by Spring profile:
+
+    default / dev / local / docker -> the human-readable console pattern. A developer reading
+                                      `docker logs` wants a line, not a JSON object.
+    prod / k8s                     -> one JSON object per event, written to stdout, which Grafana
+                                      Alloy tails and ships to Loki. Parsing a pattern-formatted
+                                      line back into fields is a regex nobody maintains; emitting
+                                      the fields directly means Loki never has to guess.
+
+  Named logback-spring.xml, not logback.xml, on purpose: only the -spring variant is read late
+  enough by Boot for <springProfile> to mean anything - logback.xml is loaded before the
+  Environment exists, and every profile block in it would be silently ignored.
+-->
+<configuration scan="false">
+
+    <!-- Boot's own defaults: log levels from application.yml, the console pattern properties. -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProfile name="default,dev,local,docker,test">
+        <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <!-- %mdc keeps correlationId/trace_id visible locally too, so a developer can
+                     grep the same identifier they would search for in Loki. -->
+                <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg %mdc%n</pattern>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="STDOUT"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="prod,k8s">
+        <appender name="STDOUT_JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <!-- trace_id + span_id: written into MDC by the OpenTelemetry Java agent's
+                     logback instrumentation whenever a span is active. Promoting them to
+                     top-level JSON properties is what makes Grafana's "Logs for this span"
+                     pivot able to find these lines from a trace. -->
+                <includeMdcKeyName>trace_id</includeMdcKeyName>
+                <includeMdcKeyName>span_id</includeMdcKeyName>
+                <!-- The user-facing bug-report id, set by CorrelationIdFilter at request entry.
+                     It threads a single request across all three pillars: it is a log field
+                     here, a span attribute on the trace, and deliberately NOT a metric label. -->
+                <includeMdcKeyName>correlationId</includeMdcKeyName>
+                <!-- Stable top-level fields - the schema every Loki query depends on. `app`
+                     matches the Prometheus label of the same name and the Alloy pipeline's
+                     stream selector; `env` is promoted to a Loki label (bounded set). -->
+                <customFields>{"app":"taxcalc-api","env":"k8s"}</customFields>
+                <!-- RFC3339 so Loki and Grafana both parse it without a custom format. -->
+                <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSSXXX</timestampPattern>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="STDOUT_JSON"/>
+        </root>
+    </springProfile>
+
+</configuration>

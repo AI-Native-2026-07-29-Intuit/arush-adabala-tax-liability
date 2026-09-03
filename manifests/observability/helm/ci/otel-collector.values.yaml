@@ -1,0 +1,4 @@
+# CI overlay for the OTel Collector - see ci/kube-prometheus-stack.values.yaml for why these exist.
+resources:
+  requests: { cpu: 25m, memory: 96Mi }
+  limits:   { memory: 256Mi }

@@ -119,7 +119,50 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # (8e) W5 D5: `prometheus` added so the ServiceMonitor has something to scrape.
+        # Deliberately still an explicit allow-list and never `*`: `heapdump` hands out a
+        # full heap (every String in memory, credentials included), `env` prints resolved
+        # configuration properties, and `threaddump` leaks stack contents - none of which
+        # would then be reachable unauthenticated, since SecurityConfig permits exactly
+        # /actuator/health/** and /actuator/prometheus so kubelet probes and the Prometheus
+        # scrape can reach them without a JWT.
+        include: health,prometheus,info
+  metrics:
+    tags:
+      # (8f) W5 D5: a static tag on EVERY series this JVM publishes. The ServiceMonitor
+      # adds Kubernetes-derived labels (namespace, pod, service) at scrape time, but a
+      # `docker run` or local bootRun scrape gets none of those - so the one label every
+      # dashboard query and SLO rule keys on is set here, in the app, where it always
+      # applies. Note it is `taxcalc-api` (the deployable's name, matching the Deployment
+      # and Service) and not spring.application.name (`taxcalc-service`).
+      app: taxcalc-api
+    distribution:
+      # (8g) W5 D5: publish the bucketed `_bucket` series for HTTP server timings, not just
+      # `_count`/`_sum`. histogram_quantile() over `_bucket` is what the RED dashboard's
+      # p50/p95/p99 panels and Sloth's latency SLI both compute from; without this they
+      # return no data at all.
+      #
+      # Two things about this block are easy to get wrong, and BOTH fail the same silent way -
+      # the configuration is accepted, no warning is logged, and the only symptom is that
+      # `_bucket` series never appear on /actuator/prometheus, which looks exactly like "this
+      # endpoint has had no traffic yet":
+      #
+      #   1. `distribution` must sit under `metrics`. It was first written one level up, as a
+      #      sibling of `metrics`, which binds the harmless nonsense property
+      #      `management.distribution.*`. Caught by curling a live pod's exposition and finding
+      #      zero http_server_requests_seconds_bucket lines while this service's OWN timer
+      #      (TaxpayerLookupService, which asks for a histogram in Java rather than in YAML) was
+      #      emitting 69 of them - which is what proved the registry was fine and the property
+      #      was not.
+      #   2. The keys are METER NAMES containing dots, and they are bracketed so the YAML loader
+      #      treats "http.server.requests" as one map key instead of three levels of nesting.
+      percentiles-histogram:
+        "[http.server.requests]": true
+      slo:
+        # (8h) Explicit bucket boundaries around the SLO's 500ms threshold, so the latency
+        # SLI is computed from a bucket that lands exactly on the objective rather than
+        # interpolated between two far-apart default buckets.
+        "[http.server.requests]": 100ms,200ms,300ms,500ms,800ms,1200ms,2000ms
   endpoint:
     health:
       show-details: always              # (8) so mongo/redis sub-health is visible over plain curl
@@ -257,6 +300,29 @@ spring:
   kafka:
     bootstrap-servers: kafka.taxcalc-dev.svc.cluster.local:9092
 
+  main:
+    # W5 D5: the seven-line ASCII banner is the only thing Spring itself writes that is not a
+    # JSON object, and Alloy's json stage cannot parse it. Harmless in a terminal, noise in a
+    # log pipeline - off in the cluster, still on locally where a human reads the console.
+    banner-mode: "off"
+
+otel:
+  sdk:
+    # W5 D5: in the cluster the OpenTelemetry JAVA AGENT owns instrumentation (attached via
+    # JAVA_TOOL_OPTIONS in manifests/observability/taxcalc-api-deployment-patch.yaml), so the
+    # W3 D5 Spring Boot starter's in-process SDK must stand down or the two both instrument
+    # Spring MVC/JDBC/Kafka and every request produces two parallel span trees.
+    #
+    # This property is read by the STARTER only. The agent configures itself from JVM system
+    # properties and environment variables and never reads application.yml, so disabling the SDK
+    # here disables exactly one of the two - which is the point. (Setting the OTEL_SDK_DISABLED
+    # *env var* instead would disable both and leave the app with no tracing at all.)
+    #
+    # com.uptimecrew.tax_liability.observability.AgentOpenTelemetryConfig then re-supplies the
+    # OpenTelemetry bean from the agent's global instance, so W3 D5's outbox trace propagation
+    # keeps working instead of quietly binding to the starter's no-op.
+    disabled: true
+
 ---
 spring:
   config:
@@ -308,6 +374,20 @@ management:
       # same reasoning as db above: only TaxpayerEventFlowIT boots a real Kafka
       # container, so the health check is disabled everywhere else.
       enabled: false
+  endpoint:
+    health:
+      group:
+        readiness:
+          # Overrides the base profile's `readinessState,db,mongo`. Boot validates group
+          # membership at context refresh and throws NoSuchHealthContributorException
+          # ("Included health contributor 'db' in group 'readiness' does not exist") when a
+          # group names a contributor that was never registered - and the four `enabled: false`
+          # switches above are exactly that: they remove the contributors, they do not make the
+          # group tolerate their absence. Without this override EVERY @SpringBootTest in the
+          # suite fails to start its context, which is what `./gradlew check` was doing on main
+          # before W5 D5 (33 failures, all the same cause, dating from the W5 D3 commit that
+          # introduced the group).
+          include: readinessState
   endpoints:
     web:
       exposure:

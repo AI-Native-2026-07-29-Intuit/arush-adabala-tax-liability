@@ -1,0 +1,58 @@
+# Helm values for open-telemetry/opentelemetry-collector - the OTLP hop between the Java agent
+# and Tempo.
+#
+# Why a Collector at all when the agent could export straight to Tempo: the app should know one
+# endpoint, not one per backend. Swapping trace stores, adding sampling, or fanning out to a
+# second exporter then happens here instead of in a Deployment env var on every service.
+mode: deployment
+replicaCount: 1
+
+# Without this the chart names the Service after the release plus the chart
+# ("otel-collector-opentelemetry-collector"), so every client would hardcode a name that changes
+# if anyone renames the release. Pinning it gives the Deployment patch a stable OTLP endpoint -
+# otel-collector.monitoring.svc.cluster.local - that says what it is rather than how it was
+# installed.
+fullnameOverride: otel-collector
+
+image:
+  # The chart requires an explicit repository; -contrib carries the processors this config uses.
+  repository: otel/opentelemetry-collector-contrib
+
+config:
+  # The chart's default config also wires jaeger/zipkin receivers and a prometheus scrape job.
+  # None of them are used here - Micrometer owns metrics and Alloy owns logs - and a receiver
+  # that is configured but unreachable is just a failing port to debug later.
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  exporters:
+    otlp/tempo:
+      endpoint: tempo.monitoring.svc.cluster.local:4317
+      tls:
+        insecure: true      # in-cluster hop on a dev cluster; no TLS material to verify against
+  service:
+    pipelines:
+      traces:
+        receivers:  [otlp]
+        processors: [memory_limiter, batch]
+        exporters:  [otlp/tempo]
+      # Explicitly removed rather than left at the chart defaults: see the receivers note above.
+      metrics: null
+      logs: null
+
+ports:
+  jaeger-compact: { enabled: false }
+  jaeger-thrift:  { enabled: false }
+  jaeger-grpc:    { enabled: false }
+  zipkin:         { enabled: false }
+
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits:   { memory: 512Mi }

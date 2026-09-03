@@ -1,0 +1,112 @@
+# manifests/observability/taxcalc-api-deployment-patch.yaml
+#
+# A strategic-merge patch over the W5 D3 Deployment (manifests/10-taxcalc-api.deployment.yaml).
+# It adds three things and changes nothing else - image, args, probes, resources and the
+# securityContext all stay exactly as that file defines them:
+#
+#   1. an emptyDir volume and an init container that puts the OpenTelemetry Java agent in it,
+#   2. JAVA_TOOL_OPTIONS attaching that agent to the main container's JVM,
+#   3. the OTEL_* env vars steering exporter target, service name and sampling.
+#
+# Apply with:
+#   kubectl -n taxcalc-dev patch deployment taxcalc-api \
+#     --patch-file manifests/observability/taxcalc-api-deployment-patch.yaml
+#
+# Note on SPRING_PROFILES_ACTIVE: it IS set here, and it is also set by W5 D3's ConfigMap
+# (manifests/30-taxcalc-api.configmap.yaml). That duplication is deliberate but not free, so it
+# is called out where both live: a container's own `env` beats `envFrom`, so THIS file wins if
+# the two ever disagree. It is repeated here because the profile is what activates
+# logback-spring.xml's JSON appender - the single thing this patch's whole logging story depends
+# on - and a patch that silently relies on another file for it breaks the moment someone applies
+# the observability layer to a cluster whose ConfigMap has drifted. Change one, change both.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taxcalc-api
+  namespace: taxcalc-dev
+spec:
+  template:
+    spec:
+      volumes:
+        - name: otel-agent
+          emptyDir: {}
+      initContainers:
+        # The agent jar is delivered by the image OpenTelemetry publishes for exactly this
+        # purpose (it is what the OTel Operator's auto-instrumentation injects), and the init
+        # container just copies it onto the shared volume.
+        #
+        # The usual alternative is an init container that curls the jar from the GitHub release
+        # on every pod start. That is rejected here for two reasons: it makes every rollout,
+        # restart and scale-up depend on github.com being reachable from inside the cluster
+        # (which on a TLS-intercepting corporate network it is not - see the README's W5 D5
+        # section), and an unverified `curl | run as a javaagent` is a supply-chain fetch with no
+        # checksum in the path. A pinned image digest-pins the same artefact once.
+        - name: otel-agent
+          image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.5.0
+          command: ["cp", "/javaagent.jar", "/otel/opentelemetry-javaagent.jar"]
+          volumeMounts:
+            - name: otel-agent
+              mountPath: /otel
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+      containers:
+        - name: taxcalc-api            # MUST match the existing container name, or this adds a second container
+          volumeMounts:
+            - name: otel-agent
+              mountPath: /otel
+          env:
+            # A strategic-merge patch merges env entries BY NAME, so this whole value replaces
+            # the Deployment's existing JAVA_TOOL_OPTIONS rather than appending to it - the two
+            # heap flags from W5 D3 have to be repeated here or they are silently lost, and the
+            # JVM goes back to sizing itself against the node's RAM instead of the cgroup limit.
+            - name: JAVA_TOOL_OPTIONS
+              value: >-
+                -XX:MaxRAMPercentage=75.0
+                -XX:+ExitOnOutOfMemoryError
+                -javaagent:/otel/opentelemetry-javaagent.jar
+            # The resource attribute every span carries; Tempo and Grafana index by it, and
+            # scripts/observability-smoke.sh searches on it.
+            - name: OTEL_SERVICE_NAME
+              value: "taxcalc-api"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            # parentbased_traceidratio, not plain traceidratio: the ratio alone re-decides
+            # sampling per service, so a trace can be kept at the edge and dropped one hop later,
+            # leaving a permanently broken half-trace. parentbased defers to the incoming
+            # traceparent's sampled flag and only rolls the dice when a request starts here, so
+            # traces stay whole. It is also what lets the smoke script guarantee its own request
+            # is traced: it sends a traceparent with the sampled flag set (see
+            # scripts/observability-smoke.sh) rather than gambling on 10%.
+            - name: OTEL_TRACES_SAMPLER
+              value: "parentbased_traceidratio"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: "0.1"
+            # Micrometer already owns metrics (/actuator/prometheus) and Logback owns logs
+            # (stdout -> Alloy -> Loki). Leaving the agent's own metric and log exporters on
+            # would publish a second, differently-named copy of both through the Collector.
+            - name: OTEL_METRICS_EXPORTER
+              value: "none"
+            - name: OTEL_LOGS_EXPORTER
+              value: "none"
+            # Puts trace_id/span_id into SLF4J's MDC, which is what makes logback-spring.xml's
+            # <includeMdcKeyName>trace_id</includeMdcKeyName> resolve to anything. Without it the
+            # JSON envelope has the field names and no values, and the trace -> logs pivot in
+            # Grafana silently returns nothing.
+            - name: OTEL_INSTRUMENTATION_LOGBACK_MDC_ENABLED
+              value: "true"
+            # The agent's OWN startup logging otherwise goes to stderr in its own plain-text
+            # format, which is the only thing in this container writing non-JSON once the JVM is
+            # up - eight lines that Alloy's JSON stage cannot parse. `application` routes them
+            # through Logback instead, so they arrive in Loki as JSON like everything else.
+            - name: OTEL_JAVAAGENT_LOGGING
+              value: "application"
+            # Activates logback-spring.xml's JSON appender (see the note at the top of this file
+            # about the deliberate overlap with the ConfigMap).
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"

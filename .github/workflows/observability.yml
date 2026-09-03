@@ -1,0 +1,256 @@
+# .github/workflows/observability.yml - the W5 D5 gate: static checks first, then a real
+# ephemeral cluster running the same two scripts a developer runs locally.
+#
+# The static job is the one that catches the mistakes this deliverable is actually about
+# (a rule hand-edited away from its Sloth spec, a dashboard that drifted, malformed PromQL), and
+# it runs in under a minute with no cluster at all. The cluster job proves the whole pipeline
+# still round-trips.
+name: taxcalc-api observability
+
+on:
+  pull_request:
+    paths:
+      - 'manifests/observability/**'
+      - '.grafana/**'
+      - 'slo/**'
+      - 'scripts/observability-*.sh'
+      - 'src/main/**'
+      - 'build.gradle'
+      - 'Dockerfile'
+      - '.github/workflows/observability.yml'
+  # So a failed cluster run can be retried without pushing a commit to trigger it.
+  workflow_dispatch:
+
+# Pushing a fix while the previous run is still going should not leave two 15-minute cluster
+# jobs competing for runners - the older one is answering a question nobody is asking any more.
+concurrency:
+  group: observability-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Both generators run from pinned CONTAINERS rather than downloaded binaries, so the bytes
+  # they produce here are the bytes a developer's `scripts/observability-apply.sh` produces.
+  # Sloth stamps its own version string into the generated rule, and that string differs
+  # between distributions of the same version (Homebrew: "0.16.0", GitHub release: "v0.16.0"),
+  # which is enough to fail a byte-stability gate for no real reason.
+  SLOTH_IMAGE: ghcr.io/slok/sloth:v0.16.0
+  PROM_IMAGE: prom/prometheus:v2.54.1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Everything that can be decided without a cluster.
+  # ---------------------------------------------------------------------------
+  static-gates:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # The drift gate, over BOTH renderings. scripts/slo-render.sh writes the PrometheusRule CR
+      # and the flat rule file from one Sloth spec; regenerating and diffing is a complete answer
+      # to "does what we deploy still match the spec that claims to describe it?"
+      - name: SLO render + drift gate
+        run: |
+          ./scripts/slo-render.sh
+          if ! git diff --exit-code -- manifests/observability/taxcalc-api-prometheusrule.yaml \
+                                       slo/taxcalc-api.rules.yaml; then
+            echo "::error::rendered SLO artefacts drifted from slo/taxcalc-api.sloth.yaml - re-run scripts/slo-render.sh and commit."
+            exit 1
+          fi
+
+      # Run straight against the committed rule file - the same command a developer runs, with no
+      # preprocessing step that could itself be wrong.
+      - name: promtool check rules
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules.yaml:/rules.yaml" \
+            --entrypoint promtool "${PROM_IMAGE}" check rules /rules.yaml
+
+      # `check rules` only proves the PromQL parses. These feed synthetic series through the real
+      # recording + alerting rules and assert what fires and when - a healthy service pages
+      # nobody, a sustained 50% breach fires both burn alerts, a two-minute blip fires only the
+      # slow one, and fast 5xx responses still burn the budget. The last case caught a real defect
+      # in the SLI (an empty vector instead of a 100% error ratio during a total outage).
+      - name: promtool alert unit tests
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules.yaml:/rules.yaml" \
+            -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules_test.yaml:/test.yaml" \
+            --entrypoint promtool "${PROM_IMAGE}" test rules /test.yaml
+
+      # Dashboard sanity: the three properties that make it a stable, reproducible artefact.
+      # schemaVersion is pinned because a newer Grafana silently rewrites an older schema on
+      # first load, which is drift that appears without anyone editing anything.
+      - name: Dashboard JSON sanity
+        run: |
+          jq -e '.schemaVersion == 39' .grafana/dashboards/taxcalc-api-red.json > /dev/null
+          jq -e '.uid == "taxcalc-red-v1"' .grafana/dashboards/taxcalc-api-red.json > /dev/null
+          jq -e '(.panels | length) >= 4' .grafana/dashboards/taxcalc-api-red.json > /dev/null
+          jq -e '[.panels[].targets[]? | select(.exemplar == true)] | length >= 1' \
+            .grafana/dashboards/taxcalc-api-red.json > /dev/null
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      # The observability manifests are mostly CRs (ServiceMonitor, PrometheusRule,
+      # AlertmanagerConfig) whose schemas ship with the Prometheus Operator, not with Kubernetes,
+      # so the CRD catalog has to be added as a second schema source - with only the default
+      # location, -strict rejects all three as unknown kinds. Two things in that tree are not
+      # standalone Kubernetes objects and are excluded by name: the Helm values files, and the
+      # Deployment PATCH - a strategic-merge patch is a fragment by design (no selector, no
+      # containers[].image), so schema-validating it as a Deployment is a category error.
+      - name: kubeconform manifests/observability
+        run: |
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -ignore-filename-pattern 'manifests/observability/helm/.*' \
+            -ignore-filename-pattern '.*-deployment-patch.yaml' \
+            manifests/observability/
+
+  # ---------------------------------------------------------------------------
+  # 2. The round trip, on a cluster that exists only for this run.
+  # ---------------------------------------------------------------------------
+  cluster-round-trip:
+    runs-on: ubuntu-22.04
+    needs: static-gates
+    # The PLG-T install alone is several minutes of image pulls; the budget matches k8s-ci.yml's
+    # measured 12-13m plus that.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      # The single cause of the previous cluster failures: pods across every namespace were
+      # Evicted on one node, which is kubelet responding to node pressure, not anything the
+      # application did. A GitHub runner ships with ~25GB of preinstalled toolchains that this
+      # job never touches, and between the image build, the buildx cache and ~3GB of PLG-T
+      # images the disk runs out mid-run. Removing them takes well under a minute and is the
+      # difference between the cluster job working and evicting itself.
+      - name: Free runner disk
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build taxcalc-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: uptimecrew/taxcalc-api:${{ github.sha }}
+          # Without this every run re-resolves the whole Gradle dependency closure and
+          # re-links the jlink JRE from scratch - measured at 3m of a ~12m job. The GitHub
+          # Actions cache backend keeps those layers between runs, so a source-only change
+          # rebuilds one layer.
+          cache-from: type=gha,scope=taxcalc-api
+          cache-to: type=gha,mode=max,scope=taxcalc-api
+
+      # The layer cache has already been exported to the GHA cache backend by this point, so the
+      # local copy is just several GB sitting on the same disk the cluster is about to need.
+      - name: Reclaim build cache
+        run: |
+          docker builder prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+
+      - name: Spin up k3d cluster
+        uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: taxcalc-obs
+          # Same pin and traefik disable as k8s-ci.yml; no loadbalancer port is needed here
+          # because the smoke script reaches every service through kubectl port-forward.
+          k3d-version: v5.9.0
+          args: --servers 1 --agents 1 --k3s-arg "--disable=traefik@server:0"
+
+      - name: Import image into the cluster
+        run: |
+          IMAGE="uptimecrew/taxcalc-api:${{ github.sha }}"
+          NODES=$(k3d node list --no-headers \
+            | awk '$1 ~ /^k3d-taxcalc-obs-/ && $2 != "loadbalancer" { print $1 }')
+          # Same retry-and-verify as k8s-ci.yml: k3d image import can report success while the
+          # image reached no node at all.
+          for attempt in 1 2 3; do
+            k3d image import "${IMAGE}" -c taxcalc-obs || true
+            missing=0
+            for node in ${NODES}; do
+              docker exec "${node}" crictl inspecti "${IMAGE}" >/dev/null 2>&1 || missing=1
+            done
+            [ "${missing}" -eq 0 ] && exit 0
+            sleep 5
+          done
+          echo "::error::${IMAGE} missing from at least one node after 3 import attempts"
+          exit 1
+
+      - name: Pre-import the OTel agent image
+        # The Deployment patch's init container pulls ~300MB from ghcr.io, inside the rollout's
+        # own timeout. Importing it up front takes the pull off the critical path and makes the
+        # rollout's duration about the app's startup rather than about network weather.
+        run: |
+          docker pull -q ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.5.0
+          k3d image import ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.5.0 \
+            -c taxcalc-obs
+
+      - name: Deploy the W5 D3 workload
+        run: |
+          sed -i "s|uptimecrew/taxcalc-api:[^\"[:space:]]*|uptimecrew/taxcalc-api:${{ github.sha }}|" \
+            manifests/10-taxcalc-api.deployment.yaml
+          kubectl create namespace taxcalc-dev || true
+          kubectl create secret generic taxcalc-api-secrets -n taxcalc-dev \
+            --from-literal=SPRING_DATASOURCE_PASSWORD="$CI_PG_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f manifests/
+          kubectl -n taxcalc-dev rollout status deploy/taxcalc-api --timeout=8m
+        env:
+          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+
+      # Free the runner's headroom BEFORE the monitoring namespace lands on it. The W5 D3
+      # Deployment asks for 3 replicas at 250m CPU each and the HPA holds a floor of 2; one pod
+      # is all the round trip needs, and on a 2-vCPU runner those two extra replicas are the
+      # difference between the monitoring pods scheduling and sitting Pending forever.
+      - name: Trim the workload to one replica
+        run: |
+          kubectl -n taxcalc-dev delete hpa taxcalc-api --ignore-not-found
+          kubectl -n taxcalc-dev scale deploy/taxcalc-api --replicas=1
+          kubectl -n taxcalc-dev rollout status deploy/taxcalc-api --timeout=5m
+
+      - name: Install the PLG-T stack
+        # The ci overlay drops Grafana and Alertmanager (nothing in the round trip queries
+        # either - the smoke talks to the Prometheus/Loki/Tempo APIs directly, and the alerting
+        # rules are unit-tested in static-gates) and shrinks every request.
+        run: OBS_VALUES_OVERLAY=ci ./scripts/observability-bootstrap.sh
+
+      - name: Apply the observability layer
+        # A shorter rollout budget than the script's local default: on a runner, a pod that is
+        # not ready in three minutes is not going to become ready, and waiting out the full
+        # default just delays the diagnostics that say why.
+        run: ROLLOUT_TIMEOUT=180s ./scripts/observability-apply.sh
+
+      - name: Round-trip smoke (metric + log + trace for one request)
+        run: ./scripts/observability-smoke.sh
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide            > obs-diagnostics.txt 2>&1 || true
+          kubectl -n taxcalc-dev describe deploy/taxcalc-api >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n taxcalc-dev logs deploy/taxcalc-api --all-containers --tail=200 \
+                                                  >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n monitoring get pods         >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n monitoring logs deploy/kube-prometheus-stack-operator --tail=100 \
+                                                  >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n taxcalc-dev get servicemonitor,prometheusrule,alertmanagerconfig -o yaml \
+                                                  >> obs-diagnostics.txt 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-diagnostics
+          path: obs-diagnostics.txt
+          retention-days: 14

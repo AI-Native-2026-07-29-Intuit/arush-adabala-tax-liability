@@ -27,3 +27,12 @@ manifests/*.local.yaml
 pod-logs.txt
 k8s-diagnostics/
 .k3d/
+
+# Observability artefacts the build / CI tooling produces (W5 D5).
+# The authoritative dashboard is .grafana/dashboards/*.json in git; anything Grafana or Sloth
+# regenerates locally is output, not source, and committing it creates a second copy that
+# drifts from the one CI checks.
+.grafana/exported/
+sloth-out/
+/tmp/observability-smoke-*
+obs-diagnostics.txt

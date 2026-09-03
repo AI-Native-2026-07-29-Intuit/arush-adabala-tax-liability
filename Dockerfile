@@ -83,6 +83,17 @@ RUN java -Djarmode=layertools -jar app.jar extract --destination .
 # top of jdeps' own output for exactly this reason; confirmed the augmented
 # module list completes a real HTTPS request successfully (curl-equivalent
 # test against a live external host) before relying on it here.
+#
+# W5 D5 adds three more for the same class of reason. The OpenTelemetry Java
+# agent is attached with -javaagent at runtime (see
+# manifests/observability/taxcalc-api-deployment-patch.yaml), and an agent is
+# not application bytecode - jdeps cannot see it at all, so nothing it needs
+# appears in MODULES. Without java.instrument the JVM refuses to start at all
+# ("Could not find agent library ... java.lang.instrument"); the agent also
+# needs sun.misc.Unsafe (jdk.unsupported) and the JMX/runtime MXBeans
+# (java.management) for its own instrumentation. They are listed here rather
+# than left to the next person to rediscover from a CrashLoopBackOff, because
+# the failure happens before the first log line the app itself would write.
 FROM eclipse-temurin:21-jdk-jammy@sha256:ce5767b7222312d42395f5bab033cd91f09e44032a2f21bdfd7b5b912dbe1e77 AS jlink-builder
 WORKDIR /jlink
 COPY --from=extractor /extract/dependencies/BOOT-INF/lib/ deps/
@@ -90,7 +101,7 @@ COPY --from=extractor /extract/application/BOOT-INF/classes/ classes/
 RUN MODULES=$(jdeps -q --multi-release 21 --ignore-missing-deps --print-module-deps \
         --recursive --class-path 'deps/*' classes) && \
     jlink \
-      --add-modules "${MODULES},jdk.crypto.ec,jdk.crypto.cryptoki,java.naming,java.logging,java.xml" \
+      --add-modules "${MODULES},jdk.crypto.ec,jdk.crypto.cryptoki,java.naming,java.logging,java.xml,java.instrument,jdk.unsupported,java.management" \
       --strip-debug \
       --no-man-pages \
       --no-header-files \

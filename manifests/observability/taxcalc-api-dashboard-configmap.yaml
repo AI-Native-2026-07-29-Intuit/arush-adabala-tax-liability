@@ -1,0 +1,69 @@
+# manifests/observability/taxcalc-api-dashboard-configmap.yaml
+#
+# Dashboards as code. The authoritative JSON is .grafana/dashboards/taxcalc-api-red.json in git;
+# this ConfigMap is how it reaches Grafana, and scripts/observability-apply.sh rebuilds it from
+# that file with `kubectl create configmap --from-file` on every apply rather than anyone
+# hand-pasting JSON into the block below (a hand-pasted copy is a second source of truth that
+# starts drifting the moment someone edits one of them).
+#
+# The `data:` entry here is deliberately a small placeholder: applying THIS file alone gives
+# Grafana a valid-but-empty dashboard rather than a stale copy of a real one, and the apply
+# script immediately overwrites it with the real JSON. Read it as a schema declaration, not as
+# the dashboard.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taxcalc-api-grafana-dashboard
+  namespace: monitoring          # the namespace Grafana runs in
+  labels:
+    # The kube-prometheus-stack Grafana sidecar watches for exactly this label and copies any
+    # ConfigMap carrying it into Grafana's provisioning folder. Without it the ConfigMap is
+    # just an unread object - no error anywhere.
+    grafana_dashboard: "1"
+    app.kubernetes.io/name:       taxcalc-api
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
+data:
+  taxcalc-api-red.json: |-
+    {
+      "uid": "taxcalc-red-v1",
+      "title": "taxcalc-api - RED (placeholder - replaced by scripts/observability-apply.sh)",
+      "schemaVersion": 39,
+      "panels": []
+    }
+---
+# Provisioning config: one per cluster, created once, kept here so the "no click-to-edit" rule
+# is visible in git next to the dashboard it applies to.
+#
+# allowUiUpdates: false is the whole point of dashboards-as-code. With it set, editing a panel
+# in the Grafana UI still works, but Save is greyed out - so the only way to change the
+# dashboard is to change the JSON in git and re-apply, and a dashboard can never quietly become
+# something nobody can reproduce.
+#
+# NOTE: kube-prometheus-stack's Grafana sidecar generates its own provider (configured under
+# grafana.sidecar.dashboards.provider in manifests/observability/helm/
+# kube-prometheus-stack.values.yaml, which is where allowUiUpdates: false is actually set for
+# the sidecar-mounted folder). This second provider covers a dashboard mounted directly into
+# /var/lib/grafana/dashboards - the shape the deliverable brief specifies - and is applied for
+# completeness; both agree on allowUiUpdates: false, so neither path can be edited from the UI.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provisioning
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name:       taxcalc-api
+    app.kubernetes.io/part-of:    taxcalc
+    app.kubernetes.io/managed-by: kubectl
+data:
+  dashboards.yaml: |-
+    apiVersion: 1
+    providers:
+      - name: capstone-dashboards
+        folder: "Capstone"
+        type: file
+        disableDeletion: true
+        allowUiUpdates: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards

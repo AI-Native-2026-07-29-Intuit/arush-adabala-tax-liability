@@ -9,6 +9,7 @@ import com.uptimecrew.tax_liability.clients.IdentityProfile;
 import com.uptimecrew.tax_liability.clients.IdentityService;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
+import com.uptimecrew.tax_liability.service.TaxpayerLookupService;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -54,12 +55,14 @@ public class TaxpayerController {
             "hasAuthority('SCOPE_taxpayers.write') and hasRole('TAXPAYER_WRITER')";
 
     private final TaxLiabilityService service;
+    private final TaxpayerLookupService lookupService;
     private final IdentityService identityService;
     private final IdempotencyService idempotency;
 
-    public TaxpayerController(TaxLiabilityService service, IdentityService identityService,
-            IdempotencyService idempotency) {
+    public TaxpayerController(TaxLiabilityService service, TaxpayerLookupService lookupService,
+            IdentityService identityService, IdempotencyService idempotency) {
         this.service = Objects.requireNonNull(service, "service must not be null");
+        this.lookupService = Objects.requireNonNull(lookupService, "lookupService must not be null");
         this.identityService = Objects.requireNonNull(identityService, "identityService must not be null");
         this.idempotency = Objects.requireNonNull(idempotency, "idempotency must not be null");
     }
@@ -76,7 +79,10 @@ public class TaxpayerController {
     })
     public ResponseEntity<TaxpayerReadModel> getById(@PathVariable String id, @AuthenticationPrincipal Jwt jwt) {
         LOG.info("get id={} subject={}", id, jwt.getSubject());
-        Optional<TaxpayerReadModel> found = service.findById(id);
+        // W5 D5: routed through TaxpayerLookupService rather than TaxLiabilityService directly,
+        // so the read is metered and spanned from outside the @Cacheable proxy (a cache hit
+        // never enters the cached method's body - see that class's javadoc).
+        Optional<TaxpayerReadModel> found = lookupService.findById(id);
         return found.map(ResponseEntity::ok).orElseGet(() -> ResponseEntity.notFound().build());
     }
 
