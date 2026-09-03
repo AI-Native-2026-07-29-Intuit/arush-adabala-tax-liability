@@ -13,6 +13,7 @@ OBS_NS="${OBS_NS:-monitoring}"
 APP="${APP:-taxcalc-api}"
 SLOTH_SPEC="slo/taxcalc-api.sloth.yaml"
 RULE_FILE="manifests/observability/${APP}-prometheusrule.yaml"
+RULES_FILE="slo/taxcalc-api.rules.yaml"
 DASH_JSON=".grafana/dashboards/${APP}-red.json"
 PROM_IMAGE="prom/prometheus:v2.54.1"
 # Overridable so CI can fail fast (see .github/workflows/observability.yml); locally the longer
@@ -30,61 +31,36 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # 1. The PLG-T stack has to exist first: everything below either registers with the Prometheus
 #    Operator or is scraped/collected by something in this namespace.
-echo "[1/6] preflight: monitoring namespace"
+echo "[1/7] preflight: monitoring namespace"
 kubectl get ns "${OBS_NS}" >/dev/null
 
-# 2. Regenerate the PrometheusRule from the Sloth spec and fail on ANY drift. The generated file
-#    is committed, so this is the local half of the same gate CI runs: the rule and the spec that
-#    is supposed to explain it can never disagree.
-echo "[2/6] sloth generate + drift check"
-docker run --rm -u "$(id -u):$(id -g)" -v "${PWD}:/w" -w /w "${SLOTH_IMAGE}" \
-  generate -i "${SLOTH_SPEC}" -o "${RULE_FILE}" >/dev/null 2>&1
-if ! git diff --quiet -- "${RULE_FILE}"; then
-  echo "ERROR: ${RULE_FILE} drifted from ${SLOTH_SPEC}. Re-commit the regenerated file." >&2
-  git --no-pager diff -- "${RULE_FILE}" >&2
+# 2. Re-render BOTH artefacts from the Sloth spec and fail on ANY drift. scripts/slo-render.sh
+#    writes the PrometheusRule CR (what kubectl applies) and the flat rule file (what promtool
+#    reads) from one spec, so the two can never disagree and neither is ever hand-edited. This is
+#    the local half of the same gate CI runs.
+echo "[2/7] render SLO artefacts + drift check"
+./scripts/slo-render.sh >/dev/null
+if ! git diff --quiet -- "${RULE_FILE}" "${RULES_FILE}"; then
+  echo "ERROR: ${RULE_FILE} / ${RULES_FILE} drifted from ${SLOTH_SPEC}. Re-commit the rendered files." >&2
+  git --no-pager diff -- "${RULE_FILE}" "${RULES_FILE}" >&2
   exit 1
 fi
 
-# 3. promtool BEFORE apply. The Operator's admission webhook would also reject malformed PromQL,
-#    but only once the object is already being applied and with a far worse message; this fails
-#    the same mistake a step earlier, locally, in a second.
-#
-#    promtool checks a Prometheus rule FILE, not a Kubernetes PrometheusRule object, so the CR's
-#    `spec:` has to be unwrapped and de-indented first - feeding it the whole manifest fails with
-#    a misleading "field groups not found" that reads like the rules are missing.
-echo "[3/6] promtool check rules + alert unit tests"
-# Full template rather than `mktemp -t taxcalc-rules`: BSD mktemp (macOS) treats the argument as
-# a prefix and appends its own suffix, but GNU mktemp (the CI runner) requires the X's and fails
-# outright with "too few X's in template" - which is how this first ran green locally and red in
-# CI.
-UNWRAPPED="$(mktemp "${TMPDIR:-/tmp}/taxcalc-rules.XXXXXX")"
-trap 'rm -f "${UNWRAPPED}"' EXIT
-python3 - "${RULE_FILE}" > "${UNWRAPPED}" <<'PY'
-import sys
-text = open(sys.argv[1]).read()
-spec = text[text.index("spec:") + len("spec:"):]
-print("\n".join(line[2:] if line.startswith("  ") else line for line in spec.splitlines()))
-PY
-# mktemp creates the file 0600 owned by the invoking user, and the prom/prometheus image runs as
-# `nobody` - so the bind mount is readable on a Docker Desktop VM (which loosens permissions
-# across the file share) and "permission denied" on a Linux runner, where the mount is the real
-# file. World-readable is correct here: this is a rule file derived from a committed manifest,
-# not a secret.
-chmod 0644 "${UNWRAPPED}"
-docker run --rm -v "${UNWRAPPED}:/rules.yaml" --entrypoint promtool "${PROM_IMAGE}" \
+# 3. promtool BEFORE apply, run directly against the committed rule file - no unwrapping, no
+#    temp files. `check rules` proves the PromQL parses; the unit tests prove the alerts fire at
+#    the burn rates they claim to, including the total-outage case that once produced NO alert at
+#    all because `total - good` returns an empty vector when nothing matches the good selector.
+echo "[3/7] promtool check rules + alert unit tests"
+docker run --rm -v "${PWD}/${RULES_FILE}:/rules.yaml" --entrypoint promtool "${PROM_IMAGE}" \
   check rules /rules.yaml
-# `check rules` only proves the PromQL parses. The unit tests prove the alerts actually fire at
-# the burn rates they claim to - including the case that caught a real defect in this SLI, where
-# a total outage produced NO alert because `total - good` returns an empty vector when nothing
-# matches the good selector.
-docker run --rm -v "${UNWRAPPED}:/rules.yaml" \
+docker run --rm -v "${PWD}/${RULES_FILE}:/rules.yaml" \
   -v "${PWD}/slo/taxcalc-api.rules_test.yaml:/test.yaml" \
   --entrypoint promtool "${PROM_IMAGE}" test rules /test.yaml
 
 # 4. The dashboard ConfigMap is rebuilt from the JSON in git on every apply, rather than the JSON
 #    being hand-pasted into the manifest. Two copies of a 100-line JSON document is two sources of
 #    truth, and the one nobody looks at is the one that is deployed.
-echo "[4/6] dashboard ConfigMap from ${DASH_JSON}"
+echo "[4/7] dashboard ConfigMap from ${DASH_JSON}"
 python3 -c "import json,sys; json.load(open('${DASH_JSON}'))"   # fail early on malformed JSON
 # The manifest goes FIRST and the generated ConfigMap second, because that file's first document
 # is a same-named placeholder: applying it after the real dashboard would overwrite a working
@@ -100,7 +76,7 @@ kubectl -n "${OBS_NS}" create configmap "${APP}-grafana-dashboard" \
   | kubectl apply -f -
 
 # 5. The application-facing objects.
-echo "[5/6] apply ServiceMonitor / Deployment patch / PrometheusRule / AlertmanagerConfig"
+echo "[5/7] apply ServiceMonitor / Deployment patch / PrometheusRule / AlertmanagerConfig"
 kubectl apply -n "${NS}" -f "manifests/observability/${APP}-servicemonitor.yaml"
 kubectl patch -n "${NS}" deployment "${APP}" \
   --patch-file "manifests/observability/${APP}-deployment-patch.yaml"
@@ -109,7 +85,17 @@ kubectl apply -n "${NS}" -f "manifests/observability/${APP}-alertmanagerconfig.y
 
 # 6. The patch triggers a new ReplicaSet; block until it is actually serving, so a caller that
 #    runs the smoke script next is not racing the rollout.
-echo "[6/6] rollout"
+echo "[6/7] rollout"
 kubectl -n "${NS}" rollout status "deployment/${APP}" --timeout="${ROLLOUT_TIMEOUT}"
+
+# The Operator's reconciliation state. Note WHERE this is read from: a PrometheusRule has no
+# status subresource in this Operator version (v0.77.1 exposes exactly one feature gate, and
+# status for configuration resources is not it), so there is no per-rule condition to read. The
+# condition that does exist - and that actually gates whether any rule is live - is on the
+# Prometheus CR: it flips to Reconciled=True once the Operator has rebuilt the rule files and
+# reloaded Prometheus with them.
+echo "[7/7] operator reconciliation"
+kubectl -n "${OBS_NS}" get prometheus kube-prometheus-stack-prometheus \
+  -o jsonpath='{range .status.conditions[*]}  {.type}={.status} ({.reason}){"\n"}{end}'
 
 echo "OK: ${APP} is now scraped, traced, and alarming."

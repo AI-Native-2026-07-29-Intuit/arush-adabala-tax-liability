@@ -247,7 +247,7 @@ spec:
       record: sloth_slo_info
   - name: sloth-slo-alerts-taxcalc-api-taxcalc-api-latency
     rules:
-    - alert: taxcalc-apiLatencySLOBurn
+    - alert: taxcalc-apiLatencySLOBurnFast
       annotations:
         runbook_url: https://runbooks.example.internal/taxcalc-api/latency-slo-burn
         summary: taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error
@@ -272,7 +272,7 @@ spec:
         severity: page
         sloth_severity: page
         team: taxcalc
-    - alert: taxcalc-apiLatencySLOBurn
+    - alert: taxcalc-apiLatencySLOBurnSlow
       annotations:
         runbook_url: https://runbooks.example.internal/taxcalc-api/latency-slo-burn
         summary: taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error

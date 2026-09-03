@@ -999,6 +999,16 @@ On the Spring side: `micrometer-registry-prometheus` + a narrowed `management.en
 - **Task 4** — `sloth generate` is byte-stable against the committed rule; `promtool check rules` reports `SUCCESS: 17 rules found`; both burn-rate alerts load into Prometheus and sit `inactive`; the SLI recording rules evaluate to real ratios (`ratio_rate5m = 0` on healthy traffic).
 - **Round trip** — `observability-smoke.sh` passes all five assertions for one request: `metric`, `business metric`, `log`, `trace`, each keyed to an id the script invented for that run.
 
+**Two of Task 4's Done-when commands could not pass as the brief writes them, and both were resolved rather than excused.** `promtool check rules` rejects a Kubernetes CR outright (`field apiVersion not found in type rulefmt.RuleGroups`) and has no lenient mode - `--lint=none` disables linting, not parsing - while `kubectl apply` needs exactly that CR, so no single file can satisfy both commands. `scripts/slo-render.sh` therefore renders **two** artefacts from the one Sloth spec: the PrometheusRule CR and a flat `slo/taxcalc-api.rules.yaml`. That is not a second source of truth - nobody edits either, both are regenerated and byte-diffed in CI, and `promtool check rules slo/taxcalc-api.rules.yaml` now exits 0 against a committed file with no preprocessing. The same renderer gives the two burn alerts distinct names, `taxcalc-apiLatencySLOBurnFast` and `…Slow`, which Sloth cannot do on its own (one name per SLO, no per-alert override). Doing it in the renderer keeps it a build step rather than the hand-edit the drift gate exists to catch - and it is better naming regardless: the alert name is what appears in a pager notification, a silence and a runbook title, and with one shared name a silence on the slow burn also silences the page.
+
+**`Reconciled: True` does not exist on a PrometheusRule** at any Operator version this chart ships - v0.77.1 exposes exactly one feature gate (`PrometheusAgentDaemonSet`), and status for configuration resources is not it. The condition that does exist, and that actually gates whether any rule is live, is on the **Prometheus CR**, which flips to `Reconciled=True` once the Operator has rebuilt the rule files and reloaded Prometheus. `observability-apply.sh` prints it as its last step:
+
+```
+[7/7] operator reconciliation
+  Available=True ()
+  Reconciled=True ()
+```
+
 **The burn-rate alert, fired for real.** With a temporary 700ms delay injected into the request path and `hey -z 240s -c 20` against `GET /api/v1/taxpayers/{id}`, the SLI moved and both alerts fired on schedule:
 
 ```
@@ -1008,7 +1018,7 @@ On the Spring side: `micrometer-registry-prometheus` + a narrowed `management.en
   t+60s   ratio5m=1.0   ratio1h=0.2088  page=firing    ticket=firing
 ```
 
-That ordering is the multi-window design working, not a race: the 5m window hit 100% within twenty seconds, and the page alert still refused to fire until the 1h window also crossed 14.4% - which is exactly what stops a brief spike from waking anyone. In Alertmanager the firing alert carried `severity=page`, `team=taxcalc`, its runbook annotation, and routed to `taxcalc-dev/taxcalc-api-routing/taxcalc-pager` - the pager receiver, not the default. The fault injection was a throwaway filter and a throwaway image tag; neither is committed, and the deployment was rolled back to the clean image afterwards (verified: the same endpoint back to 34ms).
+That ordering is the multi-window design working, not a race: the 5m window hit 100% within twenty seconds, and the page alert still refused to fire until the 1h window also crossed 14.4% - which is exactly what stops a brief spike from waking anyone. In Alertmanager the firing alert carried `severity=page`, `team=taxcalc`, its runbook annotation, and routed to `taxcalc-dev/taxcalc-api-routing/taxcalc-pager` - the pager receiver, not the default. (That run predates the rename; the same alert is now `taxcalc-apiLatencySLOBurnFast`, confirmed loaded in Prometheus after the Operator's reload.) The fault injection was a throwaway filter and a throwaway image tag; neither is committed, and the deployment was rolled back to the clean image afterwards (verified: the same endpoint back to 34ms).
 
 **Getting that fault to register took a finding worth keeping.** The first attempt injected the delay into `CorrelationIdFilter` and moved nothing at all - the SLI sat flat at `0.0` through five minutes of 750ms responses. `CorrelationIdFilter` is ordered at `HIGHEST_PRECEDENCE` so that it wraps the security chain, which also places it *outside* Spring Boot's `ServerHttpObservationFilter` (`HIGHEST_PRECEDENCE + 1`) - so every millisecond it spends is invisible to `http_server_requests`. Worth knowing beyond this demo: latency added by anything ordered outside that filter (an auth proxy filter, a request-logging wrapper, a decompression filter) does not appear in the very metric the SLO is computed from, and the service looks fast while users wait. The fault had to be re-injected at order `-1000` - inside the observation filter, outside security - before the histogram saw it.
 

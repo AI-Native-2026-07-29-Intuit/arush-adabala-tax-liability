@@ -49,42 +49,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The drift gate. `sloth generate` is deterministic, so regenerating and diffing is a
-      # complete answer to "does the committed PrometheusRule still match the spec that claims to
-      # describe it?" - which hand-editing the generated file would break silently, leaving an
-      # SLO document that no longer matches the alerts anyone is paged by.
-      - name: Sloth drift gate
+      # The drift gate, over BOTH renderings. scripts/slo-render.sh writes the PrometheusRule CR
+      # and the flat rule file from one Sloth spec; regenerating and diffing is a complete answer
+      # to "does what we deploy still match the spec that claims to describe it?"
+      - name: SLO render + drift gate
         run: |
-          docker run --rm -u "$(id -u):$(id -g)" -v "${GITHUB_WORKSPACE}:/w" -w /w \
-            "${SLOTH_IMAGE}" generate -i slo/taxcalc-api.sloth.yaml \
-            -o manifests/observability/taxcalc-api-prometheusrule.yaml
-          if ! git diff --exit-code -- manifests/observability/taxcalc-api-prometheusrule.yaml; then
-            echo "::error::PrometheusRule drifted from slo/taxcalc-api.sloth.yaml - regenerate and commit."
+          ./scripts/slo-render.sh
+          if ! git diff --exit-code -- manifests/observability/taxcalc-api-prometheusrule.yaml \
+                                       slo/taxcalc-api.rules.yaml; then
+            echo "::error::rendered SLO artefacts drifted from slo/taxcalc-api.sloth.yaml - re-run scripts/slo-render.sh and commit."
             exit 1
           fi
 
-      # promtool validates a Prometheus RULE FILE, not a Kubernetes PrometheusRule object, so the
-      # CR's spec has to be unwrapped first (feeding it the whole manifest fails with a
-      # misleading "field groups not found").
+      # Run straight against the committed rule file - the same command a developer runs, with no
+      # preprocessing step that could itself be wrong.
       - name: promtool check rules
         run: |
-          python3 - manifests/observability/taxcalc-api-prometheusrule.yaml > /tmp/rules.yaml <<'PY'
-          import sys
-          text = open(sys.argv[1]).read()
-          spec = text[text.index("spec:") + len("spec:"):]
-          print("\n".join(l[2:] if l.startswith("  ") else l for l in spec.splitlines()))
-          PY
-          docker run --rm -v /tmp/rules.yaml:/rules.yaml --entrypoint promtool "${PROM_IMAGE}" \
-            check rules /rules.yaml
+          docker run --rm -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules.yaml:/rules.yaml" \
+            --entrypoint promtool "${PROM_IMAGE}" check rules /rules.yaml
 
       # `check rules` only proves the PromQL parses. These feed synthetic series through the real
       # recording + alerting rules and assert what fires and when - a healthy service pages
-      # nobody, a sustained 50% breach pages, a two-minute blip tickets without paging, and fast
-      # 5xx responses still burn the budget. The last case caught a real defect in the SLI (an
-      # empty vector instead of a 100% error ratio during a total outage).
+      # nobody, a sustained 50% breach fires both burn alerts, a two-minute blip fires only the
+      # slow one, and fast 5xx responses still burn the budget. The last case caught a real defect
+      # in the SLI (an empty vector instead of a 100% error ratio during a total outage).
       - name: promtool alert unit tests
         run: |
-          docker run --rm -v /tmp/rules.yaml:/rules.yaml \
+          docker run --rm -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules.yaml:/rules.yaml" \
             -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules_test.yaml:/test.yaml" \
             --entrypoint promtool "${PROM_IMAGE}" test rules /test.yaml
 

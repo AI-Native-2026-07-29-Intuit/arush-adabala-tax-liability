@@ -15,7 +15,7 @@
 # scripts/observability-apply.sh):
 #   promtool test rules slo/taxcalc-api.rules_test.yaml
 rule_files:
-  - /rules.yaml
+  - /rules.yaml   # slo/taxcalc-api.rules.yaml, mounted at this path by the runner
 
 evaluation_interval: 1m
 
@@ -32,7 +32,10 @@ tests:
         values: '0+60000x120'      # every one of them under 500ms
     alert_rule_test:
       - eval_time: 90m
-        alertname: taxcalc-apiLatencySLOBurn
+        alertname: taxcalc-apiLatencySLOBurnFast
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: taxcalc-apiLatencySLOBurnSlow
         exp_alerts: []
 
   # -------------------------------------------------------------------------
@@ -49,7 +52,7 @@ tests:
         values: '0+30000x120'      # only half land under 500ms
     alert_rule_test:
       - eval_time: 90m
-        alertname: taxcalc-apiLatencySLOBurn
+        alertname: taxcalc-apiLatencySLOBurnFast
         exp_alerts:
           - exp_labels:
               severity: page
@@ -65,6 +68,9 @@ tests:
               title: "(page) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
               summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
               runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+      - eval_time: 90m
+        alertname: taxcalc-apiLatencySLOBurnSlow
+        exp_alerts:
           - exp_labels:
               severity: ticket
               sloth_severity: ticket
@@ -104,7 +110,10 @@ tests:
         values: '0+60000x60 3600000+0x2 3600000+60000x58'
     alert_rule_test:
       - eval_time: 70m
-        alertname: taxcalc-apiLatencySLOBurn
+        alertname: taxcalc-apiLatencySLOBurnFast
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: taxcalc-apiLatencySLOBurnSlow
         exp_alerts:
           - exp_labels:
               severity: ticket
@@ -136,7 +145,7 @@ tests:
         values: '0+60000x120'      # every request fast, every request a 500
     alert_rule_test:
       - eval_time: 90m
-        alertname: taxcalc-apiLatencySLOBurn
+        alertname: taxcalc-apiLatencySLOBurnFast
         exp_alerts:
           - exp_labels:
               severity: page
@@ -152,6 +161,9 @@ tests:
               title: "(page) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
               summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
               runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+      - eval_time: 90m
+        alertname: taxcalc-apiLatencySLOBurnSlow
+        exp_alerts:
           - exp_labels:
               severity: ticket
               sloth_severity: ticket
