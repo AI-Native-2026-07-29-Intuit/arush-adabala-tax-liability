@@ -175,8 +175,21 @@ jobs:
         env:
           CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
 
+      # Free the runner's headroom BEFORE the monitoring namespace lands on it. The W5 D3
+      # Deployment asks for 3 replicas at 250m CPU each and the HPA holds a floor of 2; one pod
+      # is all the round trip needs, and on a 2-vCPU runner those two extra replicas are the
+      # difference between the monitoring pods scheduling and sitting Pending forever.
+      - name: Trim the workload to one replica
+        run: |
+          kubectl -n taxcalc-dev delete hpa taxcalc-api --ignore-not-found
+          kubectl -n taxcalc-dev scale deploy/taxcalc-api --replicas=1
+          kubectl -n taxcalc-dev rollout status deploy/taxcalc-api --timeout=5m
+
       - name: Install the PLG-T stack
-        run: ./scripts/observability-bootstrap.sh
+        # The ci overlay drops Grafana and Alertmanager (nothing in the round trip queries
+        # either - the smoke talks to the Prometheus/Loki/Tempo APIs directly, and the alerting
+        # rules are unit-tested in static-gates) and shrinks every request.
+        run: OBS_VALUES_OVERLAY=ci ./scripts/observability-bootstrap.sh
 
       - name: Apply the observability layer
         run: ./scripts/observability-apply.sh

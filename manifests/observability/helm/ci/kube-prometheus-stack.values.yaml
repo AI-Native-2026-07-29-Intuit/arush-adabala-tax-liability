@@ -1,0 +1,33 @@
+# CI overlay for kube-prometheus-stack, layered on top of the base values file.
+#
+# A GitHub-hosted runner is 2 vCPU / 7GB and also has to hold the k3d cluster, the application,
+# Postgres, Mongo and Redis. The full stack does not fit: the first attempt left half the
+# monitoring namespace Pending and the previously-scheduled pods in Completed/Error - the
+# signature of the nodes themselves being starved, not of any one chart being wrong.
+#
+# What is dropped here is dropped because the round-trip smoke does not query it, NOT to make a
+# failing test pass: the smoke talks to the Prometheus, Loki and Tempo HTTP APIs directly.
+grafana:
+  # No browser in CI, so nothing renders the dashboard. The dashboard JSON is still validated
+  # (schemaVersion, uid, panel count, exemplars) by the static-gates job.
+  enabled: false
+
+alertmanager:
+  # The alerting RULES are unit-tested deterministically by `promtool test rules` in
+  # static-gates; a running Alertmanager would only prove the routing tree parses, which the
+  # Operator's admission webhook already checks when the AlertmanagerConfig is applied.
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # The smoke asserts on a scrape from the last few minutes; 1h of retention is already
+    # generous for a cluster that lives ~15 minutes.
+    retention: 1h
+    resources:
+      requests: { cpu: 50m, memory: 256Mi }
+      limits:   { memory: 1Gi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits:   { memory: 256Mi }
