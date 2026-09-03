@@ -101,13 +101,18 @@ touched.
   control" (screenshot it for the PR, don't try to script it). Add it
   manually: **Settings → Environments → prod → Required reviewers**, add
   yourself and your ES.
-- **Branch protection on `main` requiring the `build-test` status check.**
-  Same reasoning - a repo-admin mutation, not a file this PR ships. Add via
-  **Settings → Branches → Branch protection rules**, add a rule for `main`
-  requiring the `Build + test (taxcalc-api)` status check, once this PR's
-  own `build-test` run has gone green at least once (a required check that
-  has never run yet still blocks merges the same way, but going green once
-  first is the honest way to confirm the check name matches exactly).
+- **Branch protection on `main` requiring the `build-test` status check -
+  currently impossible on this repo's plan, not merely undone.** Both
+  `GET /repos/{owner}/{repo}/branches/main/protection` (classic branch
+  protection) and `GET /repos/{owner}/{repo}/rulesets` (the newer
+  equivalent) return `403: "Upgrade to GitHub Pro or make this repository
+  public to enable this feature."` against this private repository. No
+  amount of permissions fixes that - the feature is gated on the plan.
+  Remediation is one of: upgrade the org to GitHub Pro/Team, or make the
+  repo public; then **Settings → Branches → Branch protection rules** → add
+  a rule for `main` requiring the `Build + test (taxcalc-api)` status check.
+  Do it after `build-test` has gone green at least once (it now has, on
+  PR #37) so the check name is confirmed to match exactly.
 - **`kubectl apply` against EKS** - W6 D3.
 - **`sam deploy` for the LLM cost-monitoring Lambda** - W6 D4.
 - **Argo CD GitOps** - W6 D2 (replaces `deploy-prod.yml`'s eventual

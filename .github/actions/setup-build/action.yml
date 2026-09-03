@@ -16,11 +16,16 @@
 # actions/checkout). Every caller must checkout before its `uses: ./.github/
 # actions/setup-build` step; this action starts from JDK setup.
 #
-# JDK 17, not 21: build.gradle pins java.toolchain.languageVersion=17 with no
-# toolchain auto-provisioning configured (CLAUDE.md convention #1), so the
-# runner's JDK major version must match exactly - the same constraint
-# docker/SECURITY.md documents for the Dockerfile's own `builder` stage
-# (eclipse-temurin:17-jdk-jammy, not :21).
+# JDK 17, not the 21 this deliverable's reference spec names. build.gradle
+# pins java.toolchain.languageVersion=17, and settings.gradle configures no
+# toolchain resolver (no foojay plugin, verified), so Gradle cannot download
+# a JDK 17 itself - one has to already be installed and discoverable on the
+# runner or the build fails with "No matching toolchains found". Installing
+# only 21 here would leave the build depending on the runner image happening
+# to pre-install a 17 as well: it might work today and break silently on an
+# image bump, which is precisely the kind of implicit dependency a pinned
+# CI setup exists to remove. Same constraint docker/SECURITY.md documents
+# for the Dockerfile's own `builder` stage (eclipse-temurin:17-jdk-jammy).
 #
 # No taxcalc-api/ subdirectory: this repo's build.gradle/gradlew/src/ already
 # live at the repo root (see docker/SECURITY.md's "Known deviations" table),

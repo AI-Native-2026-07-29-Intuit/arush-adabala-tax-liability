@@ -54,11 +54,12 @@ jobs:
     # fix, not as a preference. Matching that here rather than reproducing
     # a runner class that fails to even queue.
     runs-on: blacksmith-2vcpu-ubuntu-2204
-    # Generous vs. the reference's own default: this suite boots real
-    # Testcontainers-backed Postgres/Mongo/Redis/Kafka across ~35
-    # @SpringBootTest/@DataJpaTest/@DataMongoTest classes (see README's
-    # Week 2-3 sections), not the lesson's generic unit-test-only suite.
-    timeout-minutes: 30
+    # 15 per the deliverable spec. Measured headroom, not a guess: the first
+    # cold-cache run of this suite - which boots real Testcontainers-backed
+    # Postgres/Mongo/Redis/Kafka across ~35 @SpringBootTest/@DataJpaTest/
+    # @DataMongoTest classes - took 4m54s, and a warm one 5m38s, so 15 leaves
+    # roughly 3x. Raise it (and say why here) if a real run ever approaches it.
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

@@ -176,6 +176,7 @@ jobs:
           # Same retry-and-verify as k8s-ci.yml: k3d image import can report success while the
           # image reached no node at all.
           for attempt in 1 2 3; do
+            echo "Import attempt ${attempt}..."
             k3d image import "${IMAGE}" -c taxcalc-obs || true
             missing=0
             for node in ${NODES}; do

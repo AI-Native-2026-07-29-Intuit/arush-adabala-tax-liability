@@ -1,0 +1,18 @@
+# .github/actionlint.yaml - actionlint's own config.
+#
+# Every workflow in this repo runs on Blacksmith runners rather than
+# GitHub-hosted ones (the org hit a GitHub Actions billing/spending-limit
+# block during W5 D2 - see README's "Week 5 Day 2" section). actionlint
+# validates `runs-on:` against its built-in list of GitHub-hosted labels and
+# has no way to know these exist, so it reported one `runner-label` error per
+# job - seven across the tree - which made the W6 D1 Done-When check
+# (`actionlint .github/workflows/*.yml` -> 0 errors) permanently unsatisfiable
+# and, worse, trained the reader to skim past actionlint output that might one
+# day contain a real finding.
+#
+# Declaring the labels here is actionlint's own documented fix for exactly
+# this case (it is what its error message tells you to do).
+self-hosted-runner:
+  labels:
+    - blacksmith-2vcpu-ubuntu-2204
+    - blacksmith-2vcpu-ubuntu-2404
