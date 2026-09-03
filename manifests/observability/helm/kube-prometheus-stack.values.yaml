@@ -68,6 +68,13 @@ grafana:
     # trace -> logs pivot exists at all.
     - name: Loki
       type: loki
+      # Pinned, not left to Grafana. Without an explicit uid Grafana generates one
+      # (P8E80F9AEF21F6940 here), and the Tempo datasource's tracesToLogsV2 block below - which
+      # has to name its target datasource by uid - then points at nothing. The "Logs for this
+      # span" button silently does not appear, with no error in Grafana or in the datasource
+      # config. Same failure family as the ServiceMonitor's release label: valid config,
+      # selecting nothing, saying nothing.
+      uid: loki
       access: proxy
       url: http://loki.monitoring.svc.cluster.local:3100
       jsonData:
@@ -89,9 +96,20 @@ grafana:
           datasourceUid: loki
           spanStartTimeShift: "-5m"
           spanEndTimeShift: "5m"
-          # Do NOT map span labels onto Loki stream selectors here: trace_id is a log FIELD,
-          # not a label (see manifests/observability/LABELS.md), so the pivot has to filter on
-          # the line body instead.
+          # This mapping is what makes the pivot find anything. Left unset, Grafana builds the
+          # stream selector from OpenTelemetry's own convention - {service_name="taxcalc-api"} -
+          # and this pipeline deliberately does not ship a `service_name` label: Alloy sends the
+          # four labels LABELS.md documents, and Loki's own service_name discovery is off for the
+          # same reason. The button then opens a Loki pane reading "No logs found", which looks
+          # like missing logs rather than a mismatched label name. Mapping the span's
+          # `service.name` resource attribute onto the `app` label produces
+          # {app="taxcalc-api"} instead, which is a stream that exists.
+          tags:
+            - key: "service.name"
+              value: "app"
+          # Appends the trace id as a LINE filter, which is right: trace_id is a field in the JSON
+          # envelope, never a stream label (see LABELS.md). Selector narrows to four labels, then
+          # the filter greps.
           filterByTraceID: true
           customQuery: false
         tracesToMetrics:
