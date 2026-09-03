@@ -136,18 +136,33 @@ management:
       # applies. Note it is `taxcalc-api` (the deployable's name, matching the Deployment
       # and Service) and not spring.application.name (`taxcalc-service`).
       app: taxcalc-api
-  distribution:
-    percentiles-histogram:
+    distribution:
       # (8g) W5 D5: publish the bucketed `_bucket` series for HTTP server timings, not just
       # `_count`/`_sum`. histogram_quantile() over `_bucket` is what the RED dashboard's
       # p50/p95/p99 panels and Sloth's latency SLI both compute from; without this they
       # return no data at all.
-      http.server.requests: true
-    slo:
-      # (8h) Explicit bucket boundaries around the SLO's 500ms threshold, so the latency
-      # SLI is computed from a bucket that lands exactly on the objective rather than
-      # interpolated between two far-apart default buckets.
-      http.server.requests: 100ms,200ms,300ms,500ms,800ms,1200ms,2000ms
+      #
+      # Two things about this block are easy to get wrong, and BOTH fail the same silent way -
+      # the configuration is accepted, no warning is logged, and the only symptom is that
+      # `_bucket` series never appear on /actuator/prometheus, which looks exactly like "this
+      # endpoint has had no traffic yet":
+      #
+      #   1. `distribution` must sit under `metrics`. It was first written one level up, as a
+      #      sibling of `metrics`, which binds the harmless nonsense property
+      #      `management.distribution.*`. Caught by curling a live pod's exposition and finding
+      #      zero http_server_requests_seconds_bucket lines while this service's OWN timer
+      #      (TaxpayerLookupService, which asks for a histogram in Java rather than in YAML) was
+      #      emitting 69 of them - which is what proved the registry was fine and the property
+      #      was not.
+      #   2. The keys are METER NAMES containing dots, and they are bracketed so the YAML loader
+      #      treats "http.server.requests" as one map key instead of three levels of nesting.
+      percentiles-histogram:
+        "[http.server.requests]": true
+      slo:
+        # (8h) Explicit bucket boundaries around the SLO's 500ms threshold, so the latency
+        # SLI is computed from a bucket that lands exactly on the objective rather than
+        # interpolated between two far-apart default buckets.
+        "[http.server.requests]": 100ms,200ms,300ms,500ms,800ms,1200ms,2000ms
   endpoint:
     health:
       show-details: always              # (8) so mongo/redis sub-health is visible over plain curl
