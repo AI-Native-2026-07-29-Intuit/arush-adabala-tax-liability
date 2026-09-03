@@ -1,0 +1,77 @@
+# slo/taxcalc-api.sloth.yaml
+#
+# The human-authored half of the SLO. `sloth generate` compiles this into
+# manifests/observability/taxcalc-api-prometheusrule.yaml (recording rules + multi-window
+# multi-burn-rate alerts); BOTH files are committed, and CI re-runs the generator and fails on
+# any diff, so the rule can never drift from the spec that is supposed to explain it.
+#
+# Regenerate with:
+#   sloth generate -i slo/taxcalc-api.sloth.yaml \
+#     -o manifests/observability/taxcalc-api-prometheusrule.yaml
+#
+# Written in Sloth's Kubernetes flavour (`sloth.slok.dev/v1`, kind PrometheusServiceLevel) rather
+# than its raw `prometheus/v1` flavour. Same SLO language either way; the difference is the
+# output. The raw flavour emits bare `groups:` - a rule file for a hand-managed prometheus.yml,
+# which nothing in this repo has - and would then need hand-wrapping in a PrometheusRule
+# envelope, which is precisely the kind of hand-edit the CI drift gate exists to forbid. The
+# Kubernetes flavour emits a complete, applyable PrometheusRule with its metadata and selector
+# labels already in place.
+apiVersion: sloth.slok.dev/v1
+kind: PrometheusServiceLevel
+metadata:
+  name: taxcalc-api-slo
+  namespace: taxcalc-dev
+  labels:
+    # Both labels are load-bearing, for different consumers: `release` is what the Prometheus
+    # Operator's ruleSelector matches (a PrometheusRule without it is never loaded, and there is
+    # no error - the alerts simply never exist), and `team` is what the AlertmanagerConfig
+    # routes on.
+    release: kube-prometheus-stack
+    team: taxcalc
+spec:
+  service: "taxcalc-api"
+  labels:
+    team: "taxcalc"
+    release: "kube-prometheus-stack"
+  slos:
+    - name: "taxcalc-api-latency"
+      objective: 99.0
+      description: >-
+        99% of GET /api/v1/taxpayers/{id} responses complete in under 500ms, and are not 5xx,
+        over a rolling 30 days.
+      sli:
+        events:
+          # "Good" is deliberately BOTH conditions: fast AND not a server error. A latency-only
+          # SLI is gameable by the worst possible failure mode - an endpoint that instantly
+          # returns 500 has superb latency, and an SLO that only measures speed would call that
+          # a perfect month.
+          #
+          # {{.window}} is substituted by Sloth once per burn-rate window (5m, 30m, 1h, 2h, 6h,
+          # 1d, 3d); it is not a typo for a PromQL range.
+          #
+          # le="0.5" is one of the explicit buckets application.yml declares under
+          # management.metrics.distribution.slo - the SLI is read straight off a bucket boundary
+          # that lands exactly on the objective, not interpolated between two default buckets
+          # that happen to straddle it.
+          errorQuery: |
+            (
+              sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[{{.window}}]))
+              -
+              sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[{{.window}}]))
+            )
+          totalQuery: |
+            sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[{{.window}}]))
+      alerting:
+        name: "taxcalc-apiLatencySLOBurn"
+        labels:
+          category: "latency"
+          team: "taxcalc"
+        annotations:
+          runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+          summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
+        pageAlert:
+          # Fast burn -> wakes someone. Sloth emits this as the 1h/5m window pair.
+          labels: { severity: "page" }
+        ticketAlert:
+          # Slow burn -> a ticket. Same budget, spent slowly, is a real problem but not a 3am one.
+          labels: { severity: "ticket" }

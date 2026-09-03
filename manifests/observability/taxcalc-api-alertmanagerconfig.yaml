@@ -1,0 +1,52 @@
+# manifests/observability/taxcalc-api-alertmanagerconfig.yaml
+#
+# Routing, not alerting: the PrometheusRule decides WHEN an alert fires, this decides WHERE it
+# goes. Split on `severity`, which Sloth stamps onto the two burn-rate alerts - the fast-burn
+# alert is a page, the slow-burn alert is a ticket, and sending both to the same place would
+# throw away the entire point of the multi-window pattern.
+#
+# The webhook URLs are placeholders. Real Slack/PagerDuty endpoints are credentials, and
+# credentials do not belong in a git-tracked manifest; they arrive at deploy time from a secret
+# store in W6 Day 1. The routing tree itself is fully real and testable without them.
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: taxcalc-api-routing
+  namespace: taxcalc-dev
+  labels:
+    # The Alertmanager CR's alertmanagerConfigSelector matches this label; without it the
+    # routing tree is never merged into Alertmanager's config, silently (same failure mode as
+    # the ServiceMonitor's `release` label).
+    release: kube-prometheus-stack
+    team: taxcalc
+    app.kubernetes.io/name:    taxcalc-api
+    app.kubernetes.io/part-of: taxcalc
+spec:
+  route:
+    receiver: taxcalc-default
+    # Group by the alert and the SLO it belongs to, so a burn that fires across several
+    # replicas is one notification rather than one per pod.
+    groupBy: [alertname, slo]
+    groupWait: 30s          # brief hold so simultaneous alerts arrive as one message
+    groupInterval: 5m       # how often an existing group may send an update
+    repeatInterval: 4h      # re-notify for a still-firing alert; short enough not to be forgotten
+    matchers:
+      - name: team
+        value: taxcalc
+    routes:
+      # Fast burn (severity: page) goes to the pager. The parent route's matchers still apply,
+      # so this is "team=taxcalc AND severity=page".
+      - receiver: taxcalc-pager
+        matchers:
+          - name: severity
+            value: page
+        # A page must not wait 30s to be batched with something else.
+        groupWait: 0s
+        repeatInterval: 1h
+  receivers:
+    - name: taxcalc-default
+      webhookConfigs:
+        - url: https://hooks.example.internal/taxcalc/tickets    # placeholder - W6 D1
+    - name: taxcalc-pager
+      webhookConfigs:
+        - url: https://hooks.example.internal/taxcalc/pager      # placeholder - W6 D1

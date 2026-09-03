@@ -1,0 +1,198 @@
+# .github/workflows/observability.yml - the W5 D5 gate: static checks first, then a real
+# ephemeral cluster running the same two scripts a developer runs locally.
+#
+# The static job is the one that catches the mistakes this deliverable is actually about
+# (a rule hand-edited away from its Sloth spec, a dashboard that drifted, malformed PromQL), and
+# it runs in under a minute with no cluster at all. The cluster job proves the whole pipeline
+# still round-trips.
+name: taxcalc-api observability
+
+on:
+  pull_request:
+    paths:
+      - 'manifests/observability/**'
+      - '.grafana/**'
+      - 'slo/**'
+      - 'scripts/observability-*.sh'
+      - 'src/main/**'
+      - 'build.gradle'
+      - 'Dockerfile'
+      - '.github/workflows/observability.yml'
+
+permissions:
+  contents: read
+
+env:
+  SLOTH_VERSION: v0.16.0
+  PROM_IMAGE: prom/prometheus:v2.54.1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Everything that can be decided without a cluster.
+  # ---------------------------------------------------------------------------
+  static-gates:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sloth
+        run: |
+          curl -sSL -o /usr/local/bin/sloth \
+            "https://github.com/slok/sloth/releases/download/${SLOTH_VERSION}/sloth-linux-amd64"
+          chmod +x /usr/local/bin/sloth
+
+      # The drift gate. `sloth generate` is deterministic, so regenerating and diffing is a
+      # complete answer to "does the committed PrometheusRule still match the spec that claims to
+      # describe it?" - which hand-editing the generated file would break silently, leaving an
+      # SLO document that no longer matches the alerts anyone is paged by.
+      - name: Sloth drift gate
+        run: |
+          sloth generate -i slo/taxcalc-api.sloth.yaml \
+            -o manifests/observability/taxcalc-api-prometheusrule.yaml
+          if ! git diff --exit-code -- manifests/observability/taxcalc-api-prometheusrule.yaml; then
+            echo "::error::PrometheusRule drifted from slo/taxcalc-api.sloth.yaml - regenerate and commit."
+            exit 1
+          fi
+
+      # promtool validates a Prometheus RULE FILE, not a Kubernetes PrometheusRule object, so the
+      # CR's spec has to be unwrapped first (feeding it the whole manifest fails with a
+      # misleading "field groups not found").
+      - name: promtool check rules
+        run: |
+          python3 - manifests/observability/taxcalc-api-prometheusrule.yaml > /tmp/rules.yaml <<'PY'
+          import sys
+          text = open(sys.argv[1]).read()
+          spec = text[text.index("spec:") + len("spec:"):]
+          print("\n".join(l[2:] if l.startswith("  ") else l for l in spec.splitlines()))
+          PY
+          docker run --rm -v /tmp/rules.yaml:/rules.yaml --entrypoint promtool "${PROM_IMAGE}" \
+            check rules /rules.yaml
+
+      # Dashboard sanity: the three properties that make it a stable, reproducible artefact.
+      # schemaVersion is pinned because a newer Grafana silently rewrites an older schema on
+      # first load, which is drift that appears without anyone editing anything.
+      - name: Dashboard JSON sanity
+        run: |
+          jq -e '.schemaVersion == 39' .grafana/dashboards/taxcalc-api-red.json > /dev/null
+          jq -e '.uid == "taxcalc-red-v1"' .grafana/dashboards/taxcalc-api-red.json > /dev/null
+          jq -e '(.panels | length) >= 4' .grafana/dashboards/taxcalc-api-red.json > /dev/null
+          jq -e '[.panels[].targets[]? | select(.exemplar == true)] | length >= 1' \
+            .grafana/dashboards/taxcalc-api-red.json > /dev/null
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      # The observability manifests are mostly CRs (ServiceMonitor, PrometheusRule,
+      # AlertmanagerConfig) whose schemas ship with the Prometheus Operator, not with Kubernetes,
+      # so the CRD catalog has to be added as a second schema source - with only the default
+      # location, -strict rejects all three as unknown kinds. The Helm values files in that tree
+      # are not Kubernetes objects at all and are excluded by name.
+      - name: kubeconform manifests/observability
+        run: |
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -ignore-filename-pattern 'manifests/observability/helm/.*' \
+            manifests/observability/
+
+  # ---------------------------------------------------------------------------
+  # 2. The round trip, on a cluster that exists only for this run.
+  # ---------------------------------------------------------------------------
+  cluster-round-trip:
+    runs-on: ubuntu-22.04
+    needs: static-gates
+    # The PLG-T install alone is several minutes of image pulls; the budget matches k8s-ci.yml's
+    # measured 12-13m plus that.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build taxcalc-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: uptimecrew/taxcalc-api:${{ github.sha }}
+
+      - name: Spin up k3d cluster
+        uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: taxcalc-obs
+          # Same pin and traefik disable as k8s-ci.yml; no loadbalancer port is needed here
+          # because the smoke script reaches every service through kubectl port-forward.
+          k3d-version: v5.9.0
+          args: --servers 1 --agents 1 --k3s-arg "--disable=traefik@server:0"
+
+      - name: Import image into the cluster
+        run: |
+          IMAGE="uptimecrew/taxcalc-api:${{ github.sha }}"
+          NODES=$(k3d node list --no-headers \
+            | awk '$1 ~ /^k3d-taxcalc-obs-/ && $2 != "loadbalancer" { print $1 }')
+          # Same retry-and-verify as k8s-ci.yml: k3d image import can report success while the
+          # image reached no node at all.
+          for attempt in 1 2 3; do
+            k3d image import "${IMAGE}" -c taxcalc-obs || true
+            missing=0
+            for node in ${NODES}; do
+              docker exec "${node}" crictl inspecti "${IMAGE}" >/dev/null 2>&1 || missing=1
+            done
+            [ "${missing}" -eq 0 ] && exit 0
+            sleep 5
+          done
+          echo "::error::${IMAGE} missing from at least one node after 3 import attempts"
+          exit 1
+
+      - name: Deploy the W5 D3 workload
+        run: |
+          sed -i "s|uptimecrew/taxcalc-api:[^\"[:space:]]*|uptimecrew/taxcalc-api:${{ github.sha }}|" \
+            manifests/10-taxcalc-api.deployment.yaml
+          kubectl create namespace taxcalc-dev || true
+          kubectl create secret generic taxcalc-api-secrets -n taxcalc-dev \
+            --from-literal=SPRING_DATASOURCE_PASSWORD="$CI_PG_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f manifests/
+          kubectl -n taxcalc-dev rollout status deploy/taxcalc-api --timeout=8m
+        env:
+          CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+
+      - name: Install the PLG-T stack
+        run: ./scripts/observability-bootstrap.sh
+
+      - name: Install sloth (the apply script regenerates the rule)
+        run: |
+          curl -sSL -o /usr/local/bin/sloth \
+            "https://github.com/slok/sloth/releases/download/${SLOTH_VERSION}/sloth-linux-amd64"
+          chmod +x /usr/local/bin/sloth
+
+      - name: Apply the observability layer
+        run: ./scripts/observability-apply.sh
+
+      - name: Round-trip smoke (metric + log + trace for one request)
+        run: ./scripts/observability-smoke.sh
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide            > obs-diagnostics.txt 2>&1 || true
+          kubectl -n taxcalc-dev describe deploy/taxcalc-api >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n taxcalc-dev logs deploy/taxcalc-api --all-containers --tail=200 \
+                                                  >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n monitoring get pods         >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n monitoring logs deploy/kube-prometheus-stack-operator --tail=100 \
+                                                  >> obs-diagnostics.txt 2>&1 || true
+          kubectl -n taxcalc-dev get servicemonitor,prometheusrule,alertmanagerconfig -o yaml \
+                                                  >> obs-diagnostics.txt 2>&1 || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-diagnostics
+          path: obs-diagnostics.txt
+          retention-days: 14
