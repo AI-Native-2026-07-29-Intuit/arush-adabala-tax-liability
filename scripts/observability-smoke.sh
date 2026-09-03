@@ -7,7 +7,8 @@
 #   metric   -> Prometheus has http_server_requests_seconds_count for the endpoint
 #   business -> Prometheus has taxcalc_liability_recomputed_total, the application's own counter
 #   log      -> Loki returns the line carrying that correlation id
-#   trace    -> Tempo returns the trace whose id the request was sent with
+#   trace    -> Tempo returns the trace whose id the request was sent with, AND finds the same
+#               request by correlation id alone (TraceQL on the span attribute)
 #
 # Reaching the stores over `kubectl port-forward` rather than from a pod inside the cluster is
 # deliberate: it needs no extra container image (this cluster cannot pull one - see the README's
@@ -58,7 +59,7 @@ TRACE_ID="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 SPAN_ID="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 TRACEPARENT="00-${TRACE_ID}-${SPAN_ID}-01"
 
-echo "==> [1/5] ${REQUESTS} requests to /api/v1/taxpayers/${TAXPAYER_ID} (correlationId=${CORRELATION_ID})"
+echo "==> [1/6] ${REQUESTS} requests to /api/v1/taxpayers/${TAXPAYER_ID} (correlationId=${CORRELATION_ID})"
 # The endpoint is JWT-gated (W3 D1) and this script deliberately presents no token: a 401 still
 # traverses CorrelationIdFilter, still produces an http_server_requests sample, a JSON log line
 # and a server span, which is exactly what is under test here. Authentication is TaxpayerSecurityIT's
@@ -123,6 +124,16 @@ loki_has_line() {
     | grep -q "${CORRELATION_ID}"
 }
 
+tempo_finds_by_correlation_id() {
+  # TraceQL search on the span attribute CorrelationIdFilter sets, which is the query an operator
+  # actually runs: they have the id from a support ticket or a log line, not a trace id. Proves
+  # the attribute is INDEXED and searchable, not merely present on a span somebody already found.
+  curl -s -G "http://127.0.0.1:${TEMPO_PORT}/api/search" \
+    --data-urlencode "q={ span.correlation.id = \"${CORRELATION_ID}\" }" \
+    --data-urlencode "start=$(( $(date +%s) - 900 ))" --data-urlencode "end=$(date +%s)" \
+    | grep -q '"traceID"'
+}
+
 tempo_has_trace() {
   # Fetched by trace id, not searched by service: the id is known exactly, so this asserts that
   # THIS request's trace landed, not merely that some trace from this service did.
@@ -130,16 +141,19 @@ tempo_has_trace() {
     "http://127.0.0.1:${TEMPO_PORT}/api/traces/${TRACE_ID}" | grep -q '^200$'
 }
 
-echo "==> [2/5] Prometheus has http_server_requests_seconds_count for ${URI_PATTERN}"
+echo "==> [2/6] Prometheus has http_server_requests_seconds_count for ${URI_PATTERN}"
 await "metric" prom_has_series
 
-echo "==> [3/5] Prometheus has the custom business counter taxcalc_liability_recomputed_total"
+echo "==> [3/6] Prometheus has the custom business counter taxcalc_liability_recomputed_total"
 await "business metric" prom_has_business_counter
 
-echo "==> [4/5] Loki has the JSON log line carrying correlationId=${CORRELATION_ID}"
+echo "==> [4/6] Loki has the JSON log line carrying correlationId=${CORRELATION_ID}"
 await "log" loki_has_line
 
-echo "==> [5/5] Tempo has trace ${TRACE_ID}"
+echo "==> [5/6] Tempo has trace ${TRACE_ID}"
 await "trace" tempo_has_trace
+
+echo "==> [6/6] Tempo finds that request by correlation id alone"
+await "trace by correlation id" tempo_finds_by_correlation_id
 
 echo "OK: metrics + logs + traces all visible for one request (correlationId=${CORRELATION_ID}, traceId=${TRACE_ID})."
