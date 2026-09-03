@@ -78,6 +78,15 @@ spec:
         labels:
           category: "latency"
           team: "taxcalc"
+          # Load-bearing, and invisible when missing. The Prometheus Operator scopes every route
+          # it generates from an AlertmanagerConfig with a `namespace="<ns>"` matcher, so that one
+          # tenant's routing tree cannot capture another tenant's alerts. Prometheus does not put
+          # a namespace label on alerts from a PrometheusRule, so without this the alert matches
+          # no route in taxcalc-api-alertmanagerconfig.yaml and silently falls through to the
+          # chart's default `null` receiver - a routing tree that exists, reviews well, and
+          # delivers nothing. Observed exactly that in Alertmanager before adding it: a firing
+          # alert with `receivers: ["null"]`.
+          namespace: "taxcalc-dev"
         annotations:
           runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
           summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."

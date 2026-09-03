@@ -44,9 +44,17 @@ spec:
         groupWait: 0s
         repeatInterval: 1h
   receivers:
+    # Both are webhookConfigs carrying placeholder URLs rather than Alertmanager's typed
+    # `slackConfigs` / `pagerdutyConfigs`. Those types take their credential from a Secret
+    # reference (`apiURL`, `routingKey`), and Alertmanager refuses to load a config whose
+    # referenced Secret does not exist - so declaring them today would mean either committing a
+    # dummy Secret or leaving the whole routing tree unloadable. The tree, the matchers and the
+    # severity split are all real and testable; only the destinations are stubs until W6 D1
+    # swaps in real endpoints from a secret store.
     - name: taxcalc-default
       webhookConfigs:
-        - url: https://hooks.example.internal/taxcalc/tickets    # placeholder - W6 D1
+        - url: https://hooks.slack.com/services/PLACEHOLDER      # Slack incoming webhook - W6 D1
     - name: taxcalc-pager
       webhookConfigs:
-        - url: https://hooks.example.internal/taxcalc/pager      # placeholder - W6 D1
+        # PagerDuty's Events API v2; the integration (routing) key arrives as a Secret in W6 D1.
+        - url: https://events.pagerduty.com/v2/enqueue           # PagerDuty placeholder - W6 D1
