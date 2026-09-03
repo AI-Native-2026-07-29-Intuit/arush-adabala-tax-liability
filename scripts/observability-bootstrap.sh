@@ -9,6 +9,10 @@
 # Idempotent: `helm upgrade --install` re-converges an existing release instead of failing.
 set -euo pipefail
 
+# A working kubectl is not a given here - see the file for the Rancher Desktop shim this catches.
+# shellcheck source=lib/kube-preflight.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/kube-preflight.sh"
+
 NS="${OBS_NAMESPACE:-monitoring}"
 VALUES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../manifests/observability/helm" && pwd)"
 

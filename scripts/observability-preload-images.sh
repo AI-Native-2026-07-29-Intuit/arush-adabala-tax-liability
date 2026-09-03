@@ -14,6 +14,10 @@
 # On an unfiltered network this script is a no-op you can skip.
 set -euo pipefail
 
+# A working kubectl is not a given here - see the file for the Rancher Desktop shim this catches.
+# shellcheck source=lib/kube-preflight.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/kube-preflight.sh"
+
 CLUSTER="${K3D_CLUSTER:-taxcalc}"
 
 # Pinned to the exact tags the chart versions in observability-bootstrap.sh render. Re-derive

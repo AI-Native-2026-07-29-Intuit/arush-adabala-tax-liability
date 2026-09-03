@@ -15,6 +15,10 @@
 # W5 D5 section), and it works identically on a laptop and on a CI runner.
 set -euo pipefail
 
+# A working kubectl is not a given here - see the file for the Rancher Desktop shim this catches.
+# shellcheck source=lib/kube-preflight.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/kube-preflight.sh"
+
 NS="${NS:-taxcalc-dev}"
 OBS_NS="${OBS_NS:-monitoring}"
 APP="${APP:-taxcalc-api}"
@@ -29,8 +33,14 @@ PIDS=()
 cleanup() { for pid in "${PIDS[@]:-}"; do kill "${pid}" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
+PF_LOG="$(mktemp "${TMPDIR:-/tmp}/taxcalc-portforward.XXXXXX")"
+trap 'rm -f "${PF_LOG}"' EXIT
+
 forward() {  # forward <namespace> <target> <local:remote>
-  kubectl port-forward -n "$1" "$2" "$3" >/dev/null 2>&1 &
+  # Output is kept rather than discarded: when a port never comes up, the reason is almost always
+  # in here (a broken kubectl, a missing service, a port already bound), and throwing it away
+  # leaves the caller with a timeout and no cause.
+  kubectl port-forward -n "$1" "$2" "$3" >>"${PF_LOG}" 2>&1 &
   PIDS+=("$!")
 }
 
@@ -39,7 +49,8 @@ wait_for_port() {  # wait_for_port <port> - port-forward is ready when the socke
     if curl -s -o /dev/null "http://127.0.0.1:$1" 2>/dev/null || [ $? -ne 7 ]; then return 0; fi
     sleep 0.5
   done
-  echo "ERROR: port-forward on $1 never became reachable" >&2
+  echo "ERROR: port-forward on $1 never became reachable. kubectl said:" >&2
+  sed 's/^/    /' "${PF_LOG}" >&2
   return 1
 }
 

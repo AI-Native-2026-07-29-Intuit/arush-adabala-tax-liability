@@ -8,6 +8,10 @@
 # Prerequisite: scripts/observability-bootstrap.sh has installed the PLG-T stack once.
 set -euo pipefail
 
+# A working kubectl is not a given here - see the file for the Rancher Desktop shim this catches.
+# shellcheck source=lib/kube-preflight.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/kube-preflight.sh"
+
 NS="${NS:-taxcalc-dev}"
 OBS_NS="${OBS_NS:-monitoring}"
 APP="${APP:-taxcalc-api}"
