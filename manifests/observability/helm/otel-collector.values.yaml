@@ -7,6 +7,13 @@
 mode: deployment
 replicaCount: 1
 
+# Without this the chart names the Service after the release plus the chart
+# ("otel-collector-opentelemetry-collector"), so every client would hardcode a name that changes
+# if anyone renames the release. Pinning it gives the Deployment patch a stable OTLP endpoint -
+# otel-collector.monitoring.svc.cluster.local - that says what it is rather than how it was
+# installed.
+fullnameOverride: otel-collector
+
 image:
   # The chart requires an explicit repository; -contrib carries the processors this config uses.
   repository: otel/opentelemetry-collector-contrib
