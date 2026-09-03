@@ -62,6 +62,12 @@ text = open(sys.argv[1]).read()
 spec = text[text.index("spec:") + len("spec:"):]
 print("\n".join(line[2:] if line.startswith("  ") else line for line in spec.splitlines()))
 PY
+# mktemp creates the file 0600 owned by the invoking user, and the prom/prometheus image runs as
+# `nobody` - so the bind mount is readable on a Docker Desktop VM (which loosens permissions
+# across the file share) and "permission denied" on a Linux runner, where the mount is the real
+# file. World-readable is correct here: this is a rule file derived from a committed manifest,
+# not a secret.
+chmod 0644 "${UNWRAPPED}"
 docker run --rm -v "${UNWRAPPED}:/rules.yaml" --entrypoint promtool "${PROM_IMAGE}" \
   check rules /rules.yaml
 # `check rules` only proves the PromQL parses. The unit tests prove the alerts actually fire at
