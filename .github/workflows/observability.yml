@@ -18,6 +18,14 @@ on:
       - 'build.gradle'
       - 'Dockerfile'
       - '.github/workflows/observability.yml'
+  # So a failed cluster run can be retried without pushing a commit to trigger it.
+  workflow_dispatch:
+
+# Pushing a fix while the previous run is still going should not leave two 15-minute cluster
+# jobs competing for runners - the older one is answering a question nobody is asking any more.
+concurrency:
+  group: observability-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -125,6 +133,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The single cause of the previous cluster failures: pods across every namespace were
+      # Evicted on one node, which is kubelet responding to node pressure, not anything the
+      # application did. A GitHub runner ships with ~25GB of preinstalled toolchains that this
+      # job never touches, and between the image build, the buildx cache and ~3GB of PLG-T
+      # images the disk runs out mid-run. Removing them takes well under a minute and is the
+      # difference between the cluster job working and evicting itself.
+      - name: Free runner disk
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build taxcalc-api image
@@ -133,6 +154,19 @@ jobs:
           context: .
           load: true
           tags: uptimecrew/taxcalc-api:${{ github.sha }}
+          # Without this every run re-resolves the whole Gradle dependency closure and
+          # re-links the jlink JRE from scratch - measured at 3m of a ~12m job. The GitHub
+          # Actions cache backend keeps those layers between runs, so a source-only change
+          # rebuilds one layer.
+          cache-from: type=gha,scope=taxcalc-api
+          cache-to: type=gha,mode=max,scope=taxcalc-api
+
+      # The layer cache has already been exported to the GHA cache backend by this point, so the
+      # local copy is just several GB sitting on the same disk the cluster is about to need.
+      - name: Reclaim build cache
+        run: |
+          docker builder prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
 
       - name: Spin up k3d cluster
         uses: AbsaOSS/k3d-action@v2
@@ -161,6 +195,15 @@ jobs:
           done
           echo "::error::${IMAGE} missing from at least one node after 3 import attempts"
           exit 1
+
+      - name: Pre-import the OTel agent image
+        # The Deployment patch's init container pulls ~300MB from ghcr.io, inside the rollout's
+        # own timeout. Importing it up front takes the pull off the critical path and makes the
+        # rollout's duration about the app's startup rather than about network weather.
+        run: |
+          docker pull -q ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.5.0
+          k3d image import ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.5.0 \
+            -c taxcalc-obs
 
       - name: Deploy the W5 D3 workload
         run: |
@@ -192,7 +235,10 @@ jobs:
         run: OBS_VALUES_OVERLAY=ci ./scripts/observability-bootstrap.sh
 
       - name: Apply the observability layer
-        run: ./scripts/observability-apply.sh
+        # A shorter rollout budget than the script's local default: on a runner, a pod that is
+        # not ready in three minutes is not going to become ready, and waiting out the full
+        # default just delays the diagnostics that say why.
+        run: ROLLOUT_TIMEOUT=180s ./scripts/observability-apply.sh
 
       - name: Round-trip smoke (metric + log + trace for one request)
         run: ./scripts/observability-smoke.sh

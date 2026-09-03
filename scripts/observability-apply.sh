@@ -15,6 +15,9 @@ SLOTH_SPEC="slo/taxcalc-api.sloth.yaml"
 RULE_FILE="manifests/observability/${APP}-prometheusrule.yaml"
 DASH_JSON=".grafana/dashboards/${APP}-red.json"
 PROM_IMAGE="prom/prometheus:v2.54.1"
+# Overridable so CI can fail fast (see .github/workflows/observability.yml); locally the longer
+# default absorbs a cold JVM start on a laptop that is also running the whole PLG-T stack.
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 # Sloth runs from a pinned CONTAINER, not from whatever `sloth` is on PATH. It stamps its own
 # version into the generated file (a `sloth_version` label and the header comment), and the
 # version string differs by distribution - Homebrew's sloth-cli reports "0.16.0" where the
@@ -107,6 +110,6 @@ kubectl apply -n "${NS}" -f "manifests/observability/${APP}-alertmanagerconfig.y
 # 6. The patch triggers a new ReplicaSet; block until it is actually serving, so a caller that
 #    runs the smoke script next is not racing the rollout.
 echo "[6/6] rollout"
-kubectl -n "${NS}" rollout status "deployment/${APP}" --timeout=300s
+kubectl -n "${NS}" rollout status "deployment/${APP}" --timeout="${ROLLOUT_TIMEOUT}"
 
 echo "OK: ${APP} is now scraped, traced, and alarming."
