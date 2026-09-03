@@ -965,7 +965,63 @@ All three build commands now exit 0 on this machine, `--use-container` included.
 sam delete --stack-name taxcalc-lambda-dev --region "$AWS_REGION"   # teardown is part of the deliverable, not an afterthought
 ```
 
-## Week 5 Day 5
+## Week 5 Day 5 — Observability: Prometheus, Grafana, Loki, Tempo & OpenTelemetry
+
+W5 D1-D4 shipped the deploy mechanics; today the same k3d Deployment becomes answerable. `manifests/observability/` adds a `ServiceMonitor` (`release: kube-prometheus-stack` on the object itself — the Operator's selector is scoped to that label by default, and a ServiceMonitor without it is simply never selected, with no error and no failing target), a strategic-merge Deployment patch attaching the OpenTelemetry Java agent, a Sloth-generated `PrometheusRule`, an `AlertmanagerConfig` splitting `severity: page` from `severity: ticket`, and `LABELS.md`. `.grafana/dashboards/taxcalc-api-red.json` is the five-panel RED dashboard (rate by status, 5xx *fraction* rather than count, p50/p95/p99 with `exemplar: true`, in-flight, and the custom business counter), shipped as git-tracked JSON and rebuilt into a ConfigMap from that file on every apply rather than hand-pasted into a manifest. `slo/taxcalc-api.sloth.yaml` declares one SLO — 99% of `GET /api/v1/taxpayers/{id}` under 500ms **and** non-5xx over 30d — and `sloth generate` compiles it into the committed rule that CI re-generates and diffs.
+
+On the Spring side: `micrometer-registry-prometheus` + a narrowed `management.endpoints.web.exposure.include: health,prometheus,info` (never `*` — `heapdump`, `env` and `threaddump` would then be reachable unauthenticated), `logback-spring.xml` writing one JSON object per event under the `prod`/`k8s` profiles, `TaxpayerLookupService` owning the application's meters and its `@WithSpan` child span, and `CorrelationIdFilter` threading one caller-visible id through all three pillars.
+
+**Where this repo's shape differs from the generic brief, and why.** The graded endpoint here is `GET /api/v1/taxpayers/{id}` (URI-versioned since W3 D2), not `/taxpayers/{taxpayerId}`, and it is JWT-gated — so every query, the dashboard, the SLI and the smoke script use the real path. There was no W3 D2 correlation-id filter to build on (the brief assumes one); `CorrelationIdFilter` is new here. There is no `TaxpayerLookupService` in the pre-existing code either, and the obvious place to put meters — `TaxLiabilityService.findById` — is exactly the wrong one: it is `@Cacheable` against Redis, so Spring's cache proxy returns a hit **without entering the method body**, and meters inside it would have counted cache misses while claiming, by name, to count lookups. The new service is a seam *outside* that proxy. The brief also names the observability namespace `monitoring` in its prerequisites and `observability` in its appendix; everything here uses `monitoring`, consistently.
+
+**Three deliberate departures from the brief's reference snippets, each one a bug in the shape it suggests:**
+
+1. **`action: labeldrop`, not `action: drop`.** The reference ServiceMonitor drops the high-cardinality `exception` label with `sourceLabels: [__name__, exception]` / `action: drop`, which discards *the whole time series* whenever `exception` is non-empty — silently deleting every 5xx series and pinning the Errors panel at zero, the one panel whose emptiness looks like good news.
+2. **The init container copies the agent from OpenTelemetry's own `autoinstrumentation-java` image** instead of `curl`-ing the jar from a GitHub release on every pod start. The reference shape makes every rollout, restart and scale-up depend on github.com being reachable from inside the cluster, and pipes an unverified download straight into `-javaagent`.
+3. **The SLI counts fast 5xx responses as budget burn**, not just slow ones. A latency-only SLI scores an endpoint that instantly returns 500 as a perfect month.
+
+**Two conflicts with the existing codebase that had to be resolved, both invisible if you only read the diff.** This app has carried the OpenTelemetry *Spring Boot starter* since W3 D5; attaching the *agent* on top means both instrument Spring MVC, JDBC and Kafka, and every request produces two parallel span trees. The `k8s` profile therefore sets `otel.sdk.disabled: true`, which is read by the starter only — the agent configures itself from system properties and environment variables and never reads `application.yml`, so this disables exactly one of the two (setting the `OTEL_SDK_DISABLED` *env var* instead would disable both and leave the app with no tracing at all). That switch has a second-order effect worth naming: the starter's fallback then publishes `OpenTelemetry.noop()`, and `TaxLiabilityService` **injects that bean** to capture trace context onto each outbox row (W3 D5). Nothing would fail; traces would just quietly stop connecting across the Kafka hop. `AgentOpenTelemetryConfig` rebinds the bean to the agent's global instance for that profile. Separately, W5 D1's `jlink`-trimmed JRE contains only the modules `jdeps` found in application bytecode — and an agent is not application bytecode, so `java.instrument` was missing and the JVM refused to start at all once `-javaagent` was added, before the first application log line.
+
+### Verified live against the k3d cluster from W5 D3
+
+```bash
+./scripts/observability-bootstrap.sh   # PLG-T into `monitoring`, once per cluster
+./scripts/observability-apply.sh       # sloth drift -> promtool -> unit tests -> dashboard -> apply -> rollout
+./scripts/observability-smoke.sh       # one request, three pillars
+```
+
+- **Task 1** — all three `taxcalc-api` pods report `up` as Prometheus targets with no `lastError`; `/actuator/prometheus` serves 228 `http_server_requests_seconds_bucket` series including the `le="0.5"` boundary the SLI reads; the dashboard's own panel queries return real numbers (p99 `0.0266s`, rate by status, `taxcalc_liability_recomputed_total` by outcome).
+- **Task 2** — pod stdout is a JSON envelope carrying `correlationId`, `trace_id`, `span_id`, `app` and `env` as top-level fields, and Loki answers `{app="taxcalc-api"} |= "<correlation id>"` within seconds. Note the query shape: the stream is selected by *label*, the identifier is a *line filter*.
+- **Task 3** — a single trace fetched from Tempo by id shows `POST /graphql` (carrying the `correlation.id` span attribute) → `TaxpayerLookupService.findById` (the `@WithSpan` child) → `find taxcalc_dev.taxpayers` (Mongo) → `SELECT taxcalc.taxpayer` (Postgres). One span tree, not two, which is the double-instrumentation fix holding.
+- **Task 4** — `sloth generate` is byte-stable against the committed rule; `promtool check rules` reports `SUCCESS: 17 rules found`; both burn-rate alerts load into Prometheus and sit `inactive`; the SLI recording rules evaluate to real ratios (`ratio_rate5m = 0` on healthy traffic).
+- **Round trip** — `observability-smoke.sh` passes all five assertions for one request: `metric`, `business metric`, `log`, `trace`, each keyed to an id the script invented for that run.
+
+**The alerts are unit-tested, not hand-triggered.** `slo/taxcalc-api.rules_test.yaml` feeds synthetic series through the real recording and alerting rules (`promtool test rules`): a healthy service pages nobody, a sustained 50% breach pages, a two-minute blip tickets *without* paging, and fast 5xx responses still burn the budget. That last case failed on first run with **zero alerts**, which is a real defect and the worst possible one — PromQL binary operators drop elements with no match on the other side, so when every request is a 5xx the "good" selector matches no series, `total - good` evaluates to an empty vector, and a total outage looks exactly like a quiet weekend. Fixed with `or vector(0)`. This is also why the live burn-rate demonstration is *not* claimed here: triggering a genuine breach needs authenticated traffic against a JWT-gated endpoint whose issuer (`idp.example.internal`) does not exist in this cluster, and a demonstration that could only be staged by weakening the SLI proves less than four deterministic cases that run in a second on any machine.
+
+**Also fixed in passing:** `./gradlew check` was red on `main` before today — W5 D3's readiness group names `db` and `mongo`, which the `test` profile disables, and Boot validates group membership at context refresh, so all 33 `@SpringBootTest` classes failed to start with `NoSuchHealthContributorException`. The `test` profile now overrides the group.
+
+### Findings from actually standing the stack up
+
+Every one of these was silent or actively misleading, and none is visible in a diff:
+
+- **`management.distribution` binds happily and means nothing.** `distribution:` was first written as a sibling of `metrics:` rather than under it. No warning; the only symptom is that `_bucket` series never appear, which looks exactly like "this endpoint has had no traffic yet". Caught by curling a live pod and finding zero `http_server_requests_seconds_bucket` lines while this service's *own* timer — which asks for a histogram in Java rather than YAML — was emitting 69. The meter-name keys are also bracketed (`"[http.server.requests]"`), since they contain dots.
+- **Disabling the Prometheus Operator's admission webhooks crash-loops the operator.** The same certificate serves its liveness endpoint on `:10250`, so the probes hit a port with nothing listening — `exit 137`, repeating, with no hint that a webhook setting caused it.
+- **The chart's 1s operator probe timeout is wrong for a laptop cluster.** Under load the TLS handshake intermittently exceeds a second, three in a row kill the container, and the restart makes the next handshake slower still.
+- **Grafana's dashboard sidecar with `searchNamespace: ALL`** needs cluster-wide ConfigMap RBAC the chart does not grant here; the watch loop dies at startup (`Process for ALL/configmap died`) and takes the whole Grafana pod down.
+- **Loki's `persistence.enabled: false` mounts nothing in the PVC's place**, and Loki dies on `mkdir /var/loki: read-only file system`. The emptyDir has to be supplied explicitly.
+- **The apply script's original ordering overwrote the real dashboard with its own placeholder** on every run — invisible until someone opened Grafana.
+- **`kubectl port-forward` beats an in-cluster curl pod** for the smoke script: no extra image to pull, and it behaves identically on a laptop and a CI runner.
+
+**Local-environment notes, no repo change** (same class as the W5 D4 Zscaler note): this cluster cannot pull from *any* registry — the interception CA is in the macOS keychain but not in the k3d nodes' containerd trust store — so `scripts/observability-preload-images.sh` pulls on the host and `k3d image import`s. That script reads the architecture from the cluster's own nodes after importing amd64 images onto arm64 nodes: they *run*, under emulation, several times heavier, and the smallest sidecars get OOMKilled (`exit 137`) while the big containers stay up, with nothing anywhere saying "wrong architecture". The same CA problem breaks Gradle dependency resolution inside the Docker build stage (`PKIX path building failed`), so the images verified here were built with the host-built `bootJar` substituted for the builder stage via `docker build --build-context builder=…`; the committed `Dockerfile` is unchanged and CI builds it end to end. The stack also needs roughly 1.5GB more than a default Rancher Desktop VM has: below that, containers are SIGKILLed at random and it reads as a dozen unrelated bugs.
+
+**Known gap:** the PR's dashboard, trace-to-logs and burn-rate *screenshots* are not in this README — they need a browser session against the live Grafana, which is a person's job, not this branch's.
+
+```bash
+./scripts/observability-preload-images.sh   # only on a TLS-intercepted network
+./scripts/observability-bootstrap.sh        # kube-prometheus-stack + Loki + Tempo + Alloy + OTel Collector
+./scripts/observability-apply.sh            # the app's own observability layer, drift-gated
+./scripts/observability-smoke.sh            # metric + business metric + log + trace for one request
+sloth generate -i slo/taxcalc-api.sloth.yaml -o manifests/observability/taxcalc-api-prometheusrule.yaml
+```
 
 ## Build and Test
 
