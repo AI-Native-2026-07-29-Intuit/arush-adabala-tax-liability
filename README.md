@@ -989,7 +989,7 @@ On the Spring side: `micrometer-registry-prometheus` + a narrowed `management.en
 ./scripts/observability-smoke.sh       # one request, three pillars
 ```
 
-- **Task 1** — all three `taxcalc-api` pods report `up` as Prometheus targets with no `lastError`; `/actuator/prometheus` serves 228 `http_server_requests_seconds_bucket` series including the `le="0.5"` boundary the SLI reads; the dashboard's own panel queries return real numbers (p99 `0.0266s`, rate by status, `taxcalc_liability_recomputed_total` by outcome).
+- **Task 1** — all three `taxcalc-api` pods report `up` as Prometheus targets with no `lastError`; `/actuator/prometheus` serves 228 `http_server_requests_seconds_bucket` series including the `le="0.5"` boundary the SLI reads; the dashboard's own panel queries return real numbers (p99 `0.0266s`, rate by status, `taxcalc_liability_recomputed_total` by outcome). Grafana serves `uid: taxcalc-red-v1` from the `Capstone` folder with all five panels at `schemaVersion: 39`, `meta.provisioned: true`, and the rendered provider inside the pod carrying `allowUiUpdates: false`; all four datasources (Prometheus, Loki, Tempo, Alertmanager) resolve.
 - **Task 2** — pod stdout is a JSON envelope carrying `correlationId`, `trace_id`, `span_id`, `app` and `env` as top-level fields, and Loki answers `{app="taxcalc-api"} |= "<correlation id>"` within seconds. Note the query shape: the stream is selected by *label*, the identifier is a *line filter*.
 - **Task 3** — a single trace fetched from Tempo by id shows `POST /graphql` (carrying the `correlation.id` span attribute) → `TaxpayerLookupService.findById` (the `@WithSpan` child) → `find taxcalc_dev.taxpayers` (Mongo) → `SELECT taxcalc.taxpayer` (Postgres). One span tree, not two, which is the double-instrumentation fix holding.
 - **Task 4** — `sloth generate` is byte-stable against the committed rule; `promtool check rules` reports `SUCCESS: 17 rules found`; both burn-rate alerts load into Prometheus and sit `inactive`; the SLI recording rules evaluate to real ratios (`ratio_rate5m = 0` on healthy traffic).
@@ -1015,12 +1015,23 @@ Every one of these was silent or actively misleading, and none is visible in a d
 
 **Known gap:** the PR's dashboard, trace-to-logs and burn-rate *screenshots* are not in this README — they need a browser session against the live Grafana, which is a person's job, not this branch's.
 
+### The CI gate
+
+`.github/workflows/observability.yml` runs two jobs. **`static-gates`** needs no cluster and finishes in about a minute: the Sloth drift gate (regenerate, `git diff --exit-code`), `promtool check rules`, the four `promtool test rules` alert cases, dashboard JSON sanity (`schemaVersion == 39`, the pinned `uid`, panel count, at least one exemplar target), and `kubeconform -strict` with the CRD catalog. **`cluster-round-trip`** builds the image, stands up an ephemeral k3d cluster, installs the PLG-T stack and runs the same `observability-apply.sh` + `observability-smoke.sh` a developer runs, uploading diagnostics on failure.
+
+Both generators run from **pinned containers** rather than downloaded binaries, and that came from CI failing: Sloth stamps its own version into the generated rule, and Homebrew's build reports `0.16.0` where the GitHub release binary reports `v0.16.0` — a byte-stability gate whose output depends on how the tool was installed fails for nobody's mistake. `kubeconform` also needed teaching about the new tree (the CRD catalog for the three Operator CRs, and two exclusions: the Helm values files are not Kubernetes objects, and the Deployment patch is a strategic-merge *fragment* with no selector by design).
+
+The cluster job runs with `OBS_VALUES_OVERLAY=ci`, which layers `manifests/observability/helm/ci/` over the base values: a GitHub runner is 2 vCPU / 7GB and also holds k3d, the app, Postgres, Mongo and Redis, and the full stack does not fit — the first attempt left half the monitoring namespace `Pending`. The overlay drops Grafana and Alertmanager and shrinks every request. Both are dropped because *nothing in the round trip queries them* — the smoke talks to the Prometheus/Loki/Tempo APIs directly, the dashboard JSON is validated in `static-gates`, and the alerts are unit-tested there — not to make a failing assertion pass. The job also scales the Deployment to one replica and removes the HPA first, since W5 D3's 3 replicas at 250m with a floor of 2 are the difference between the monitoring pods scheduling and never scheduling.
+
 ```bash
 ./scripts/observability-preload-images.sh   # only on a TLS-intercepted network
 ./scripts/observability-bootstrap.sh        # kube-prometheus-stack + Loki + Tempo + Alloy + OTel Collector
 ./scripts/observability-apply.sh            # the app's own observability layer, drift-gated
 ./scripts/observability-smoke.sh            # metric + business metric + log + trace for one request
-sloth generate -i slo/taxcalc-api.sloth.yaml -o manifests/observability/taxcalc-api-prometheusrule.yaml
+
+OBS_VALUES_OVERLAY=ci ./scripts/observability-bootstrap.sh   # the trimmed stack CI installs
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" -w /w ghcr.io/slok/sloth:v0.16.0 \
+  generate -i slo/taxcalc-api.sloth.yaml -o manifests/observability/taxcalc-api-prometheusrule.yaml
 ```
 
 ## Build and Test

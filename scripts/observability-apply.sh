@@ -50,7 +50,11 @@ fi
 #    `spec:` has to be unwrapped and de-indented first - feeding it the whole manifest fails with
 #    a misleading "field groups not found" that reads like the rules are missing.
 echo "[3/6] promtool check rules + alert unit tests"
-UNWRAPPED="$(mktemp -t taxcalc-rules)"
+# Full template rather than `mktemp -t taxcalc-rules`: BSD mktemp (macOS) treats the argument as
+# a prefix and appends its own suffix, but GNU mktemp (the CI runner) requires the X's and fails
+# outright with "too few X's in template" - which is how this first ran green locally and red in
+# CI.
+UNWRAPPED="$(mktemp "${TMPDIR:-/tmp}/taxcalc-rules.XXXXXX")"
 trap 'rm -f "${UNWRAPPED}"' EXIT
 python3 - "${RULE_FILE}" > "${UNWRAPPED}" <<'PY'
 import sys
