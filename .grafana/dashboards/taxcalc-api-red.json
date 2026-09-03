@@ -3,44 +3,107 @@
   "title": "taxcalc-api - RED",
   "schemaVersion": 39,
   "version": 1,
-  "tags": ["taxcalc", "red", "week5"],
+  "tags": [
+    "taxcalc",
+    "red",
+    "week5"
+  ],
   "timezone": "",
   "refresh": "30s",
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "templating": {
     "list": [
-      { "name": "ns", "type": "constant", "current": { "value": "taxcalc-dev" }, "query": "taxcalc-dev", "hide": 2 },
-      { "name": "app", "type": "constant", "current": { "value": "taxcalc-api" }, "query": "taxcalc-api", "hide": 2 },
-      { "name": "uri", "type": "constant", "current": { "value": "/api/v1/taxpayers/{id}" }, "query": "/api/v1/taxpayers/{id}", "hide": 2 }
+      {
+        "name": "ns",
+        "type": "constant",
+        "current": {
+          "value": "taxcalc-dev"
+        },
+        "query": "taxcalc-dev",
+        "hide": 2
+      },
+      {
+        "name": "app",
+        "type": "constant",
+        "current": {
+          "value": "taxcalc-api"
+        },
+        "query": "taxcalc-api",
+        "hide": 2
+      },
+      {
+        "name": "uri",
+        "type": "constant",
+        "current": {
+          "value": "/api/v1/taxpayers/{id}"
+        },
+        "query": "/api/v1/taxpayers/{id}",
+        "hide": 2
+      }
     ]
   },
   "panels": [
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Rate (req/s by status)",
-      "description": "R of RED. Grouped by HTTP status rather than by method+uri: on a single-endpoint dashboard the status split is what tells you whether traffic changed or behaviour did.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "title": "Rate (req/s by method + uri)",
+      "description": "R of RED, grouped by method and uri so the panel keeps working as more routes appear. The status split lives in the Errors panel below.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
       "targets": [
         {
-          "datasource": { "type": "prometheus" },
-          "expr": "sum by (status) (rate(http_server_requests_seconds_count{app=\"$app\",uri=\"$uri\"}[5m]))",
-          "legendFormat": "{{status}}"
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "sum by (method, uri) (rate(http_server_requests_seconds_count{app=\"$app\"}[5m]))",
+          "legendFormat": "{{method}} {{uri}}"
         }
       ]
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Errors (5xx fraction)",
-      "description": "E of RED, as a fraction rather than a count: 20 failures per second means nothing until you know whether that is 0.1% or 100% of traffic.",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "title": "Errors (5xx rate by uri, and 5xx fraction)",
+      "description": "E of RED. The absolute rate says how many requests are failing; the fraction says whether that matters - 20 failures/s is either 0.1% or 100% of traffic. `or vector(0)` on the fraction is the same trap the SLI hit: with no 5xx the numerator matches no series, the division returns an empty vector, and the panel reads \"No data\" - indistinguishable from a broken panel. It should read zero.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
       "targets": [
         {
-          "datasource": { "type": "prometheus" },
-          "expr": "sum(rate(http_server_requests_seconds_count{app=\"$app\",uri=\"$uri\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_server_requests_seconds_count{app=\"$app\",uri=\"$uri\"}[5m])), 0.001)",
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "sum by (uri) (rate(http_server_requests_seconds_count{app=\"$app\",status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx/s {{uri}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "(sum(rate(http_server_requests_seconds_count{app=\"$app\",uri=\"$uri\",status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(http_server_requests_seconds_count{app=\"$app\",uri=\"$uri\"}[5m])), 0.001)",
           "legendFormat": "5xx fraction"
         }
       ]
@@ -50,24 +113,44 @@
       "type": "timeseries",
       "title": "Duration p50 / p95 / p99",
       "description": "D of RED, computed from the _bucket series that management.metrics.distribution.percentiles-histogram publishes. exemplar: true is what puts the trace-carrying diamonds under the p95/p99 lines.",
-      "gridPos": { "h": 8, "w": 18, "x": 0, "y": 8 },
-      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "options": { "tooltip": { "mode": "multi" } },
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": { "type": "prometheus" },
+          "datasource": {
+            "type": "prometheus"
+          },
           "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{app=\"$app\",uri=\"$uri\"}[5m])))",
           "legendFormat": "p50",
           "exemplar": true
         },
         {
-          "datasource": { "type": "prometheus" },
+          "datasource": {
+            "type": "prometheus"
+          },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{app=\"$app\",uri=\"$uri\"}[5m])))",
           "legendFormat": "p95",
           "exemplar": true
         },
         {
-          "datasource": { "type": "prometheus" },
+          "datasource": {
+            "type": "prometheus"
+          },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{app=\"$app\",uri=\"$uri\"}[5m])))",
           "legendFormat": "p99",
           "exemplar": true
@@ -78,13 +161,26 @@
       "id": 4,
       "type": "timeseries",
       "title": "In-flight requests",
-      "description": "Concurrency, from Boot's http_server_requests_active gauge. Rising in-flight with flat rate is the signature of requests getting slower rather than more numerous.",
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
-      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "description": "Concurrency. NOTE the metric name: Spring Boot 3.x publishes in-flight requests as a LongTaskTimer (http_server_requests_active_seconds_*), so the count lives in the _gcount series. The older flat gauge http_server_active_requests does not exist on this version - a panel querying it renders empty forever with no error, which is why this one is asserted against the live exposition rather than copied from a reference dashboard.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
       "targets": [
         {
-          "datasource": { "type": "prometheus" },
-          "expr": "sum(http_server_requests_active_seconds_active_count{app=\"$app\"})",
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "sum(http_server_requests_active_seconds_gcount{app=\"$app\"})",
           "legendFormat": "in-flight"
         }
       ]
@@ -94,11 +190,23 @@
       "type": "timeseries",
       "title": "Business events (taxcalc_liability_recomputed_total)",
       "description": "The one custom metric outside the http_server_requests family, split by outcome. A counter, not a gauge: rate() over it survives pod restarts for free.",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
       "targets": [
         {
-          "datasource": { "type": "prometheus" },
+          "datasource": {
+            "type": "prometheus"
+          },
           "expr": "sum by (outcome) (rate(taxcalc_liability_recomputed_total{app=\"$app\"}[5m]))",
           "legendFormat": "{{outcome}}"
         }

@@ -2,6 +2,8 @@ package com.uptimecrew.tax_liability.service;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 
@@ -71,6 +73,11 @@ public class TaxpayerLookupService {
     private final Counter lookupsFailed;
     private final Timer lookupTimer;
     private final MeterRegistry registry;
+
+    // The business counter's tag set is only known at call time, so its meters are memoised here
+    // rather than resolved through Micrometer's builder on every request - see recomputedCounter.
+    // Bounded by construction: filing statuses (plus `unknown`) times three outcomes.
+    private final ConcurrentMap<String, Counter> recomputedCounters = new ConcurrentHashMap<>();
 
     /**
      * @param delegate the cached read path this service instruments, must not be null
@@ -156,21 +163,26 @@ public class TaxpayerLookupService {
      * state, so it never has to survive a pod restart - {@code rate()} over a monotonic counter
      * handles the reset for free.
      *
-     * <p>Resolved per call rather than pre-built because its {@code taxpayer_type} tag is not
-     * known until the read model comes back. The tag set is still bounded (filing statuses plus
-     * {@code unknown}, times three outcomes), so the registry lookup hits an existing meter after
-     * the first request of each combination.
+     * <p>Its {@code taxpayer_type} tag is not known until the read model comes back, so this one
+     * cannot be a constructor-built field like the meters above. It is still never resolved
+     * through the builder on the hot path: {@code Counter.builder(...).register(registry)}
+     * allocates a fresh {@code Meter.Id}, applies every registered {@code MeterFilter} and hashes
+     * its way through the registry's map on <em>every</em> call, even when handing back a meter it
+     * already returned a thousand times. The {@link ConcurrentHashMap} in front of it turns the
+     * steady state into one hash lookup on a small, bounded key set (filing statuses plus
+     * {@code unknown}, times three outcomes), and the builder runs once per distinct combination.
      *
      * @param taxpayerType the filing status this read resolved to, or {@code unknown}
      * @param outcome one of {@code success}, {@code not_found}, {@code error}
      * @return the registered counter for that tag pair
      */
     private Counter recomputedCounter(String taxpayerType, String outcome) {
-        return Counter.builder(RECOMPUTED_METER)
-                .description("Taxpayer liability reads served, by filing status and outcome")
-                .tag("taxpayer_type", taxpayerType)
-                .tag("outcome", outcome)
-                .register(registry);
+        return recomputedCounters.computeIfAbsent(taxpayerType + '|' + outcome, key ->
+                Counter.builder(RECOMPUTED_METER)
+                        .description("Taxpayer liability reads served, by filing status and outcome")
+                        .tag("taxpayer_type", taxpayerType)
+                        .tag("outcome", outcome)
+                        .register(registry));
     }
 
     /**
