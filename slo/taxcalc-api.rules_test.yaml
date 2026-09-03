@@ -1,0 +1,163 @@
+# slo/taxcalc-api.rules_test.yaml - `promtool test rules` unit tests for the generated
+# burn-rate alerts.
+#
+# Why this file exists: the alerts are the part of this deliverable that must work on the worst
+# day of the quarter, and the usual way to "prove" them - push slow traffic at a dev cluster and
+# watch Alertmanager - takes minutes, is not reproducible, and passes just as happily when the
+# thresholds are wrong by a factor of ten. Feeding synthetic series through the real recording and
+# alerting rules answers the actual question ("at what error ratio does the pager fire, and how
+# long does it take?") deterministically, in about a second, on any machine.
+#
+# It also pins the multi-window contract: the fast alert requires BOTH the short and the long
+# window to be burning, so a one-off spike does not page anyone.
+#
+# Run with (the rule file is the unwrapped spec of the PrometheusRule - see
+# scripts/observability-apply.sh):
+#   promtool test rules slo/taxcalc-api.rules_test.yaml
+rule_files:
+  - /rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # -------------------------------------------------------------------------
+  # 1. A healthy service: 1000 req/s, all fast and non-5xx. Nothing fires.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: healthy service does not page
+    input_series:
+      - series: 'http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}'
+        values: '0+60000x120'      # 1000 req/s for two hours
+      - series: 'http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status="200",le="0.5"}'
+        values: '0+60000x120'      # every one of them under 500ms
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: taxcalc-apiLatencySLOBurn
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------
+  # 2. A hard breach: 50% of requests slower than 500ms. That is a 50x burn of
+  #    a 1% budget, far past the 14.4x fast-burn threshold, so the PAGE fires
+  #    once both the 5m and the 1h window have caught up.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: sustained 50 percent slow requests pages
+    input_series:
+      - series: 'http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}'
+        values: '0+60000x120'
+      - series: 'http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status="200",le="0.5"}'
+        values: '0+30000x120'      # only half land under 500ms
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: taxcalc-apiLatencySLOBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              sloth_severity: page
+              category: latency
+              team: taxcalc
+              release: kube-prometheus-stack
+              sloth_id: taxcalc-api-taxcalc-api-latency
+              sloth_service: taxcalc-api
+              sloth_slo: taxcalc-api-latency
+            exp_annotations:
+              title: "(page) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
+              summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
+              runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+          - exp_labels:
+              severity: ticket
+              sloth_severity: ticket
+              category: latency
+              team: taxcalc
+              release: kube-prometheus-stack
+              sloth_id: taxcalc-api-taxcalc-api-latency
+              sloth_service: taxcalc-api
+              sloth_slo: taxcalc-api-latency
+            exp_annotations:
+              title: "(ticket) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
+              summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
+              runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+
+  # -------------------------------------------------------------------------
+  # 3. The reason there are TWO windows per alert. A two-minute total outage an
+  #    hour into the day pins the 5m window at 100% error, and a single-window
+  #    alert would page on that instantly. Here it does not: the fast alert also
+  #    requires the 1h window over 14.4% (this reaches ~3%) or the 30m/6h pair
+  #    over 6% (~6.7% and ~2.9% - the 6h half fails), so nobody is woken.
+  #    The slow-burn ticket alert does fire, which is the right answer: two
+  #    minutes of a 30-day budget is a real dent, just not a 3am one.
+  #
+  #    The margin here is genuinely narrow - at five minutes of outage instead
+  #    of two, the 30m/6h pair does clear 6% and this DOES page. That is the
+  #    scheme working as designed, not a threshold to tune away.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: brief blip tickets but does not page
+    input_series:
+      - series: 'http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}'
+        values: '0+60000x120'
+      # Good for an hour, then the good counter simply stops advancing for two minutes
+      # (every request slow), then resumes.
+      - series: 'http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status="200",le="0.5"}'
+        values: '0+60000x60 3600000+0x2 3600000+60000x58'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: taxcalc-apiLatencySLOBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              sloth_severity: ticket
+              category: latency
+              team: taxcalc
+              release: kube-prometheus-stack
+              sloth_id: taxcalc-api-taxcalc-api-latency
+              sloth_service: taxcalc-api
+              sloth_slo: taxcalc-api-latency
+            exp_annotations:
+              title: "(ticket) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
+              summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
+              runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+
+  # -------------------------------------------------------------------------
+  # 4. 5xx counts as a budget breach even when it is fast. The bucket series
+  #    below is tagged status="500", and the SLI's "good" bucket excludes 5xx -
+  #    so an endpoint that instantly returns errors burns budget at full rate
+  #    rather than scoring a perfect latency month.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: fast 5xx responses still burn the budget
+    input_series:
+      - series: 'http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}'
+        values: '0+60000x120'
+      - series: 'http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status="500",le="0.5"}'
+        values: '0+60000x120'      # every request fast, every request a 500
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: taxcalc-apiLatencySLOBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              sloth_severity: page
+              category: latency
+              team: taxcalc
+              release: kube-prometheus-stack
+              sloth_id: taxcalc-api-taxcalc-api-latency
+              sloth_service: taxcalc-api
+              sloth_slo: taxcalc-api-latency
+            exp_annotations:
+              title: "(page) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
+              summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
+              runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"
+          - exp_labels:
+              severity: ticket
+              sloth_severity: ticket
+              category: latency
+              team: taxcalc
+              release: kube-prometheus-stack
+              sloth_id: taxcalc-api-taxcalc-api-latency
+              sloth_service: taxcalc-api
+              sloth_slo: taxcalc-api-latency
+            exp_annotations:
+              title: "(ticket) taxcalc-api taxcalc-api-latency SLO error budget burn rate is too fast."
+              summary: "taxcalc-api GET /api/v1/taxpayers/{id} latency SLO is burning error budget."
+              runbook_url: "https://runbooks.example.internal/taxcalc-api/latency-slo-burn"

@@ -21,7 +21,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[5m]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[5m]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[5m]))
+            or vector(0)
+          )
         )
         )
         /
@@ -39,7 +42,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[30m]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[30m]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[30m]))
+            or vector(0)
+          )
         )
         )
         /
@@ -57,7 +63,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[1h]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[1h]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[1h]))
+            or vector(0)
+          )
         )
         )
         /
@@ -75,7 +84,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[2h]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[2h]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[2h]))
+            or vector(0)
+          )
         )
         )
         /
@@ -93,7 +105,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[6h]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[6h]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[6h]))
+            or vector(0)
+          )
         )
         )
         /
@@ -111,7 +126,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[1d]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[1d]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[1d]))
+            or vector(0)
+          )
         )
         )
         /
@@ -129,7 +147,10 @@ spec:
         ((
           sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[3d]))
           -
-          sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[3d]))
+          (
+            sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[3d]))
+            or vector(0)
+          )
         )
         )
         /

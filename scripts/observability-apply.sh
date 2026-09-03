@@ -41,28 +41,42 @@ fi
 #    promtool checks a Prometheus rule FILE, not a Kubernetes PrometheusRule object, so the CR's
 #    `spec:` has to be unwrapped and de-indented first - feeding it the whole manifest fails with
 #    a misleading "field groups not found" that reads like the rules are missing.
-echo "[3/6] promtool check rules"
-python3 - "${RULE_FILE}" <<'PY' | docker run --rm -i --entrypoint promtool "${PROM_IMAGE}" check rules /dev/stdin
+echo "[3/6] promtool check rules + alert unit tests"
+UNWRAPPED="$(mktemp -t taxcalc-rules)"
+trap 'rm -f "${UNWRAPPED}"' EXIT
+python3 - "${RULE_FILE}" > "${UNWRAPPED}" <<'PY'
 import sys
 text = open(sys.argv[1]).read()
 spec = text[text.index("spec:") + len("spec:"):]
 print("\n".join(line[2:] if line.startswith("  ") else line for line in spec.splitlines()))
 PY
+docker run --rm -v "${UNWRAPPED}:/rules.yaml" --entrypoint promtool "${PROM_IMAGE}" \
+  check rules /rules.yaml
+# `check rules` only proves the PromQL parses. The unit tests prove the alerts actually fire at
+# the burn rates they claim to - including the case that caught a real defect in this SLI, where
+# a total outage produced NO alert because `total - good` returns an empty vector when nothing
+# matches the good selector.
+docker run --rm -v "${UNWRAPPED}:/rules.yaml" \
+  -v "${PWD}/slo/taxcalc-api.rules_test.yaml:/test.yaml" \
+  --entrypoint promtool "${PROM_IMAGE}" test rules /test.yaml
 
 # 4. The dashboard ConfigMap is rebuilt from the JSON in git on every apply, rather than the JSON
 #    being hand-pasted into the manifest. Two copies of a 100-line JSON document is two sources of
 #    truth, and the one nobody looks at is the one that is deployed.
 echo "[4/6] dashboard ConfigMap from ${DASH_JSON}"
 python3 -c "import json,sys; json.load(open('${DASH_JSON}'))"   # fail early on malformed JSON
+# The manifest goes FIRST and the generated ConfigMap second, because that file's first document
+# is a same-named placeholder: applying it after the real dashboard would overwrite a working
+# dashboard with an empty one on every run - and the failure is invisible until someone opens
+# Grafana. The manifest's second document (the provisioning provider) is what is actually wanted
+# from it here.
+kubectl apply -f "manifests/observability/${APP}-dashboard-configmap.yaml" >/dev/null
 kubectl -n "${OBS_NS}" create configmap "${APP}-grafana-dashboard" \
   --from-file="${APP}-red.json=${DASH_JSON}" \
   --dry-run=client -o yaml \
   | kubectl label --local -f - --dry-run=client -o yaml \
       grafana_dashboard=1 "app.kubernetes.io/name=${APP}" "app.kubernetes.io/part-of=taxcalc" \
   | kubectl apply -f -
-# The provisioning ConfigMap (second document in that file) is applied as-is; the dashboard
-# document in it is a placeholder that the create above has just overwritten.
-kubectl apply -f "manifests/observability/${APP}-dashboard-configmap.yaml" >/dev/null
 
 # 5. The application-facing objects.
 echo "[5/6] apply ServiceMonitor / Deployment patch / PrometheusRule / AlertmanagerConfig"

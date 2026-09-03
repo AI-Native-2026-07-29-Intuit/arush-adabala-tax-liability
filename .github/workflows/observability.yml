@@ -69,6 +69,17 @@ jobs:
           docker run --rm -v /tmp/rules.yaml:/rules.yaml --entrypoint promtool "${PROM_IMAGE}" \
             check rules /rules.yaml
 
+      # `check rules` only proves the PromQL parses. These feed synthetic series through the real
+      # recording + alerting rules and assert what fires and when - a healthy service pages
+      # nobody, a sustained 50% breach pages, a two-minute blip tickets without paging, and fast
+      # 5xx responses still burn the budget. The last case caught a real defect in the SLI (an
+      # empty vector instead of a 100% error ratio during a total outage).
+      - name: promtool alert unit tests
+        run: |
+          docker run --rm -v /tmp/rules.yaml:/rules.yaml \
+            -v "${GITHUB_WORKSPACE}/slo/taxcalc-api.rules_test.yaml:/test.yaml" \
+            --entrypoint promtool "${PROM_IMAGE}" test rules /test.yaml
+
       # Dashboard sanity: the three properties that make it a stable, reproducible artefact.
       # schemaVersion is pinned because a newer Grafana silently rewrites an older schema on
       # first load, which is drift that appears without anyone editing anything.

@@ -53,11 +53,23 @@ spec:
           # management.metrics.distribution.slo - the SLI is read straight off a bucket boundary
           # that lands exactly on the objective, not interpolated between two default buckets
           # that happen to straddle it.
+          #
+          # `or vector(0)` on the good side is not defensive noise - without it this SLI stops
+          # working in precisely the situation it exists for. PromQL binary operators drop
+          # elements with no match on the other side, so when EVERY request is a 5xx (or every
+          # request is slow) the good selector matches no series at all, `total - good` returns
+          # an empty vector, the recording rule records nothing, and the burn-rate alerts have
+          # no data to fire on. A total outage would look exactly like a quiet weekend.
+          # Caught by slo/taxcalc-api.rules_test.yaml's "fast 5xx" case, which failed with
+          # zero alerts before this was added.
           errorQuery: |
             (
               sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[{{.window}}]))
               -
-              sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[{{.window}}]))
+              (
+                sum(rate(http_server_requests_seconds_bucket{app="taxcalc-api",uri="/api/v1/taxpayers/{id}",status!~"5..",le="0.5"}[{{.window}}]))
+                or vector(0)
+              )
             )
           totalQuery: |
             sum(rate(http_server_requests_seconds_count{app="taxcalc-api",uri="/api/v1/taxpayers/{id}"}[{{.window}}]))
