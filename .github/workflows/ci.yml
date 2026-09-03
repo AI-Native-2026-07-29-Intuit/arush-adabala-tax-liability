@@ -62,17 +62,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
+      # The checkout + setup-java + Gradle-cache bundle above (Task 1) is now
+      # the composite action at .github/actions/setup-build - one place to
+      # bump the JDK or cache key instead of three near-identical copies
+      # (this job and the reusable _build-and-push.yml job below) drifting
+      # apart. Behaviour is unchanged; this YAML is just shorter.
+      - name: Set up build env (composite)
+        uses: ./.github/actions/setup-build
 
       - name: Gradle build (compile + full test suite + JaCoCo gate)
         run: ./gradlew --no-daemon build
@@ -87,5 +83,19 @@ jobs:
             build/reports/jacoco/
           retention-days: 7
 
-  # Task 2 adds a call-build-and-push job here, invoked only on push to
-  # main, once .github/workflows/_build-and-push.yml exists.
+  # Only on push to main, and only once build-test is green: build the
+  # image, Trivy-scan it, and push to ECR via OIDC. A PR run never reaches
+  # this job - docker.yml already covers PR-time build+scan+smoke (no
+  # push), a separate gate from W5 D1 left untouched by this deliverable.
+  call-build-and-push:
+    name: Build, scan & push (dev)
+    needs: build-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/_build-and-push.yml
+    with:
+      app-name: taxcalc-api
+      image-name: uptimecrew/taxcalc-api
+      ecr-repo: uptimecrew/taxcalc-api
+    permissions:
+      contents: read
+      id-token: write

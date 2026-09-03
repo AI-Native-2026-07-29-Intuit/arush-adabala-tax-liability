@@ -1,0 +1,32 @@
+# .github/actions/setup-build/action.yml
+# Composite action: checkout + JDK + Gradle cache restore. Used by every job
+# that compiles this app's Java (ci.yml's build-test, and the reusable
+# _build-and-push.yml) - one place to bump the JDK version or cache key
+# instead of three near-identical copies drifting apart.
+#
+# JDK 17, not 21: build.gradle pins java.toolchain.languageVersion=17 with no
+# toolchain auto-provisioning configured (CLAUDE.md convention #1), so the
+# runner's JDK major version must match exactly - the same constraint
+# docker/SECURITY.md documents for the Dockerfile's own `builder` stage
+# (eclipse-temurin:17-jdk-jammy, not :21).
+#
+# No taxcalc-api/ subdirectory: this repo's build.gradle/gradlew/src/ already
+# live at the repo root (see docker/SECURITY.md's "Known deviations" table),
+# so there is no working-directory to set here, unlike a multi-module layout.
+name: setup-build
+description: Check out the repo, install Temurin 17, restore the Gradle dependency cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Check out source
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        fetch-depth: 1
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+      with:
+        distribution: temurin
+        java-version: "17"
+        cache: gradle
