@@ -26,6 +26,10 @@ IMAGES=(
   quay.io/prometheus/prometheus:v2.54.1
   quay.io/prometheus/alertmanager:v0.27.0
   quay.io/kiwigrid/k8s-sidecar:1.27.4
+  # The Prometheus Operator's admission-webhook cert-generation Job. It is the only image here
+  # from registry.k8s.io, and the reason this script exists at all - the in-cluster pull of it
+  # was the first thing the intercepting proxy broke.
+  registry.k8s.io/ingress-nginx/kube-webhook-certgen:v20221220-controller-v1.5.1-58-g787ea74b6
   ghcr.io/jimmidyson/configmap-reload:v0.12.0
   docker.io/grafana/grafana:11.2.1
   docker.io/grafana/loki:3.0.0

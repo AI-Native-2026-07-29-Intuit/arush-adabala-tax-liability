@@ -30,6 +30,24 @@ loki:
 deploymentMode: SingleBinary
 singleBinary:
   replicas: 1
+  # emptyDir instead of the chart's default PersistentVolumeClaim, matching Tempo. Logs on a
+  # cluster that is created and deleted per lab do not need to outlive the pod, and the PVC path
+  # does not work here anyway: k3d's local-path provisioner creates the directory by launching a
+  # helper pod, whose busybox image has to be pulled from docker.io - which this cluster cannot
+  # reach (see scripts/observability-preload-images.sh). The PVC sits Pending on
+  # "create process timeout after 120 seconds" and the whole install blocks behind it.
+  persistence:
+    enabled: false
+  # Turning persistence off removes the PVC but does NOT substitute anything for it: the chart
+  # mounts nothing at /var/loki, the container's root filesystem is read-only, and Loki dies at
+  # startup on `mkdir /var/loki: read-only file system` while initialising ruler-storage. The
+  # emptyDir has to be supplied explicitly.
+  extraVolumes:
+    - name: storage
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: storage
+      mountPath: /var/loki
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { memory: 1Gi }

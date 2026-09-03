@@ -103,18 +103,38 @@ grafana:
     requests: { cpu: 50m, memory: 128Mi }
     limits:   { memory: 512Mi }
 
+# The PrometheusRule admission webhook is left ENABLED (the chart default), even though
+# `promtool check rules` in scripts/observability-apply.sh and in CI already rejects malformed
+# PromQL earlier and with a better message. Turning it off looks harmless and is not: the same
+# certificate the webhook uses also serves the operator's own liveness/readiness endpoint on
+# :10250, so `admissionWebhooks.enabled: false` leaves those probes hitting a port with nothing
+# listening, and the operator crash-loops on a failed liveness probe with no hint that a webhook
+# setting caused it (observed here for real - "Liveness probe failed: dial tcp 10.42.0.16:10250:
+# connect: connection refused", exit 137, repeating).
+#
+# The webhook's cert-generation Job pulls from registry.k8s.io, which is unreachable from inside
+# this laptop's cluster; scripts/observability-preload-images.sh imports that image along with
+# the rest.
+
 prometheusOperator:
-  admissionWebhooks:
-    # The webhook that validates PrometheusRule objects at admission time, plus the Job that
-    # mints its TLS certificate. Disabled here for one environment reason and one design reason:
-    # the certgen Job's image lives on registry.k8s.io, which this laptop's TLS-intercepting
-    # proxy blocks from inside the cluster (see the README's W5 D5 section); and the check it
-    # performs - "is this PromQL parseable" - is one this repo already runs earlier and harder,
-    # via `promtool check rules` in scripts/observability-apply.sh AND in the CI workflow, so a
-    # malformed rule fails before it is ever applied rather than at apply time.
-    enabled: false
-    patch:
-      enabled: false
+  # The chart's default probes give the operator a 1-second timeout with a failure threshold of
+  # 3. That is fine on a real node and wrong on a laptop k3d cluster: under load the operator's
+  # TLS handshake on :10250 intermittently takes longer than a second, three of those in a row
+  # kill the container (exit 137), and the restart makes the next handshake slower still - a
+  # crash loop caused entirely by the probe, with the operator itself perfectly healthy
+  # (observed here: "Liveness probe failed: context deadline exceeded", then "connection reset
+  # by peer", every couple of minutes).
+  livenessProbe:
+    timeoutSeconds: 10
+    periodSeconds: 20
+    failureThreshold: 6
+  readinessProbe:
+    timeoutSeconds: 10
+    periodSeconds: 20
+    failureThreshold: 6
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { memory: 512Mi }
 
 # Cluster-level exporters, off: this deliverable measures the application (RED from
 # http_server_requests, a business counter, a latency SLO), and node/pod-inventory metrics would
