@@ -15,6 +15,13 @@ SLOTH_SPEC="slo/taxcalc-api.sloth.yaml"
 RULE_FILE="manifests/observability/${APP}-prometheusrule.yaml"
 DASH_JSON=".grafana/dashboards/${APP}-red.json"
 PROM_IMAGE="prom/prometheus:v2.54.1"
+# Sloth runs from a pinned CONTAINER, not from whatever `sloth` is on PATH. It stamps its own
+# version into the generated file (a `sloth_version` label and the header comment), and the
+# version string differs by distribution - Homebrew's sloth-cli reports "0.16.0" where the
+# GitHub release binary reports "v0.16.0". Two developers with the same Sloth version would
+# therefore produce two different files and the drift gate would fail for nobody's mistake.
+# Caught by CI on the first push: the gate flagged a diff whose only content was that stamp.
+SLOTH_IMAGE="ghcr.io/slok/sloth:v0.16.0"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -27,16 +34,17 @@ kubectl get ns "${OBS_NS}" >/dev/null
 #    is committed, so this is the local half of the same gate CI runs: the rule and the spec that
 #    is supposed to explain it can never disagree.
 echo "[2/6] sloth generate + drift check"
-sloth generate -i "${SLOTH_SPEC}" -o "${RULE_FILE}" >/dev/null 2>&1
+docker run --rm -u "$(id -u):$(id -g)" -v "${PWD}:/w" -w /w "${SLOTH_IMAGE}" \
+  generate -i "${SLOTH_SPEC}" -o "${RULE_FILE}" >/dev/null 2>&1
 if ! git diff --quiet -- "${RULE_FILE}"; then
   echo "ERROR: ${RULE_FILE} drifted from ${SLOTH_SPEC}. Re-commit the regenerated file." >&2
   git --no-pager diff -- "${RULE_FILE}" >&2
   exit 1
 fi
 
-# 3. promtool BEFORE apply. The Operator's own admission webhook is disabled in this cluster
-#    (see the Helm values), so this is the only thing standing between a typo in PromQL and a
-#    rule group Prometheus loads as broken.
+# 3. promtool BEFORE apply. The Operator's admission webhook would also reject malformed PromQL,
+#    but only once the object is already being applied and with a far worse message; this fails
+#    the same mistake a step earlier, locally, in a second.
 #
 #    promtool checks a Prometheus rule FILE, not a Kubernetes PrometheusRule object, so the CR's
 #    `spec:` has to be unwrapped and de-indented first - feeding it the whole manifest fails with

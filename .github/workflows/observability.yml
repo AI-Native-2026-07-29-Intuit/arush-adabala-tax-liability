@@ -23,7 +23,12 @@ permissions:
   contents: read
 
 env:
-  SLOTH_VERSION: v0.16.0
+  # Both generators run from pinned CONTAINERS rather than downloaded binaries, so the bytes
+  # they produce here are the bytes a developer's `scripts/observability-apply.sh` produces.
+  # Sloth stamps its own version string into the generated rule, and that string differs
+  # between distributions of the same version (Homebrew: "0.16.0", GitHub release: "v0.16.0"),
+  # which is enough to fail a byte-stability gate for no real reason.
+  SLOTH_IMAGE: ghcr.io/slok/sloth:v0.16.0
   PROM_IMAGE: prom/prometheus:v2.54.1
 
 jobs:
@@ -36,19 +41,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install sloth
-        run: |
-          curl -sSL -o /usr/local/bin/sloth \
-            "https://github.com/slok/sloth/releases/download/${SLOTH_VERSION}/sloth-linux-amd64"
-          chmod +x /usr/local/bin/sloth
-
       # The drift gate. `sloth generate` is deterministic, so regenerating and diffing is a
       # complete answer to "does the committed PrometheusRule still match the spec that claims to
       # describe it?" - which hand-editing the generated file would break silently, leaving an
       # SLO document that no longer matches the alerts anyone is paged by.
       - name: Sloth drift gate
         run: |
-          sloth generate -i slo/taxcalc-api.sloth.yaml \
+          docker run --rm -u "$(id -u):$(id -g)" -v "${GITHUB_WORKSPACE}:/w" -w /w \
+            "${SLOTH_IMAGE}" generate -i slo/taxcalc-api.sloth.yaml \
             -o manifests/observability/taxcalc-api-prometheusrule.yaml
           if ! git diff --exit-code -- manifests/observability/taxcalc-api-prometheusrule.yaml; then
             echo "::error::PrometheusRule drifted from slo/taxcalc-api.sloth.yaml - regenerate and commit."
@@ -100,14 +100,17 @@ jobs:
       # The observability manifests are mostly CRs (ServiceMonitor, PrometheusRule,
       # AlertmanagerConfig) whose schemas ship with the Prometheus Operator, not with Kubernetes,
       # so the CRD catalog has to be added as a second schema source - with only the default
-      # location, -strict rejects all three as unknown kinds. The Helm values files in that tree
-      # are not Kubernetes objects at all and are excluded by name.
+      # location, -strict rejects all three as unknown kinds. Two things in that tree are not
+      # standalone Kubernetes objects and are excluded by name: the Helm values files, and the
+      # Deployment PATCH - a strategic-merge patch is a fragment by design (no selector, no
+      # containers[].image), so schema-validating it as a Deployment is a category error.
       - name: kubeconform manifests/observability
         run: |
           kubeconform -strict -summary \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             -ignore-filename-pattern 'manifests/observability/helm/.*' \
+            -ignore-filename-pattern '.*-deployment-patch.yaml' \
             manifests/observability/
 
   # ---------------------------------------------------------------------------
@@ -174,12 +177,6 @@ jobs:
 
       - name: Install the PLG-T stack
         run: ./scripts/observability-bootstrap.sh
-
-      - name: Install sloth (the apply script regenerates the rule)
-        run: |
-          curl -sSL -o /usr/local/bin/sloth \
-            "https://github.com/slok/sloth/releases/download/${SLOTH_VERSION}/sloth-linux-amd64"
-          chmod +x /usr/local/bin/sloth
 
       - name: Apply the observability layer
         run: ./scripts/observability-apply.sh
