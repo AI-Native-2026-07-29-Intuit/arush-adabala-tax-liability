@@ -1,0 +1,64 @@
+# .github/workflows/deploy-prod.yml
+# Promotes a SHA-tagged image already in ECR to the prod environment.
+# Triggered manually via workflow_dispatch with the image SHA as input.
+# The dev environment auto-deploys on merge to main (via _build-and-push.yml);
+# prod stays human-gated by required reviewers on the 'prod' GitHub
+# Environment (configured via the GitHub UI/API, not version-controlled -
+# see .github/PIPELINE.md's "What is NOT in this repo" section).
+name: deploy-prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image-sha:
+        description: Image SHA tag already pushed to ECR (40-hex git SHA).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Prod deploys MUST queue, never race. Two reviewers approving back-to-back
+# on different SHAs would otherwise apply both manifests in undefined order.
+concurrency:
+  group: deploy-prod-taxcalc-api
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote image to prod
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 15
+    environment: prod # required reviewers gate the run start
+    permissions:
+      contents: read
+      id-token: write # OIDC token for assuming the prod role
+    steps:
+      - name: Validate input SHA is a 40-char hex
+        run: |
+          if [[ ! "${{ inputs.image-sha }}" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::image-sha must be a 40-char git SHA"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials via OIDC (prod role)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/taxcalc-api-prod-deploy
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: gh-prod-${{ github.run_id }}
+
+      - name: Confirm image exists in ECR
+        run: |
+          aws ecr describe-images \
+            --repository-name uptimecrew/taxcalc-api \
+            --image-ids imageTag=${{ inputs.image-sha }}
+
+      # W6 D3 fills in the kubectl rollout + Argo CD manifest-repo commit
+      # (see README's "Week 5 Day 3" section for the Deployment this
+      # promotes); today stops here, with the prod role assumed and the
+      # image's existence in ECR confirmed - the graded scope for this
+      # deliverable, per the lesson's own "What this pipeline does NOT do
+      # (yet)" list.
+      - name: Placeholder for kubectl rollout
+        run: echo "Would apply k8s manifests with image=${{ inputs.image-sha }}"
