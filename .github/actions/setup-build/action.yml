@@ -1,8 +1,20 @@
 # .github/actions/setup-build/action.yml
-# Composite action: checkout + JDK + Gradle cache restore. Used by every job
-# that compiles this app's Java (ci.yml's build-test, and the reusable
+# Composite action: JDK + Gradle cache restore. Used by every job that
+# compiles this app's Java (ci.yml's build-test, and the reusable
 # _build-and-push.yml) - one place to bump the JDK version or cache key
-# instead of three near-identical copies drifting apart.
+# instead of two near-identical copies drifting apart.
+#
+# Deliberately does NOT include actions/checkout, even though the lesson
+# spec for this deliverable describes the bundle as "checkout + setup-java +
+# gradle cache". Verified live: a job's FIRST step cannot be `uses: ./local-
+# action`, because the runner has to read this file (action.yml) off disk to
+# know what the action even does - which requires the repo to already be
+# checked out. Putting checkout inside the composite action is circular for
+# that first invocation (confirmed by a real CI failure: "Can't find
+# 'action.yml' ... Did you forget to run actions/checkout before running
+# your local action?", from a run where this action's own first step WAS
+# actions/checkout). Every caller must checkout before its `uses: ./.github/
+# actions/setup-build` step; this action starts from JDK setup.
 #
 # JDK 17, not 21: build.gradle pins java.toolchain.languageVersion=17 with no
 # toolchain auto-provisioning configured (CLAUDE.md convention #1), so the
@@ -14,16 +26,11 @@
 # live at the repo root (see docker/SECURITY.md's "Known deviations" table),
 # so there is no working-directory to set here, unlike a multi-module layout.
 name: setup-build
-description: Check out the repo, install Temurin 17, restore the Gradle dependency cache.
+description: Install Temurin 17 and restore the Gradle dependency cache (caller must checkout first).
 
 runs:
   using: composite
   steps:
-    - name: Check out source
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        fetch-depth: 1
-
     - name: Set up JDK 17
       uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
       with:

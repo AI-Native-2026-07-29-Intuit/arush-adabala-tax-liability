@@ -6,9 +6,13 @@
 # humans - and to GitHub's own recent-runs UI - that this file is not a
 # top-level entry point), not something GitHub itself enforces.
 #
-# Task 2 state: only the build half (composite action + Buildx + a local
-# `load: true` build, no push). Task 3 adds the OIDC role assumption, ECR
-# login, Trivy gate, and the real push step.
+# The OIDC role it assumes (taxcalc-api-build-push, see infra/oidc/) has a
+# trust policy pinned to this job running under the `dev` GitHub Environment
+# on a push to main - no long-lived AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+# anywhere in this repo. AWS_ACCOUNT_ID/AWS_REGION are repository VARIABLES
+# (not secrets - an account id/region is not confidential, same rationale
+# scripts/oidc-bootstrap.sh gives for AWS_DEPLOY_ROLE_ARN), set by
+# scripts/docker-oidc-bootstrap.sh's own printed instructions.
 name: _build-and-push
 
 on:
@@ -29,9 +33,41 @@ jobs:
     name: Build, Trivy scan, push to ECR
     runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 20
+    # Gates secrets/vars to this Environment and is what the OIDC trust
+    # policy's sub condition actually pins to (see infra/oidc/README.md);
+    # also the auto-deploy target for `main` - no required reviewers, no
+    # deployment-branch restriction beyond `main` (configured via the
+    # GitHub UI/API, not version-controlled - see .github/PIPELINE.md).
+    environment: dev
+    # Two pushes to main landing back-to-back must not race each other's
+    # ECR push; queue instead of running in parallel.
+    concurrency:
+      group: build-push-${{ inputs.app-name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # required to mint the OIDC token for AWS STS
     steps:
+      # Must precede the composite-action call below - see
+      # .github/actions/setup-build/action.yml's header comment.
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
       - name: Set up build env (composite)
         uses: ./.github/actions/setup-build
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/taxcalc-api-build-push
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: gh-${{ github.run_id }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
@@ -49,5 +85,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Task 3: OIDC role assumption, ECR login, Trivy scan (fail on
-      # HIGH/CRITICAL), and the real push (SHA tag + main tag) land here.
+      # .trivyignore already implements the dated waiver docker/SECURITY.md
+      # documents (23 HIGH/CRITICAL findings, exp:2026-09-27) - this scan
+      # reads that same file, so a fresh, un-waived finding still fails the
+      # job while the documented ones don't re-litigate it here.
+      - name: Trivy scan - fail on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ inputs.image-name }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Two tags, never `latest` (docker/SECURITY.md's own rule): the SHA
+      # tag is the immutable, reproducible pin every consumer (deploy-prod,
+      # a manifest, a rollback) should reference; `main` is a mutable
+      # dev-convenience pointer at "whatever main last built", scoped to
+      # the `dev` Environment this job runs under, never promoted as-is.
+      - name: Push image to ECR (SHA tag + main tag)
+        uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ inputs.ecr-repo }}:${{ github.sha }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ inputs.ecr-repo }}:main
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
