@@ -26,6 +26,10 @@ loki:
     # backstop if someone promotes an identifier to a label anyway.
     max_label_names_per_series: 12
     reject_old_samples: false
+    # Loki 3.x invents a `service_name` label at ingest by sniffing the incoming labels. It is
+    # constant here and harmless, but it is a seventh label nobody declared - and LABELS.md is
+    # only worth writing if the four labels it names are the four that exist. Empty list = off.
+    discover_service_name: []
 
 deploymentMode: SingleBinary
 singleBinary:

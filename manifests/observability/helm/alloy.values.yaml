@@ -59,6 +59,14 @@ alloy:
             env   = "env",
           }
         }
+
+        // loki.source.kubernetes attaches `instance` and `job` of its own accord, which makes
+        // the shipped stream carry six labels where LABELS.md documents four. Neither is
+        // high-cardinality, so this is not a storage problem - it is a credibility one: a label
+        // policy that the pipeline does not actually enforce is a document, not a rule.
+        stage.label_drop {
+          values = ["instance", "job"]
+        }
         forward_to = [loki.write.default.receiver]
       }
 

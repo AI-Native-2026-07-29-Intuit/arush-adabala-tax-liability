@@ -300,6 +300,12 @@ spring:
   kafka:
     bootstrap-servers: kafka.taxcalc-dev.svc.cluster.local:9092
 
+  main:
+    # W5 D5: the seven-line ASCII banner is the only thing Spring itself writes that is not a
+    # JSON object, and Alloy's json stage cannot parse it. Harmless in a terminal, noise in a
+    # log pipeline - off in the cluster, still on locally where a human reads the console.
+    banner-mode: "off"
+
 otel:
   sdk:
     # W5 D5: in the cluster the OpenTelemetry JAVA AGENT owns instrumentation (attached via
