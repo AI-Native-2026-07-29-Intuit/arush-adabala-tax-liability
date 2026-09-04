@@ -149,7 +149,8 @@ if REPO_JSON=$(aws ecr describe-repositories --repository-names "${ECR_REPO}" \
   # NOTE this asserts the repository's CONFIGURATION only. Against floci it does not assert
   # enforcement - see the header: a re-push to an existing SHA tag succeeds there.
   MUT=$(jq -r '.imageTagMutability' <<<"${REPO_JSON}")
-  eq "${MUT}" "IMMUTABLE_WITH_EXCLUSION" "imageTagMutability - SHA tags immutable, :main alone may move"
+  eq "${MUT}" "${ECR_TAG_MUTABILITY:-IMMUTABLE_WITH_EXCLUSION}" \
+     "imageTagMutability - SHA tags immutable, :main alone may move"
 else
   bad "repository ${ECR_REPO} does not exist"
 fi

@@ -147,22 +147,40 @@ BUILD_ARN=$(aws iam get-role --role-name "${BUILD_ROLE}" --query 'Role.Arn' --ou
 PROD_ARN=$(aws iam get-role --role-name "${PROD_ROLE}" --query 'Role.Arn' --output text)
 
 echo ""
-echo "==> ensuring ECR repository ${ECR_REPO} exists (immutable except :main, scan-on-push)"
-# IMMUTABLE_WITH_EXCLUSION, not plain IMMUTABLE. A plain IMMUTABLE repo rejects any push to a
-# tag that already exists, and _build-and-push.yml writes TWO tags on every main build: the
-# git SHA (unique per commit, so immutability is exactly right for it) and a floating `main`
-# pointer (the same tag every time, so a plain IMMUTABLE repo fails the SECOND main build with
-# ImageTagAlreadyExistsException - green once, then permanently broken).
+echo "==> ensuring ECR repository ${ECR_REPO} exists (mutability=${ECR_TAG_MUTABILITY}, scan-on-push)"
+# WHY NOT PLAIN `IMMUTABLE`, which is what the deliverable spec's create-repository line says.
 #
-# The deliverable spec asks for both `--image-tag-mutability IMMUTABLE` and pushing both tags;
-# those two requirements contradict each other and the failure is delayed by one build, which
-# is the worst way to find it. The exclusion filter resolves it honestly rather than dropping
-# either half: every SHA tag stays immutable, and `main` alone is allowed to move.
+# The spec asks for two things that contradict each other, and AWS's own documentation is
+# what settles it (ECR User Guide, "Preventing image tags from being overwritten"):
+#
+#   "After tag immutability is turned on, the ImageTagAlreadyExistsException error is
+#    returned if you push an image with a tag that is already in the repository. Tag
+#    immutability affects ALL tags. You cannot make some tags immutable while others aren't."
+#
+# _build-and-push.yml writes TWO tags on every main build: the git SHA (unique per commit -
+# immutability is exactly right for it) and a floating `main` pointer (the same tag every
+# time). Under plain IMMUTABLE the first main build is green and the SECOND fails on the
+# `main` tag - a failure delayed by one build, which is the worst way to find it.
+#
+# IMMUTABLE_WITH_EXCLUSION is AWS's own answer to precisely this shape; the documentation's
+# canonical example filter is a floating tag (`filter=latest`). So every SHA tag stays
+# immutable and `main` alone may move - the spec's intent (reproducible, pinned images) kept
+# whole, rather than dropping either half of its letter.
+#
+# Override to reproduce the spec literally, knowing it breaks the second main build:
+#   ECR_TAG_MUTABILITY=IMMUTABLE ./scripts/docker-oidc-bootstrap.sh
+ECR_TAG_MUTABILITY="${ECR_TAG_MUTABILITY:-IMMUTABLE_WITH_EXCLUSION}"
+MUTABILITY_ARGS=(--image-tag-mutability "${ECR_TAG_MUTABILITY}")
+if [[ "${ECR_TAG_MUTABILITY}" == "IMMUTABLE_WITH_EXCLUSION" ]]; then
+  MUTABILITY_ARGS+=(--image-tag-mutability-exclusion-filters 'filterType=WILDCARD,filter=main')
+else
+  echo "    WARNING: ${ECR_TAG_MUTABILITY} makes the SECOND push to main fail with" \
+       "ImageTagAlreadyExistsException on the floating 'main' tag."
+fi
 aws ecr create-repository \
   --repository-name "${ECR_REPO}" \
   --region "${REGION}" \
-  --image-tag-mutability IMMUTABLE_WITH_EXCLUSION \
-  --image-tag-mutability-exclusion-filters 'filterType=WILDCARD,filter=main' \
+  "${MUTABILITY_ARGS[@]}" \
   --image-scanning-configuration scanOnPush=true \
   >/dev/null 2>&1 || echo "    (already present)"
 

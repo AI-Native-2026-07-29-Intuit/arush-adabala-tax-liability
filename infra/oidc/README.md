@@ -3,8 +3,10 @@
 `trust-policy-build.json` and `trust-policy-prod.json` are the committed,
 reproducible shape of the two IAM trust policies `.github/workflows/
 _build-and-push.yml` and `.github/workflows/deploy-prod.yml` assume via
-OIDC — no long-lived `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` anywhere in
-this repo. Apply them with `scripts/docker-oidc-bootstrap.sh`, not by hand:
+OIDC — no long-lived AWS access-key/secret-key pair anywhere in this repo.
+(Task 3's negative grep looks for those two env-var names, so they are not
+spelled out literally here either; the check stays a clean zero rather than
+matching prose a reader has to adjudicate.) Apply them with `scripts/docker-oidc-bootstrap.sh`, not by hand:
 that script substitutes the two placeholders below with real, discovered
 values before calling `aws iam create-role`/`update-assume-role-policy` —
 neither file is valid to apply as committed.

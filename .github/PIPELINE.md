@@ -15,8 +15,15 @@ SECURITY.md's "Known deviations" table, first bullet).
    `blacksmith-2vcpu-ubuntu-2204` via the `setup-build` composite action.
 2. Test + JaCoCo HTML/XML reports upload only on failure (saves artefact
    storage).
-3. The PR's `Build + test (taxcalc-api)` status check is required by branch
-   protection on `main`.
+3. The PR's `Build + test (taxcalc-api)` status check is the gate this
+   deliverable intends to make **required** on `main` - but it is **not
+   required today, and cannot be**: branch protection is unavailable on this
+   private repo's free-plan org (both the classic and ruleset APIs return
+   `403`). It runs on every PR and must be read by a human reviewer until
+   that changes. See "What is NOT in this repo" below for the exact
+   remediation, and note that a rule created later must select the check by
+   its display name `Build + test (taxcalc-api)`, not the job id
+   `build-test`.
 4. Separately, unchanged by this deliverable: `docker.yml` (W5 D1) still
    runs `hadolint` → `build-scan-smoke` (build the image, Trivy-scan it,
    boot it against real Postgres/Mongo service containers, hit `/actuator/

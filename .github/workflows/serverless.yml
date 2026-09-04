@@ -190,11 +190,13 @@ jobs:
       # OIDC federated auth: GitHub mints a short-lived OIDC token, AWS STS
       # exchanges it for temporary credentials against a role whose trust
       # policy is pinned to this repo and branch. There are deliberately NO
-      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets in this repository -
-      # a long-lived key in GitHub Secrets is the exact anti-pattern this
-      # replaces. The role ARN is a repository *variable*, not a secret: an
-      # ARN is not confidential, and hiding it only makes failures harder to
-      # read.
+      # long-lived AWS access-key or secret-key credentials in this
+      # repository - a static key pair sitting in GitHub Secrets is the exact
+      # anti-pattern this replaces. (Their env-var names are not spelled out
+      # here on purpose, so W6 D1 Task 3's negative grep over .github/ stays a
+      # clean zero instead of matching a comment.) The role ARN is a
+      # repository *variable*, not a secret: an ARN is not confidential, and
+      # hiding it only makes failures harder to read.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:

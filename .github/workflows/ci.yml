@@ -38,7 +38,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Top-level default: read-only. Individual jobs widen only what they need
-# (call-build-and-push adds id-token: write for its own OIDC step).
+# (call-build-and-push adds packages: write for GHCR and id-token: write for
+# OIDC - and, being the caller of a reusable workflow, grants them on behalf
+# of that workflow's job too).
 permissions:
   contents: read
 
@@ -98,6 +100,11 @@ jobs:
       app-name: taxcalc-api
       image-name: uptimecrew/taxcalc-api
       ecr-repo: uptimecrew/taxcalc-api
+    # The ONLY place these are granted. A reusable workflow's job runs with the
+    # CALLING job's token, so _build-and-push.yml deliberately carries no
+    # `permissions:` block of its own (see its comment). contents: read to
+    # check out, packages: write to push to GHCR, id-token: write to mint the
+    # OIDC token for AWS STS. Adding a registry means widening this block.
     permissions:
       contents: read
       packages: write

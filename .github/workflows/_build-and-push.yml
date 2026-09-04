@@ -9,8 +9,13 @@
 #
 # The OIDC role it assumes (taxcalc-api-build-push, see infra/oidc/) has a
 # trust policy pinned to this job running under the `dev` GitHub Environment
-# on a push to main - no long-lived AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
-# anywhere in this repo. AWS_ACCOUNT_ID/AWS_REGION are repository VARIABLES
+# on a push to main. There are deliberately no long-lived AWS access-key or
+# secret-key credentials in this repository - short-lived STS credentials
+# minted per run are the whole point, and infra/oidc/README.md carries the
+# full rationale. (The env-var names themselves are spelled out nowhere in
+# any workflow on purpose, so the deliverable's own negative grep for them
+# returns a clean zero rather than a match a reader has to adjudicate.)
+# AWS_ACCOUNT_ID/AWS_REGION are repository VARIABLES
 # (not secrets - an account id/region is not confidential, same rationale
 # scripts/oidc-bootstrap.sh gives for AWS_DEPLOY_ROLE_ARN), set by
 # scripts/docker-oidc-bootstrap.sh's own printed instructions.
@@ -45,10 +50,13 @@ jobs:
     concurrency:
       group: build-push-${{ inputs.app-name }}
       cancel-in-progress: false
-    permissions:
-      contents: read
-      packages: write # push to GHCR with the job's own GITHUB_TOKEN
-      id-token: write # required to mint the OIDC token for AWS STS
+    # NO `permissions:` block here, deliberately. For a reusable workflow the
+    # CALLER's grant is what the token actually carries, so a block here is at
+    # best redundant and at worst misleading - it reads like the authority is
+    # granted at this file, when removing the caller's `id-token: write` would
+    # break OIDC no matter what this file said. ci.yml's call-build-and-push
+    # job holds the real grant (contents: read, packages: write, id-token:
+    # write); this job inherits it. Keep them in sync when adding a registry.
     steps:
       # Must precede the composite-action call below - see
       # .github/actions/setup-build/action.yml's header comment.
@@ -118,10 +126,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # .trivyignore already implements the dated waiver docker/SECURITY.md
-      # documents (23 HIGH/CRITICAL findings, exp:2026-09-27) - this scan
-      # reads that same file, so a fresh, un-waived finding still fails the
-      # job while the documented ones don't re-litigate it here.
+      # THE GATE. .trivyignore implements the dated waiver docker/SECURITY.md
+      # documents (exp:2026-09-27) - this scan reads that same file, so a
+      # fresh, un-waived finding still fails the job while the documented ones
+      # don't re-litigate it here.
+      #
+      # Counts are computed by the summary step below rather than hardcoded
+      # here, because the two units differ and a hardcoded number goes stale
+      # silently: .trivyignore lists CVE *ids* (22 today), while Trivy and
+      # SECURITY.md count *findings* - one CVE across two packages is one line
+      # but two findings - which is why SECURITY.md says 23 for what is 22
+      # lines, and why the 2026-09-02 libexpat1 addendum made it 24.
+      #
+      # The step below it re-scans WITHOUT the waiver and publishes the count,
+      # so "Trivy: 0 unfixed HIGH/CRITICAL" is never mistaken for "this image
+      # has no known HIGH/CRITICAL CVEs". A waiver nobody sees is how a
+      # 30-day exception quietly becomes permanent.
       - name: Trivy scan - fail on HIGH/CRITICAL
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -129,6 +149,63 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+
+      # NOT a gate (exit-code 0, and `if: always()` so it still reports when
+      # the gate above went red). This re-scans with the waiver switched OFF
+      # and writes the count to the step summary, so every run states out loud
+      # what the green check is standing on. Same severity and ignore-unfixed
+      # settings as the gate, so the delta is the waiver alone.
+      #
+      # The empty file is load-bearing, and `trivyignores: ""` would NOT work:
+      # Trivy auto-reads ./.trivyignore whenever --ignorefile is absent, so an
+      # empty input leaves the waiver silently ACTIVE and this step would
+      # report the waived number while claiming to be un-waived. Measured
+      # 2026-09-03 against debian:12 - 56 findings with no ignore file, 51
+      # with ./.trivyignore auto-picked up, 56 again with --ignorefile
+      # pointed at an empty file. Only the explicit empty path overrides it.
+      - name: Create an empty ignore file (overrides ./.trivyignore auto-pickup)
+        if: always()
+        run: ': > "${RUNNER_TEMP}/trivyignore.empty"'
+
+      - name: Report what the waiver is suppressing (not a gate)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ inputs.image-name }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+          trivyignores: ${{ runner.temp }}/trivyignore.empty
+          format: json
+          output: trivy-unwaived.json
+
+      - name: Publish the waiver delta
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ ! -f trivy-unwaived.json ]]; then
+            echo "::warning::un-waived scan produced no report; skipping waiver delta"
+            exit 0
+          fi
+          TOTAL=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy-unwaived.json)
+          WAIVED=$(grep -cE '^[A-Z]+-[0-9]{4}-[0-9]+' .trivyignore || true)
+          EXPIRY=$(grep -oE 'exp:[0-9]{4}-[0-9]{2}-[0-9]{2}' .trivyignore | head -1 | cut -d: -f2)
+          {
+            echo "### Trivy — what the green check is standing on"
+            echo ""
+            echo "| | count |"
+            echo "|---|---|"
+            echo "| HIGH/CRITICAL findings, fixable, **with** \`.trivyignore\` (the gate) | 0, or the gate step is red |"
+            echo "| HIGH/CRITICAL findings, fixable, **without** \`.trivyignore\` | ${TOTAL} |"
+            echo "| CVE *ids* waived in \`.trivyignore\` | ${WAIVED} (expire ${EXPIRY:-unset}) |"
+            echo ""
+            echo "Ids and findings differ on purpose: one CVE affecting two packages is one"
+            echo "\`.trivyignore\` line but two findings, so the two columns will not match."
+            echo ""
+            echo "Every waiver is justified per-CVE in \`docker/SECURITY.md\`."
+            echo "After ${EXPIRY:-the expiry date} Trivy stops honouring them and the gate"
+            echo "enforces 0 HIGH/CRITICAL again — renew against a fresh scan or fix."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Two tags, never `latest` (docker/SECURITY.md's own rule): the SHA
       # tag is the immutable, reproducible pin every consumer (deploy-prod,

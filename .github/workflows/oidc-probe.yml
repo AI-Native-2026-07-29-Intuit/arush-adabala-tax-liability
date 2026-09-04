@@ -29,6 +29,14 @@ on:
     paths:
       - ".github/workflows/oidc-probe.yml"
       - "infra/oidc/**"
+  # The environment-scoped job below can only run on `main` (both Environments
+  # restrict deployments to that branch), so give it a `main` trigger. Without
+  # this, the last inferred half of the trust policy stays inferred forever.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/oidc-probe.yml"
+      - "infra/oidc/**"
 
 permissions:
   contents: read
@@ -243,3 +251,75 @@ jobs:
               echo "question stays open until a real role exists."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Closes the last inferred half of infra/oidc/'s trust policies.
+  #
+  # The `probe` job above measured the subject PREFIX from a real token, but
+  # its suffix was this event's context (`:pull_request`). The two suffixes
+  # the build role actually pins - `:environment:dev` and `:ref:refs/heads/
+  # main` - were inferred from GitHub's documented claim rules, never observed,
+  # because a pull_request run cannot mint an environment-scoped token and
+  # both Environments restrict deployments to `main`.
+  #
+  # This job runs under `environment: dev` on `main`, which is precisely the
+  # context that mints `...:environment:dev`, and asserts the token's `sub`
+  # equals what trust-policy-build.json pins. It FAILS on mismatch rather than
+  # printing a warning: a wrong `sub` means every deploy fails later with
+  # "Not authorized to perform sts:AssumeRoleWithWebIdentity", an error that
+  # names neither the claim nor the expected value.
+  observe-environment-subject:
+    name: Confirm the dev-environment subject (main only)
+    if: github.ref == 'refs/heads/main'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 5
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Mint an environment-scoped token and assert its subject
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')
+          echo "::add-mask::${TOKEN}"
+
+          payload=$(printf '%s' "${TOKEN}" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="${payload}="; done
+          SUB=$(printf '%s' "${payload}" | base64 -d | jq -r '.sub')
+
+          PINNED=$(jq -r '
+            .Statement[0].Condition.StringLike."token.actions.githubusercontent.com:sub"
+            | map(select(endswith(":environment:dev"))) | .[0]' \
+            infra/oidc/trust-policy-build.json)
+
+          {
+            echo "### Environment-scoped subject (measured, no longer inferred)"
+            echo ""
+            echo "| | value |"
+            echo "|---|---|"
+            echo "| observed \`sub\` | \`${SUB}\` |"
+            echo "| pinned by trust-policy-build.json | \`${PINNED}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${SUB}" = "${PINNED}" ]; then
+            echo "MATCH: the dev-environment subject is confirmed by measurement."
+            echo "✅ **MATCH** — \`:environment:dev\` is now observed, not inferred." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "❌ **MISMATCH** — the build role would reject this run's token."
+              echo ""
+              echo "Re-run the bootstrap with the measured subject:"
+              echo '```bash'
+              echo "SUBJECT_DEV='${SUB}' ./scripts/docker-oidc-bootstrap.sh"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "MISMATCH: observed '${SUB}' but the policy pins '${PINNED}'." >&2
+            exit 1
+          fi

@@ -43,8 +43,13 @@ jobs:
   # ---------------------------------------------------------------------------
   # 1. Everything that can be decided without a cluster.
   # ---------------------------------------------------------------------------
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 2s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted - which also blocked cluster-round-trip behind its `needs:`.
   static-gates:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -115,8 +120,11 @@ jobs:
   # ---------------------------------------------------------------------------
   # 2. The round trip, on a cluster that exists only for this run.
   # ---------------------------------------------------------------------------
+  # Same billing-block reason as static-gates above. Note this is the heaviest
+  # job in the repo (k3d + the whole PLG-T stack) on a 2-vCPU runner - if it
+  # starts timing out rather than failing, that budget is the first suspect.
   cluster-round-trip:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     needs: static-gates
     # The PLG-T install alone is several minutes of image pulls; the budget matches k8s-ci.yml's
     # measured 12-13m plus that.
