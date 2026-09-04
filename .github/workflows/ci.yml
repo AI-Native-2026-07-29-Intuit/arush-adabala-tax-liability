@@ -63,20 +63,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      # actions/checkout stays inline, not folded into the composite action:
-      # a local `uses: ./local-action` step can only be resolved AFTER the
-      # repo is on disk, so the very first step of any job that calls it
-      # must be this checkout - see .github/actions/setup-build/action.yml's
-      # own header comment for the CI failure that proved it.
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
+      # Must precede the composite action rather than live inside it - see
+      # .github/actions/setup-build/action.yml's header for the CI failure
+      # that proved it. No `fetch-depth:` - 1 is already actions/checkout's
+      # default, and every other workflow in this repo calls it bare too.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # The setup-java + Gradle-cache bundle (Task 1) is now the composite
-      # action at .github/actions/setup-build - one place to bump the JDK
-      # or cache key instead of two near-identical copies (this job and the
-      # reusable _build-and-push.yml job below) drifting apart.
       - name: Set up build env (composite)
         uses: ./.github/actions/setup-build
 

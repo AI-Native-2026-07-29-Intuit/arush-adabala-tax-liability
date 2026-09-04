@@ -46,6 +46,31 @@ SECURITY.md's "Known deviations" table, first bullet).
    main" step; there is no separate deploy action beyond the push itself
    until W6 D2/D3 land Argo CD / `kubectl rollout` against it.
 
+## Before the first push to main — one-time AWS bootstrap
+
+`call-build-and-push` has never run: `ci.yml` has only ever fired on
+`pull_request` so far, and the AWS side it needs does not exist yet. Three
+things are required, in order, and none of them can be done from inside this
+repo alone - they need credentials for the target AWS account:
+
+```bash
+# 1. Create the OIDC provider, both IAM roles, and the ECR repository.
+#    Read infra/oidc/README.md FIRST - the sub-claim caveat there is real,
+#    and a policy pinned to the wrong subject fails opaquely.
+AWS_PROFILE=<admin-profile> ./scripts/docker-oidc-bootstrap.sh
+
+# 2. Wire the account id in (the script prints this exact command with the
+#    real value substituted). AWS_REGION is already set on this repo.
+gh variable set AWS_ACCOUNT_ID --body '<account-id>'
+
+# 3. Merge to main. call-build-and-push then runs for the first time.
+```
+
+Until step 2 is done, the job stops at its own preflight step with an
+explicit `::error::` naming the missing variable, rather than failing six
+steps later on a malformed `arn:aws:iam:::role/...` that says nothing about
+which value is absent.
+
 ## To deploy to prod
 
 1. In the GitHub UI, **Actions** → `deploy-prod` → **Run workflow**.
