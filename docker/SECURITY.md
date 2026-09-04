@@ -263,6 +263,38 @@ into the workflow - out of scope for this deliverable.
   prod manifests (Compose, Kubernetes, ECS). Deploys reference the digest:
   `uptimecrew/taxcalc-api@sha256:...`.
 
+## Trivy: FIXED, not waived — 2026-09-04 (tomcat-embed-core, 3 CRITICALs)
+
+Three CRITICAL CVEs landed against `tomcat-embed-core` 10.1.55 after the waivers
+below were written. They were **fixed by upgrading, not added to `.trivyignore`** —
+all three are authentication/authorization bypasses with a drop-in patch release
+available, which is not a defensible thing to waive.
+
+| CVE | Severity | Issue |
+|---|---|---|
+| CVE-2026-65182 | CRITICAL | Security constraint bypass |
+| CVE-2026-65905 | CRITICAL | Authentication bypass via limited request |
+| CVE-2026-68525 | CRITICAL | Unauthorized access |
+
+**Found by `oidc-ecr-poc.yml`, not by a human re-reading the file.** The gate is
+`severity: HIGH,CRITICAL` + `ignore-unfixed: true`, and these are `fixed` upstream,
+so `ignore-unfixed` did not hide them and no existing `.trivyignore` line covered
+them. The scan went red on a branch that changed nothing about the application —
+the vulnerability feed was the only variable, exactly as with the libexpat1
+addendum below.
+
+**The fix is 10.1.59, and deliberately not the 10.1.58 the advisories name.**
+10.1.58 was never published to Maven Central: the 10.1.x `maven-metadata.xml`
+lists `…10.1.56, 10.1.57, 10.1.59`, and a direct fetch of the 10.1.58 directory
+returns HTTP 404, so Gradle resolves `ext['tomcat.version'] = '10.1.58'` as
+`10.1.55 -> 10.1.58 FAILED`. 10.1.59 supersedes it and carries the same fixes.
+Anyone "correcting" the version in `build.gradle` to match the advisory text will
+break the build.
+
+10.1.x is within Spring Boot 3.3's supported Tomcat line, so this needed only the
+existing `ext['tomcat.version']` override — no Spring Boot minor/major bump, which
+is what the remaining waived Spring CVEs below are blocked on.
+
 ## Trivy waiver addendum — 2026-09-02 (libexpat1, CVE-2026-56408)
 
 One CVE was published after the 2026-08-27 waiver below and turned the
