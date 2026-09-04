@@ -36,10 +36,16 @@ SECURITY.md's "Known deviations" table, first bullet).
      existing dated waiver from `docker/SECURITY.md` still applies - a
      fresh, un-waived finding still fails; the 23 already-documented ones
      don't re-litigate here),
-   - pushes the image as `uptimecrew/taxcalc-api:<git-sha>` (immutable,
-     what `deploy-prod.yml` and any future manifest reference) **and**
-     `uptimecrew/taxcalc-api:main` (mutable dev-convenience tag - never
-     `latest`, per docker/SECURITY.md's existing rule).
+   - pushes `<git-sha>` (immutable, what `deploy-prod.yml` and any future
+     manifest reference) **and** `main` (mutable dev-convenience tag - never
+     `latest`, per docker/SECURITY.md's existing rule) to **two registries**:
+
+     | registry | when | why |
+     |---|---|---|
+     | `ghcr.io/<owner>/taxcalc-api` | always | Needs nothing but this repo's own `GITHUB_TOKEN`, so `main` publishes a real, pullable image today - which is what W6 D2's Argo CD and W6 D3's `kubectl` rollout will need to pull. |
+     | ECR `uptimecrew/taxcalc-api` | only when `vars.AWS_ACCOUNT_ID` is set | The deliverable's target, unchanged and unfaked. Inert until the AWS account exists; every AWS step is `if:`-gated and the job prints a warning naming the missing variable rather than skipping silently. |
+
+     Setting `AWS_ACCOUNT_ID` activates the ECR half with no workflow change.
 3. The job runs under the `dev` GitHub Environment, which both gates its
    secrets/vars and is what the `taxcalc-api-build-push` trust policy's
    `sub` condition pins to - this **is** the "dev auto-deploys on merge to

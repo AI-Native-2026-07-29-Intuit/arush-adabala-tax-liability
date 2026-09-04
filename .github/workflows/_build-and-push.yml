@@ -1,5 +1,6 @@
 # .github/workflows/_build-and-push.yml
-# Reusable workflow: build + Trivy scan + push to ECR via OIDC. Called from
+# Reusable workflow: build + Trivy scan + push. Publishes to GHCR always,
+# and to ECR via OIDC once an AWS account is wired up. Called from
 # ci.yml's call-build-and-push job on push to main; never invoked directly
 # by a UI dispatch. The leading underscore is a naming convention only (it
 # sorts to the top of .github/workflows/ for visibility and signals to
@@ -30,7 +31,7 @@ on:
 
 jobs:
   build-scan-push:
-    name: Build, Trivy scan, push to ECR
+    name: Build, Trivy scan, push (GHCR always; ECR when configured)
     runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 20
     # Gates secrets/vars to this Environment and is what the OIDC trust
@@ -46,6 +47,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      packages: write # push to GHCR with the job's own GITHUB_TOKEN
       id-token: write # required to mint the OIDC token for AWS STS
     steps:
       # Must precede the composite-action call below - see
@@ -55,18 +57,40 @@ jobs:
       - name: Set up build env (composite)
         uses: ./.github/actions/setup-build
 
-      # Fails in one obvious line instead of six steps later. Without this,
-      # an unset AWS_ACCOUNT_ID renders role-to-assume as the malformed
-      # `arn:aws:iam:::role/taxcalc-api-build-push`, and the OIDC step's
-      # error says nothing about which variable is missing.
-      - name: Preflight - AWS wiring is configured
+      # Two registries, deliberately. GHCR always runs: it needs no account
+      # beyond this repo's own GITHUB_TOKEN, so `main` publishes a REAL,
+      # pullable image today, which is what W6 D2's Argo CD and W6 D3's
+      # kubectl rollout will need something to pull. ECR is the deliverable's
+      # target and stays exactly as specified, but it cannot run until an AWS
+      # account exists - so every AWS step below is gated on the account id
+      # being set, and announces itself when skipped rather than failing the
+      # job or, worse, skipping silently.
+      #
+      # This is not ECR-with-a-mock. Nothing about the AWS path is faked or
+      # approximated; it is simply inert until its prerequisites exist.
+      - name: Resolve the GHCR repository name (must be lowercase)
+        id: ghcr
         run: |
-          if [[ -z "${{ vars.AWS_ACCOUNT_ID }}" ]]; then
-            echo "::error::vars.AWS_ACCOUNT_ID is unset. Run scripts/docker-oidc-bootstrap.sh against the target AWS account (it creates the OIDC provider, both IAM roles and the ECR repo), then: gh variable set AWS_ACCOUNT_ID --body <account-id>"
-            exit 1
-          fi
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=ghcr.io/${owner}/${{ inputs.app-name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: AWS wiring not configured - ECR steps will be skipped
+        if: vars.AWS_ACCOUNT_ID == ''
+        run: |
+          echo "::warning::vars.AWS_ACCOUNT_ID is unset, so this run publishes to GHCR only." \
+               "To enable the ECR path: run scripts/docker-oidc-bootstrap.sh against the target" \
+               "AWS account (it creates the OIDC provider, both IAM roles and the ECR repo)," \
+               "then 'gh variable set AWS_ACCOUNT_ID --body <account-id>'. No workflow change needed."
 
       - name: Configure AWS credentials via OIDC
+        if: vars.AWS_ACCOUNT_ID != ''
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/taxcalc-api-build-push
@@ -75,6 +99,7 @@ jobs:
 
       - name: Log in to ECR
         id: ecr-login
+        if: vars.AWS_ACCOUNT_ID != ''
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
 
       - name: Set up Buildx
@@ -110,7 +135,22 @@ jobs:
       # a manifest, a rollback) should reference; `main` is a mutable
       # dev-convenience pointer at "whatever main last built", scoped to
       # the `dev` Environment this job runs under, never promoted as-is.
+      - name: Push image to GHCR (SHA tag + main tag)
+        uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ghcr.outputs.repo }}:${{ github.sha }}
+            ${{ steps.ghcr.outputs.repo }}:main
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Push image to ECR (SHA tag + main tag)
+        if: vars.AWS_ACCOUNT_ID != ''
         uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0
         with:
           context: .
@@ -123,3 +163,18 @@ jobs:
             GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Summarise what was published
+        run: |
+          {
+            echo "### Images published"
+            echo ""
+            echo "| registry | tags | status |"
+            echo "|---|---|---|"
+            echo "| \`${{ steps.ghcr.outputs.repo }}\` | \`${{ github.sha }}\`, \`main\` | ✅ pushed |"
+            if [ -n "${{ vars.AWS_ACCOUNT_ID }}" ]; then
+              echo "| ECR \`${{ inputs.ecr-repo }}\` | \`${{ github.sha }}\`, \`main\` | ✅ pushed |"
+            else
+              echo "| ECR \`${{ inputs.ecr-repo }}\` | - | ⏭️ skipped (\`AWS_ACCOUNT_ID\` unset) |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
