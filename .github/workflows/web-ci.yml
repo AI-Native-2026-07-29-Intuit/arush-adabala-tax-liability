@@ -15,7 +15,13 @@ jobs:
         working-directory: taxcalc-web
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      # This commit carries THREE tags: v4.4.0, v5.0.0 and the moving v5. The
+      # comment names v5.0.0 because that is what Dependabot resolves it to (see
+      # PR #41, "from 5.0.0"), so the label and the tooling agree. Note the
+      # moving `v4` tag points at a DIFFERENT commit (b906affc), so this pin is
+      # not what `@v4` resolved to - the one action in this repo where pinning
+      # changed the executed bytes. Verified green on web-ci run 33846843137.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with: { version: 9 }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
