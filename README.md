@@ -1188,6 +1188,23 @@ time=19:15:00Z msg="Updated sync status: OutOfSync -> Synced" application=taxcal
 
 **The same patch against `taxcalc-prod` was still un-reverted after 240 seconds, and that is a consequence of `syncWindows` worth stating plainly: a change freeze freezes self-healing too.** The controller logs `Sync prevented by sync window`; prod sat `OutOfSync` with the drift in place. This is not a bug, but it is a trade-off nobody mentions when adding a weekend deny window: for its duration, prod is *unprotected against drift* as well as against deploys, and only a human `manualSync` closes the gap.
 
+### The one claim in this deliverable that was simply false, and how it survived
+
+**`CreateNamespace=true` is denied by `clusterResourceWhitelist: []`.** It was stated as fact in four files. Argo CD implements the option by *injecting* a Namespace into the sync task list, and the injected resource is checked against the project's `clusterResourceWhitelist` like any other. Measured with a scratch AppProject carrying the identical `[]` deny, pointed at a namespace that did not exist:
+
+```
+Namespace  taxcalc-nsproof  SyncFailed  resource :Namespace is not permitted in project taxcalc-nsproof
+Phase:     Failed
+$ kubectl get ns taxcalc-nsproof
+Error from server (NotFound): namespaces "taxcalc-nsproof" not found
+```
+
+Not "created but unmanaged" — **not created at all**, and the sync fails rather than degrading quietly.
+
+**How it survived is the more useful half.** `platform/00-namespaces.yaml` pre-created all three namespaces before any Application ever synced, so the code path was never exercised. Every Application reported `Synced` + `Healthy` the whole time, and a false claim about *why* sat in four files looking verified. Nothing in a green dashboard distinguishes "this option works" from "this option was never reached."
+
+The design never depended on it, so nothing was broken — but the operational constraint is real and was undocumented: **a new environment must be added to `platform/00-namespaces.yaml` before it is added to the ApplicationSet's element list**, or its first sync fails. `scripts/verify-appproject-guardrails.sh` asserts the `Namespace` deny as one of its five deny paths, so anyone who later widens the whitelist to make `CreateNamespace` work will see that check flip and have to make the call deliberately.
+
 ### The notification path, verified against a real induced failure
 
 **No Slack incoming-webhook was available in this session**, so delivery to Slack is not claimed and there is no screenshot. Everything upstream of delivery was verified against a deliberate bad merge into the watched branch (`uptimecrew/taxcalc-api:0.0.0-does-not-exist` on the dev overlay), which drove `taxcalc-api-dev` to `Degraded` at `19:27:48Z`:
@@ -1248,7 +1265,7 @@ Fixed by putting the proxy's CA chain into `argocd-tls-certs-cm` keyed by hostna
 
 **`manifests/` now has a second copy in the config repo's `base/`, and two copies can drift.** This is a real, accepted gap rather than an oversight: the migration is to delete `manifests/` and point `k8s-ci.yml` at the config repo, which is out of scope for today and recorded in `GITOPS.md` rather than left for someone to find.
 
-**No `Namespace`, `ResourceQuota`, `LimitRange` or `Secret` in `base/`.** The reference layout puts all four in the synced manifest set. `Namespace` is cluster-scoped, so `clusterResourceWhitelist: []` denies it outright (proven, not assumed — `resource :Namespace is not permitted in project taxcalc`); the quota knobs are on the `namespaceResourceBlacklist` by the spec's own instruction; the Secret is finding 1 above. All four live in `platform/` and are applied out-of-band. The reference's `namespaceResourceWhitelist` lists `Namespace`, which does nothing — Argo CD classifies scope from the API server's discovery data, not from whether a manifest carries a `namespace:` field.
+**No `Namespace`, `ResourceQuota`, `LimitRange` or `Secret` in `base/` — and the first is a contradiction in the spec, not a preference.** The reference layout wants `00-namespace.yaml` copied into `base/` **and** `clusterResourceWhitelist: []`. Those cannot both hold: under the empty whitelist the Namespace is refused whether it arrives as a manifest (`resource :Namespace is not permitted in project taxcalc`) *or* as `CreateNamespace=true`'s injected resource — see the finding below. The grading rubric names `clusterResourceWhitelist: []` explicitly, so that is the instruction kept and the Namespace moves to `platform/`. The quota knobs are on the `namespaceResourceBlacklist` by the spec's own instruction; the Secret is finding 1. The reference's `namespaceResourceWhitelist` also lists `Namespace`, which does nothing — Argo CD classifies scope from the API server's discovery data, not from whether a manifest carries a `namespace:` field.
 
 **`Ingress` was added to the `namespaceResourceWhitelist`**, which the reference list omits. The W5 D3 manifest set contains one, so omitting it would deny a resource this project's own base ships. An allow-list has to match the manifests it governs.
 

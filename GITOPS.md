@@ -112,6 +112,23 @@ argocd/taxcalc-api-dev: Post "https://slack.com/api/chat.postMessage": ...
 
 An incoming webhook needs `service.webhook.<name>` with a `url:` field and `recipients: [<name>]` — a different service type and a different subscription entry.
 
+**8. `CreateNamespace=true` is denied by `clusterResourceWhitelist: []`, so it does nothing here.** This one was an assumption stated as fact in four files, and it was false. Argo CD implements the option by **injecting a Namespace into the sync task list**, and that injected resource is checked against the project's `clusterResourceWhitelist` like any other. Measured with a scratch AppProject carrying the identical `[]` deny, pointed at a namespace that did not exist:
+
+```
+Namespace  taxcalc-nsproof  SyncFailed  resource :Namespace is not permitted in project taxcalc-nsproof
+Phase:     Failed
+$ kubectl get ns taxcalc-nsproof
+Error from server (NotFound): namespaces "taxcalc-nsproof" not found
+```
+
+Not "created but unmanaged" — **not created at all**, and the sync fails rather than degrading quietly. The design never actually depended on it: `platform/00-namespaces.yaml` had pre-created all three namespaces before any Application synced, so nothing ever exercised the path and the false claim survived. That is exactly how an assumption gets to look verified.
+
+**The operational consequence is real:** namespaces for this project are strictly platform-provisioned, and **a new environment must be added to `platform/00-namespaces.yaml` before it is added to the ApplicationSet's element list**, or its first sync fails. The option stays in the syncOptions because it becomes correct the instant the project is granted `{group: "", kind: Namespace}`, and because deleting it would invite the next person to assume namespaces are self-provisioning.
+
+This also settles the `base/` question for good. The reference layout wants `00-namespace.yaml` copied into `base/` **and** `clusterResourceWhitelist: []`. Those two instructions cannot both be satisfied — with the empty whitelist, the Namespace is refused whether it arrives as a manifest **or** as `CreateNamespace=true`'s injected resource. The grading rubric names `clusterResourceWhitelist: []` explicitly, so that is the instruction kept; the Namespace lives in `platform/`, and the contradiction is documented rather than silently resolved.
+
+**A regression test exists for this**, because a comment is not a guarantee: `scripts/verify-appproject-guardrails.sh` in the config repo asserts the `Namespace` deny as one of its five deny paths, so anyone who "fixes" the whitelist to make `CreateNamespace` work will see the check flip and have to make the decision consciously.
+
 ## Sync waves — two axes, deliberately distinct
 
 - **Within one Application** (`base/kustomization.yaml`): the ConfigMap and the postgres/redis/mongo Deployments are wave `-1`; everything else is wave `0`. Argo CD does not advance to wave 0 until every wave `-1` resource is Synced *and* Healthy, so a first sync into an empty namespace does not create the Deployment until Postgres is Running. Without it the pods come up, fail the datasource check, and crash-loop through the startupProbe's 150-second grace while an operator watches an unexplained `Degraded`.
@@ -157,6 +174,8 @@ The seven artefacts were therefore hand-authored directly against the cohort che
 
 ### One suggestion accepted, and one rejected
 
-**Accepted — the reference layout's `syncOptions` block, in full.** `CreateNamespace=true`, `ServerSideApply=true`, `PrunePropagationPolicy=foreground`, `PruneLast=true` and `ApplyOutOfSyncOnly=true` were taken as given rather than trimmed to the two that were obviously needed. `ServerSideApply=true` earned it immediately: the taxcalc-dev resources already existed from W5 D3's client-side `kubectl apply`, carrying `last-applied-configuration` annotations, and server-side apply is what let Argo CD adopt them cleanly with no field-manager conflict and no `--force`. `CreateNamespace=true` is load-bearing for a different reason — it is the *only* way these Applications can get a namespace, since `clusterResourceWhitelist: []` denies the `Namespace` kind outright.
+**Accepted — the reference layout's `syncOptions` block, in full.** `CreateNamespace=true`, `ServerSideApply=true`, `PrunePropagationPolicy=foreground`, `PruneLast=true` and `ApplyOutOfSyncOnly=true` were taken as given rather than trimmed to the two that were obviously needed. `ServerSideApply=true` earned it immediately: the taxcalc-dev resources already existed from W5 D3's client-side `kubectl apply`, carrying `last-applied-configuration` annotations, and server-side apply is what let Argo CD adopt them cleanly with no field-manager conflict and no `--force`.
+
+`CreateNamespace=true` was accepted for a reason that turned out to be **wrong**, and finding that out is finding 8 below — it is inert under this project, not load-bearing. It is kept because it is the correct setting the moment the project is granted the `Namespace` kind, and because removing it would make the *next* person assume namespaces are self-provisioning.
 
 **Rejected — the reference layout's `1f1f1f1f1f1f...` image-tag placeholder.** The overlays commit a real tag (`0.2.0`) that exists in the cluster's image store. A placeholder tag resolves to `ImagePullBackOff`, which makes the Application permanently `Degraded` — and that is not merely untidy: Task 4's deliberate-failure experiment depends on being able to tell a *caused* failure apart from ambient noise, and an Application that is already Degraded for an unrelated reason destroys the signal the experiment is trying to produce. The placeholder exists in the reference so that `_bump-config.yml` has something to rewrite; a real tag serves that purpose identically, since `kustomize edit set image` replaces whatever is there.
