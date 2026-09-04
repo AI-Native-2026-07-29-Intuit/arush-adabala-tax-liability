@@ -115,6 +115,28 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Q1b: given the REAL measured subject, would AWS's trust-policy
+      # evaluation Allow or Deny? Fed the prefix this run actually observed,
+      # not a hardcoded one, so the committed policies are checked against
+      # today's truth rather than against what they were written for.
+      - name: Simulate AWS's trust-policy decision with the measured subject
+        run: |
+          set -euo pipefail
+          SUB=$(jq -r '.sub' "${RUNNER_TEMP}/claims.json")
+          PREFIX="${SUB%:pull_request}"
+          PREFIX="${PREFIX%:ref:refs/heads/*}"
+          PREFIX="${PREFIX%:environment:*}"
+          {
+            echo "### Trust-policy decision (simulated with the measured subject)"
+            echo ""
+            echo '```'
+            python3 scripts/oidc-trust-simulate.py --sub-prefix "${PREFIX}" 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # Re-run for the exit code: the block above is piped into tee, so
+          # $? there is tee's, not the simulator's.
+          python3 scripts/oidc-trust-simulate.py --sub-prefix "${PREFIX}" >/dev/null
+
       # Q2a: is the token cryptographically valid by the SAME check AWS performs?
       #
       # AWS STS does not possess any private knowledge here. To validate a
