@@ -17,30 +17,31 @@ neither file is valid to apply as committed.
    value via `aws sts get-caller-identity` and substitutes it — never
    hand-edit this file with a guessed account id.
 
-2. **The `sub` condition's literal `repo:AI-Native-2026-07-29-Intuit/...`
-   form.** This is the textbook shape, and `scripts/oidc-bootstrap.sh`
-   already found — for the W5 D4 serverless deploy role, against this
-   exact organization — that GitHub's real token issues a **non-standard**
-   subject claim embedding internal numeric ids:
+2. ~~The `sub` condition's form.~~ **Resolved — measured, not assumed.**
+   `.github/workflows/oidc-probe.yml` minted a real OIDC token from this
+   repo on 2026-09-04 and decoded it. This organization does **not** issue
+   the textbook `repo:<org>/<repo>:...` subject. It issues one carrying
+   internal numeric org/repo ids:
 
    ```
    repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:pull_request
    ```
 
-   A trust policy pinned to the textbook form almost certainly will not
-   match here, and the failure is opaque
-   (`Not authorized to perform sts:AssumeRoleWithWebIdentity`, no mention
-   of `sub` anywhere in the error). **Do not trust the literal value in
-   these two files.** Before running the bootstrap script for real,
-   confirm the actual subject the same way `oidc-bootstrap.sh`'s own header
-   comment documents: add a temporary `- name: Inspect OIDC token claims`
-   step to the workflow that decodes its own `ACTIONS_ID_TOKEN_REQUEST_TOKEN`
-   JWT and prints the `sub` claim, run it once from a real push-to-main
-   (not a `pull_request` event — the two roles here only ever assume on
-   `push`/`environment`, and the claim shape differs by event type), then
-   pass the confirmed value as `SUBJECT_DEV`/`SUBJECT_MAIN`/`SUBJECT_PROD`
-   to the bootstrap script rather than letting it use these files' literal
-   defaults.
+   Both files here now pin that real prefix. They shipped with the textbook
+   form until this was measured — and had it stayed, every deploy would
+   have failed with `Not authorized to perform
+   sts:AssumeRoleWithWebIdentity`, an error naming neither `sub` nor the
+   value AWS expected.
+
+   **What is still inferred:** the *prefix* is observed; the three
+   *suffixes* (`:environment:dev`, `:ref:refs/heads/main`,
+   `:environment:prod`) follow GitHub's documented claim rules but have not
+   been observed directly — a `pull_request` run cannot mint an
+   environment-scoped token, and both Environments are pinned to `main`.
+   Re-run `oidc-probe.yml` via `workflow_dispatch` after the first push to
+   `main` to confirm them, and re-run the bootstrap if they differ. Re-run
+   it too if the org or repo is ever renamed or recreated: those numeric
+   ids are identity, not decoration.
 
 ## Why two roles, not one
 

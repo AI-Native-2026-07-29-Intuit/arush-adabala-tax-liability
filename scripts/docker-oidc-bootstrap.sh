@@ -7,25 +7,33 @@
 # same idempotency, same SUBJECT caveat. Run it against a real AWS account:
 #   AWS_PROFILE=dev ./scripts/docker-oidc-bootstrap.sh
 #
-# See infra/oidc/README.md before running this for real: the `SUBJECT_*` defaults below are the
-# textbook "repo:<org>/<repo>:..." form, and oidc-bootstrap.sh already found - for THIS
-# organization - that GitHub's real token embeds internal numeric org/repo ids instead. Confirm
-# the actual claim from a live token (see that README's "Inspect OIDC token claims" pointer)
-# before trusting the defaults here.
+# The SUBJECT_* defaults below are NOT the textbook "repo:<org>/<repo>:..." form, and that is
+# deliberate. .github/workflows/oidc-probe.yml minted a real OIDC token from this repo on
+# 2026-09-04 and decoded it; this organization issues a subject carrying internal numeric
+# org/repo ids:
+#
+#   repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:pull_request
+#
+# The textbook form would be silently rejected ("Not authorized to perform
+# sts:AssumeRoleWithWebIdentity", naming nothing). Re-run that probe workflow if the org or repo
+# is ever renamed/recreated - the numeric ids are identity, not decoration.
 set -euo pipefail
 
 REPO="${REPO:-AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability}"
 ECR_REPO="${ECR_REPO:-uptimecrew/taxcalc-api}"
 REGION="${AWS_REGION:-us-east-1}"
 
-# Textbook defaults - see the caveat above. Override once confirmed from a real token:
-#   SUBJECT_DEV='repo:ORG@123/REPO@456:environment:dev' \
-#   SUBJECT_MAIN='repo:ORG@123/REPO@456:ref:refs/heads/main' \
-#   SUBJECT_PROD='repo:ORG@123/REPO@456:environment:prod' \
-#     ./scripts/docker-oidc-bootstrap.sh
-SUBJECT_DEV="${SUBJECT_DEV:-repo:${REPO}:environment:dev}"
-SUBJECT_MAIN="${SUBJECT_MAIN:-repo:${REPO}:ref:refs/heads/main}"
-SUBJECT_PROD="${SUBJECT_PROD:-repo:${REPO}:environment:prod}"
+# Observed prefix (see above). The `:pull_request` suffix on the observed token is this event's
+# context; the three contexts these roles actually run under are appended below.
+#
+# HONEST LIMIT: the PREFIX is observed, the three SUFFIXES are inferred from GitHub's documented
+# claim rules - a pull_request run cannot mint an environment-scoped token, and the dev/prod
+# Environments are pinned to `main`. Re-run oidc-probe.yml (workflow_dispatch) after the first
+# push to main to confirm the `:ref:refs/heads/main` and `:environment:*` forms directly.
+OIDC_SUBJECT_PREFIX="${OIDC_SUBJECT_PREFIX:-repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842}"
+SUBJECT_DEV="${SUBJECT_DEV:-${OIDC_SUBJECT_PREFIX}:environment:dev}"
+SUBJECT_MAIN="${SUBJECT_MAIN:-${OIDC_SUBJECT_PREFIX}:ref:refs/heads/main}"
+SUBJECT_PROD="${SUBJECT_PROD:-${OIDC_SUBJECT_PREFIX}:environment:prod}"
 
 BUILD_ROLE="${BUILD_ROLE:-taxcalc-api-build-push}"
 PROD_ROLE="${PROD_ROLE:-taxcalc-api-prod-deploy}"

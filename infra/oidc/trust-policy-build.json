@@ -14,8 +14,8 @@
         },
         "StringLike": {
           "token.actions.githubusercontent.com:sub": [
-            "repo:AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability:environment:dev",
-            "repo:AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability:ref:refs/heads/main"
+            "repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:environment:dev",
+            "repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842:ref:refs/heads/main"
           ]
         }
       }
