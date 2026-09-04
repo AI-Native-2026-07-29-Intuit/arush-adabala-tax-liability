@@ -52,7 +52,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The drift gate, over BOTH renderings. scripts/slo-render.sh writes the PrometheusRule CR
       # and the flat rule file from one Sloth spec; regenerating and diffing is a complete answer
@@ -130,7 +130,7 @@ jobs:
     # measured 12-13m plus that.
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The single cause of the previous cluster failures: pods across every namespace were
       # Evicted on one node, which is kubelet responding to node pressure, not anything the
@@ -145,10 +145,10 @@ jobs:
                       /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
           df -h / | tail -1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build taxcalc-api image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           load: true
@@ -168,7 +168,7 @@ jobs:
           df -h / | tail -1
 
       - name: Spin up k3d cluster
-        uses: AbsaOSS/k3d-action@v2
+        uses: AbsaOSS/k3d-action@4e8b3239042be1dc0aed6c5eb80c13b18200fc79 # v2.4.0
         with:
           cluster-name: taxcalc-obs
           # Same pin and traefik disable as k8s-ci.yml; no loadbalancer port is needed here
@@ -258,7 +258,7 @@ jobs:
 
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: obs-diagnostics
           path: obs-diagnostics.txt

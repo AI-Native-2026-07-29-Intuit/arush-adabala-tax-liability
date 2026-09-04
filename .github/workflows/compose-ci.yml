@@ -33,7 +33,7 @@ jobs:
       # healthy, and its teardown tears down the one shared project.
       COMPOSE_PROJECT_NAME: taxcalc_dev_ci_${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # uptimecrew/taxcalc-api:0.1.0 is never pushed to a registry (docker.yml
       # builds it with `load: true` for its own scan+smoke job only, PR builds
@@ -87,7 +87,7 @@ jobs:
           fi
           cat compose-logs.txt || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: compose-logs

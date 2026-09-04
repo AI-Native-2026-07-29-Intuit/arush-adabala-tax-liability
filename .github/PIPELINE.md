@@ -89,13 +89,25 @@ which value is absent.
 1. In the GitHub UI, **Actions** → `deploy-prod` → **Run workflow**.
 2. Paste the image SHA confirmed pushed to ECR (the same 40-char SHA
    `call-build-and-push` tagged in step 2 above).
-3. A required reviewer on the `prod` GitHub Environment approves the run
-   before it starts - see "What is NOT in this repo" below.
-4. The workflow assumes `taxcalc-api-prod-deploy` (a **narrower** role than
+3. The run is pinned to the `prod` Environment. Its deployment-branch policy
+   (`main` only) is enforced; its required-reviewer gate **is not, and cannot
+   be on this plan** - so today the run starts immediately rather than
+   waiting for an approval. See "What is NOT in this repo" below for the
+   422 and the two ways to fix it. Treat prod as ungated until then.
+4. `concurrency: deploy-prod-taxcalc-api` with `cancel-in-progress: false`
+   means two promotions dispatched back-to-back **queue** rather than race.
+   This is the one prod safety property that *is* live today, and it does
+   not depend on the billing plan.
+5. The workflow assumes `taxcalc-api-prod-deploy` (a **narrower** role than
    the build role - `ecr:DescribeImages` only today, see `infra/oidc/
-   README.md`) and confirms the image exists in ECR. W6 D3 lands the real
-   `kubectl rollout`/Argo CD promotion step; today's placeholder step just
-   echoes what it would apply.
+   README.md`) and confirms the image exists in ECR. Both AWS steps are
+   `if: vars.AWS_ACCOUNT_ID != ''`-gated, the same pattern
+   `_build-and-push.yml` already uses: with the variable unset the run still
+   goes green through the environment and concurrency gates and prints an
+   explicit `::warning::` naming what is skipped, instead of failing on a
+   malformed `arn:aws:iam:::role/...` that says nothing about which value is
+   absent. W6 D3 lands the real `kubectl rollout`/Argo CD promotion step;
+   today's placeholder step just echoes what it would apply.
 
 ## Why every action is SHA-pinned
 
@@ -107,38 +119,78 @@ commit SHA freezes the bytes; `.github/dependabot.yml` opens a grouped
 weekly PR when a new version is available, and the comment next to each SHA
 (`# v4.5.0`) tells reviewers which version a SHA corresponds to.
 
+Every action in `.github/` is pinned - all eleven workflows and the composite
+action, not just the three this deliverable added. Both the audit greps are
+zero:
+
 ```bash
-grep -RIn '@v[0-9]\+\.\?[0-9]*\.\?[0-9]*$' .github/workflows/ci.yml \
-  .github/workflows/_build-and-push.yml .github/workflows/deploy-prod.yml \
-  .github/actions/setup-build/action.yml
-# -> 0 matches: every action this deliverable added is SHA-pinned.
+grep -RIn '@v[0-9]\+$' .github/                       # -> 0 (the task's own check)
+
+# Stricter: every `uses:` that is not a local path must be a 40-hex sha with a
+# version comment. Catches what the above misses - `@v3.1.0`, `@v0.36.0`, and a
+# bare sha with no comment are all invisible to a `@v<n>$` anchor.
+grep -RInE '^\s*(- )?uses: ' .github/ | grep -vE 'uses: \./' \
+  | grep -vE '@[0-9a-f]{40} # v'                      # -> 0
 ```
 
-**Known, deliberate gap - scope, not an oversight.** That same grep against
-the *whole* `.github/` tree is not zero: every one of `docker.yml`,
-`compose-ci.yml`, `k8s-ci.yml`, `observability.yml`, `serverless.yml`, and
-`web-ci.yml` (all landed on earlier days, already graded, already green on
-`main`) still pins at least one action by tag (`docker/build-push-action@
-v6`, `hadolint/hadolint-action@v3.1.0`, `aquasecurity/trivy-action@v0.36.0`,
-`actions/checkout@v4`, ...). Rewriting six unrelated workflow files' action
-pins is a real, non-trivial change (wrong SHA = a silently broken build on
-a day this deliverable doesn't own) with a blast radius well outside "wire
-the CI/CD pipeline for W6 D1" - left as a follow-up rather than done
-silently as a drive-by here, the same way every other day in this README
-calls out what it deliberately left alone instead of fixing everything it
-touched.
+**One sha per action, repo-wide.** Where an action appeared both pinned (in
+this deliverable's files) and tagged (in an older workflow), everything was
+unified onto a single sha rather than leaving `actions/checkout` at `v4.2.2`
+in `ci.yml` and `v4.4.0` in `docker.yml` - two shas for one action is exactly
+the ambiguity the `# v<n>` comment exists to remove, and it would have made
+Dependabot open two PRs for one bump. The older workflows were resolving `@v4`
+to the latest v4 on every run anyway, so pinning them *to* that latest sha
+changes no bytes they were already executing; the W6 D1 files moved forward a
+few minor versions to meet them.
+
+**Resolving a sha correctly.** The obvious one-liner has two traps, and
+`scripts/` does not hide either:
+
+```bash
+gh api /repos/<owner>/<repo>/git/matching-refs/tags/v4 --jq '.[-1].object.sha'
+```
+
+1. `matching-refs` sorts refs as **strings**, so `v4.9.0` sorts *after*
+   `v4.10.0` and `.[-1]` silently returns the older tag. Sort with `sort -V`.
+2. For an **annotated** tag, `.object.sha` is the tag object, not the commit.
+   A workflow pinned to a tag-object sha fails at runtime. Deref it through
+   `/git/tags/{sha}` and take `.object.sha`.
+
+`aws-actions/setup-sam` is pinned `# v2` rather than `# v2.x.y` because that
+repo publishes only moving major tags (`v0`..`v3`); there is no patch tag to
+name. It is still pinned to the commit `v2` pointed at, so the pin is real.
 
 ## What is NOT in this repo
 
-- **The `prod` Environment's required-reviewer rule.** `dev` and `prod`
-  GitHub Environments both exist (created via the API for this PR, deploy
-  branch policy pinned to `main` on both), but *adding a required reviewer*
-  to `prod` is a permission-granting action this session's safety
-  classifier declined to take unattended - the same category of action the
-  lesson itself calls out as "the UI configuration is not in version
-  control" (screenshot it for the PR, don't try to script it). Add it
-  manually: **Settings → Environments → prod → Required reviewers**, add
-  yourself and your ES.
+- **The `prod` Environment's required-reviewer rule - impossible on this
+  repo's plan, not merely undone.** `dev` and `prod` both exist and both
+  have their deployment-branch policy pinned to `main` (that rule *is*
+  enforced). Adding reviewers is refused by the API:
+
+  ```
+  PUT /repos/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability/environments/prod
+    reviewers[]={type:User,id:47830364}   # ArushAdabala
+    reviewers[]={type:User,id:295893919}  # yusufumautiauptimecrew (ES)
+  -> 422: "Failed to create the environment protection rule. Please ensure the
+           billing plan supports the required reviewers protection rule."
+  ```
+
+  `wait_timer` is refused with the identical message. Only `branch_policy`
+  is permitted. `GET /orgs/AI-Native-2026-07-29-Intuit` reports `plan: free`
+  and the repo is `private`, and environment protection rules require
+  Pro/Team/Enterprise for a private repo - so **`prod` currently has no
+  human gate**, and `deploy-prod` starts immediately on dispatch.
+
+  This is the *same* plan gate as the branch-protection bullet below, and
+  the remediation is the same: make the repo public, or upgrade the org.
+  Then **Settings → Environments → prod → Required reviewers** → add
+  `ArushAdabala` and `yusufumautiauptimecrew`. Leave *Prevent self-review*
+  **off** unless a second human is reliably available, or the person who
+  dispatches a promotion cannot approve it and prod becomes undeployable.
+
+  An earlier revision of this file attributed the missing rule to a safety
+  classifier declining the action. That was wrong - the call was made, and
+  the refusal came from GitHub's billing layer, as the 422 above shows.
 - **Branch protection on `main` requiring the `build-test` status check -
   currently impossible on this repo's plan, not merely undone.** Both
   `GET /repos/{owner}/{repo}/branches/main/protection` (classic branch
