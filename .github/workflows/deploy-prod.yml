@@ -2,12 +2,12 @@
 # Promotes a SHA-tagged image already in ECR to the prod environment.
 # Triggered manually via workflow_dispatch with the image SHA as input.
 # The dev environment auto-deploys on merge to main (via _build-and-push.yml).
-# prod is INTENDED to be human-gated by required reviewers on the 'prod' GitHub
-# Environment, but that rule does not exist today and cannot be created on this
-# repo's billing plan (422 - see the comment on `environment: prod` below and
-# .github/PIPELINE.md's "What is NOT in this repo"). What IS enforced right now:
-# the environment's deployment-branch policy (main only) and the concurrency
-# queue. Treat a dispatch as unreviewed until the plan changes.
+# prod is human-gated: the 'prod' GitHub Environment carries a required-reviewer
+# rule, so a dispatch parks on "Waiting for review" until a named reviewer
+# approves it. Three gates apply, none of them in version control except this
+# file's own concurrency block - see .github/PIPELINE.md, "Repository
+# protection": required reviewers, the main-only deployment-branch policy, and
+# the queue below.
 name: deploy-prod
 
 on:
@@ -32,12 +32,12 @@ jobs:
     name: Promote image to prod
     runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 15
-    # The deployment-branch policy (main only) is enforced. The required-reviewer
-    # rule is NOT: environment protection rules are gated on the billing plan, and
-    # this is a private repo in a free-plan org - PUT .../environments/prod returns
-    # 422 "ensure the billing plan supports the required reviewers protection rule"
-    # for both `required_reviewers` and `wait_timer`. Same plan gate that blocks
-    # branch protection. See .github/PIPELINE.md, "What is NOT in this repo".
+    # Two rules, both enforced: deployment branches restricted to main, and
+    # required reviewers (ArushAdabala + yusufumautiauptimecrew). The job does
+    # not start until one of them approves. Both were impossible while this repo
+    # was private on a free plan (422 on required_reviewers and wait_timer
+    # alike); making the repo public on 2026-09-04 lifted that gate.
+    # prevent_self_review is off - the dispatcher may approve their own run.
     environment: prod
     permissions:
       contents: read

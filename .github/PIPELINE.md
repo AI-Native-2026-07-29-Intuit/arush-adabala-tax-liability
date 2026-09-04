@@ -15,15 +15,18 @@ SECURITY.md's "Known deviations" table, first bullet).
    `blacksmith-2vcpu-ubuntu-2204` via the `setup-build` composite action.
 2. Test + JaCoCo HTML/XML reports upload only on failure (saves artefact
    storage).
-3. The PR's `Build + test (taxcalc-api)` status check is the gate this
-   deliverable intends to make **required** on `main` - but it is **not
-   required today, and cannot be**: branch protection is unavailable on this
-   private repo's free-plan org (both the classic and ruleset APIs return
-   `403`). It runs on every PR and must be read by a human reviewer until
-   that changes. See "What is NOT in this repo" below for the exact
-   remediation, and note that a rule created later must select the check by
-   its display name `Build + test (taxcalc-api)`, not the job id
-   `build-test`.
+3. The PR's `Build + test (taxcalc-api)` status check **is required on
+   `main`**. Branch protection was unavailable while this repo was private on
+   a free-plan org (both the classic and ruleset APIs returned `403:
+   "Upgrade to GitHub Pro or make this repository public"`); the repo was
+   made public on 2026-09-04, which lifted the gate, and the rule was created
+   immediately after. The rule selects the check by its **display name**
+   `Build + test (taxcalc-api)`, not the job id `build-test` - `ci.yml`'s
+   `name:` override is what publishes it, and a rule naming `build-test`
+   would silently match nothing. Current settings: `strict: false` (a branch
+   need not be up to date before merging) and `enforce_admins: false` (repo
+   admins can still push directly). Tighten either if you want the rule to
+   bind admins too.
 4. Separately, unchanged by this deliverable: `docker.yml` (W5 D1) still
    runs `hadolint` → `build-scan-smoke` (build the image, Trivy-scan it,
    boot it against real Postgres/Mongo service containers, hit `/actuator/
@@ -89,15 +92,20 @@ which value is absent.
 1. In the GitHub UI, **Actions** → `deploy-prod` → **Run workflow**.
 2. Paste the image SHA confirmed pushed to ECR (the same 40-char SHA
    `call-build-and-push` tagged in step 2 above).
-3. The run is pinned to the `prod` Environment. Its deployment-branch policy
-   (`main` only) is enforced; its required-reviewer gate **is not, and cannot
-   be on this plan** - so today the run starts immediately rather than
-   waiting for an approval. See "What is NOT in this repo" below for the
-   422 and the two ways to fix it. Treat prod as ungated until then.
+3. The run is pinned to the `prod` Environment, and **both** of its gates are
+   live: the deployment-branch policy (`main` only), and a required-reviewer
+   rule naming `ArushAdabala` and `yusufumautiauptimecrew`. The run parks on
+   "Waiting for review" until one of them approves it in the Actions tab.
+   The reviewer rule was impossible while this repo was private on a free
+   plan (`PUT .../environments/prod` returned `422 "...billing plan supports
+   the required reviewers protection rule"`); making the repo public on
+   2026-09-04 lifted that. `prevent_self_review` is **off**, so whoever
+   dispatches a promotion may approve it - turn it on if you want a genuine
+   second pair of eyes, but note that a solo on-call then cannot ship.
 4. `concurrency: deploy-prod-taxcalc-api` with `cancel-in-progress: false`
    means two promotions dispatched back-to-back **queue** rather than race.
-   This is the one prod safety property that *is* live today, and it does
-   not depend on the billing plan.
+   Measured, not assumed: runs `33849006639` and `33849009583` executed
+   07:30:10-16 and 07:30:26-32 - no overlap, neither cancelled.
 5. The workflow assumes `taxcalc-api-prod-deploy` (a **narrower** role than
    the build role - `ecr:DescribeImages` only today, see `infra/oidc/
    README.md`) and confirms the image exists in ECR. Both AWS steps are
@@ -160,49 +168,45 @@ gh api /repos/<owner>/<repo>/git/matching-refs/tags/v4 --jq '.[-1].object.sha'
 repo publishes only moving major tags (`v0`..`v3`); there is no patch tag to
 name. It is still pinned to the commit `v2` pointed at, so the pin is real.
 
+## Repository protection - both gates are live
+
+Neither of these is in version control; both are repo settings, recorded here
+because the UI is the only place they exist. Both were **impossible until
+2026-09-04**, when the repo was made public.
+
+**`main` branch protection.** Requires the `Build + test (taxcalc-api)` status
+check. It selects the check by **display name** - `ci.yml`'s `name:` override
+is what publishes it, so a rule naming the job id `build-test` matches nothing
+at all and silently protects nothing.
+
+```
+required_status_checks.contexts = ["Build + test (taxcalc-api)"]
+strict          = false   # a branch need not be up to date before merging
+enforce_admins  = false   # repo admins may still push directly to main
+```
+
+**`prod` Environment.** Deployment branches restricted to `main`, plus a
+required-reviewer rule naming `ArushAdabala` and `yusufumautiauptimecrew`. A
+`deploy-prod` dispatch now parks on "Waiting for review" until one of them
+approves. `prevent_self_review` is **off**, so the dispatcher may self-approve
+- turn it on for a genuine second pair of eyes, at the cost of making prod
+undeployable by a lone on-call. `wait_timer` is 0, so GitHub stores no timer
+rule at all (that is the correct representation of "wait timer = 0", not a
+missing setting).
+
+**Why they were absent before.** Both are plan-gated for *private* repos.
+While this repo was private on a `plan: free` org, `PUT .../environments/prod`
+returned `422 "Please ensure the billing plan supports the required reviewers
+protection rule"` (identically for `wait_timer`), and both
+`GET .../branches/main/protection` and `GET .../rulesets` returned `403:
+"Upgrade to GitHub Pro or make this repository public to enable this
+feature."` No permission grant could fix either - the features did not exist
+on that plan, for anyone, via API or UI. An earlier revision of this file
+blamed a safety classifier for the missing reviewer rule; that was wrong, and
+the 422 above is what actually refused it.
+
 ## What is NOT in this repo
 
-- **The `prod` Environment's required-reviewer rule - impossible on this
-  repo's plan, not merely undone.** `dev` and `prod` both exist and both
-  have their deployment-branch policy pinned to `main` (that rule *is*
-  enforced). Adding reviewers is refused by the API:
-
-  ```
-  PUT /repos/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability/environments/prod
-    reviewers[]={type:User,id:47830364}   # ArushAdabala
-    reviewers[]={type:User,id:295893919}  # yusufumautiauptimecrew (ES)
-  -> 422: "Failed to create the environment protection rule. Please ensure the
-           billing plan supports the required reviewers protection rule."
-  ```
-
-  `wait_timer` is refused with the identical message. Only `branch_policy`
-  is permitted. `GET /orgs/AI-Native-2026-07-29-Intuit` reports `plan: free`
-  and the repo is `private`, and environment protection rules require
-  Pro/Team/Enterprise for a private repo - so **`prod` currently has no
-  human gate**, and `deploy-prod` starts immediately on dispatch.
-
-  This is the *same* plan gate as the branch-protection bullet below, and
-  the remediation is the same: make the repo public, or upgrade the org.
-  Then **Settings → Environments → prod → Required reviewers** → add
-  `ArushAdabala` and `yusufumautiauptimecrew`. Leave *Prevent self-review*
-  **off** unless a second human is reliably available, or the person who
-  dispatches a promotion cannot approve it and prod becomes undeployable.
-
-  An earlier revision of this file attributed the missing rule to a safety
-  classifier declining the action. That was wrong - the call was made, and
-  the refusal came from GitHub's billing layer, as the 422 above shows.
-- **Branch protection on `main` requiring the `build-test` status check -
-  currently impossible on this repo's plan, not merely undone.** Both
-  `GET /repos/{owner}/{repo}/branches/main/protection` (classic branch
-  protection) and `GET /repos/{owner}/{repo}/rulesets` (the newer
-  equivalent) return `403: "Upgrade to GitHub Pro or make this repository
-  public to enable this feature."` against this private repository. No
-  amount of permissions fixes that - the feature is gated on the plan.
-  Remediation is one of: upgrade the org to GitHub Pro/Team, or make the
-  repo public; then **Settings → Branches → Branch protection rules** → add
-  a rule for `main` requiring the `Build + test (taxcalc-api)` status check.
-  Do it after `build-test` has gone green at least once (it now has, on
-  PR #37) so the check name is confirmed to match exactly.
 - **`kubectl apply` against EKS** - W6 D3.
 - **`sam deploy` for the LLM cost-monitoring Lambda** - W6 D4.
 - **Argo CD GitOps** - W6 D2 (replaces `deploy-prod.yml`'s eventual
