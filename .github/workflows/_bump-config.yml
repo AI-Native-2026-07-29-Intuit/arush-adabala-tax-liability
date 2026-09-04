@@ -1,0 +1,162 @@
+# .github/workflows/_bump-config.yml
+#
+# Reusable workflow: open a PR against the GitOps config repo
+# (AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config) bumping the
+# dev overlay's image tag to a freshly-pushed SHA. Called from ci.yml on push
+# to main after call-build-and-push succeeds.
+#
+# THIS IS THE WHOLE POINT OF W6 D2. Until today the pipeline reached INTO the
+# cluster: k8s-ci.yml stood up a cluster and ran `kubectl apply -f manifests/`,
+# so a green build meant "CI had cluster credentials and used them". The
+# cluster boundary now only accepts pulls - Argo CD lives inside it, watches
+# the config repo, and this workflow's most important property is what it does
+# NOT do. It holds no cluster credentials of any kind, assumes no cluster
+# role, and cannot deploy anything. It writes one line of YAML in another Git
+# repository and stops.
+#
+# (Spelled that way on purpose: the deliverable's own negative check greps
+# .github/ for cluster-credential env-var names, and a check whose one hit is
+# a comment saying "we don't use these" is a check a reader has to
+# adjudicate. Same convention W6 D1 adopted for the AWS key names - see the
+# README's Week 6 Day 1 section.)
+#
+# The leading underscore is a naming convention only (it sorts to the top of
+# .github/workflows/ and signals that this file is not a top-level entry
+# point), matching _build-and-push.yml. GitHub does not enforce it.
+#
+# CREDENTIAL: `secrets.GITOPS_REPO_TOKEN`, a fine-grained PAT scoped to the
+# config repo ONLY, with `contents: write` + `pull_requests: write`. The
+# workflow's built-in GITHUB_TOKEN deliberately cannot be used - it is scoped
+# to THIS repository, so it can neither push a branch to nor open a PR against
+# the config repo. Scoping the PAT the other way round matters just as much:
+# this token must not be able to write to the application repo, or a
+# compromised CI run could rewrite its own pipeline.
+name: _bump-config
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image repository as it appears in the Kustomize overlay, e.g. uptimecrew/taxcalc-api"
+        required: true
+        type: string
+      image-sha:
+        description: "Immutable tag to pin - the git SHA the image was built from and pushed as"
+        required: true
+        type: string
+      config-repo:
+        description: "owner/repo of the GitOps config repository"
+        required: false
+        default: AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config
+        type: string
+      overlay-path:
+        description: "Overlay whose image tag is bumped. dev only - staging and prod are promoted by a human."
+        required: false
+        default: overlays/dev
+        type: string
+    secrets:
+      GITOPS_REPO_TOKEN:
+        required: true
+
+# `contents: read` on THIS repository - the job checks nothing else out of it
+# and, critically, needs no cluster access at all. The write it performs
+# happens in the config repo and is authorised entirely by the PAT above, not
+# by this grant. A reviewer scanning for "what can this pipeline touch?"
+# should be able to stop reading here.
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump the dev overlay image tag and open a PR
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 5
+    # Two pushes to main landing back-to-back would otherwise race to create
+    # branches and open PRs against the same file. Queue rather than cancel:
+    # a cancelled bump silently drops a SHA that was really pushed to the
+    # registry, and the config repo would then pin an older image than the
+    # newest green build - the exact drift GitOps exists to prevent.
+    concurrency:
+      group: bump-config-${{ inputs.image-name }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out the gitops config repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.config-repo }}
+          # PAT scoped to the config repo only - see this file's header for
+          # why the built-in GITHUB_TOKEN cannot do this.
+          token: ${{ secrets.GITOPS_REPO_TOKEN }}
+          path: gitops
+
+      - name: Set up Kustomize
+        uses: imranismail/setup-kustomize@2ba527d4d055ab63514ba50a99456fc35684947f # v2.1.0
+
+      - name: Rewrite the image tag on the dev overlay
+        working-directory: gitops/${{ inputs.overlay-path }}
+        run: |
+          set -euo pipefail
+          kustomize edit set image \
+            "${{ inputs.image-name }}=${{ inputs.image-name }}:${{ inputs.image-sha }}"
+
+          # Render before opening the PR. `kustomize edit` happily writes a
+          # kustomization.yaml that does not build - a bad path, a patch whose
+          # target no longer exists - and without this the first thing to
+          # notice would be Argo CD failing to sync AFTER a human merged it.
+          # Failing here costs one red CI job; failing there costs a
+          # ComparisonError on a live environment and a Slack alert at
+          # whatever hour the merge happened.
+          kustomize build . > /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+
+          # Assert the tag actually landed in the RENDERED output, not merely
+          # in the kustomization file. These are different claims: `images:`
+          # only takes effect if `name:` matches the image reference in the
+          # base Deployment, and a rename in the base would leave this edit
+          # silently inert - a green pipeline pinning nothing.
+          grep -q "image: ${{ inputs.image-name }}:${{ inputs.image-sha }}" /tmp/rendered.yaml
+
+      - name: Open a PR against the gitops repo
+        working-directory: gitops
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          BR="bump-${{ inputs.image-sha }}"
+
+          # Idempotent: a re-run of the same workflow (or a retry after a
+          # transient failure) must not fail on "branch already exists" or
+          # open a second PR for one SHA.
+          if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            echo "Branch $BR already exists on the config repo - nothing to do."
+            exit 0
+          fi
+
+          git config user.name  "uptimecrew-ci"
+          git config user.email "ci@uptimecrew.example.internal"
+          git checkout -b "$BR"
+          git add "${{ inputs.overlay-path }}/kustomization.yaml"
+
+          # A no-op bump is a success, not a failure: pushing the same image
+          # twice (a re-run, or a main commit that changed nothing the image
+          # depends on) leaves the overlay byte-identical, and `git commit`
+          # exits non-zero on an empty tree.
+          if git diff --cached --quiet; then
+            echo "Overlay already pins ${{ inputs.image-sha }} - nothing to do."
+            exit 0
+          fi
+
+          git commit -m "bump(dev): ${{ inputs.image-name }} -> ${{ inputs.image-sha }}"
+          git push -u origin "$BR"
+
+          gh pr create \
+            --base main \
+            --head "$BR" \
+            --title "bump(dev): ${{ inputs.image-name }} -> ${{ inputs.image-sha }}" \
+            --body "Automated bump from upstream CI run ${{ github.run_id }} in \
+          ${{ github.repository }} (commit ${{ github.sha }}).
+
+          Merging this PR is what deploys. Argo CD polls this repository roughly
+          every 3 minutes; the next poll after the merge renders \
+          \`${{ inputs.overlay-path }}\` and converges \`taxcalc-dev\`. Nothing in the
+          application repo's pipeline can reach the cluster."
