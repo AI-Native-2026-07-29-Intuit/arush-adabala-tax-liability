@@ -178,9 +178,20 @@ jobs:
   # This job was failing in 3s with "The job was not started because recent
   # account payments have failed" - not a test failure, a runner that never
   # booted.
+  # Gated on the role ARN as well as the branch. vars.AWS_DEPLOY_ROLE_ARN is
+  # unset (this org issues no AWS account), and without that guard EVERY push
+  # to main failed here at assume-role - configure-aws-credentials cannot do
+  # anything with an empty role-to-assume, so main carried a permanent red X
+  # that had nothing to do with the commit that triggered it. A red main
+  # everyone learns to ignore is worse than no signal at all.
+  #
+  # Skipping silently would be its own trap, so deploy-sandbox-unconfigured
+  # below runs in this job's place and says why. Setting the variable enables
+  # this job with no workflow change - same pattern as _build-and-push.yml's
+  # ECR steps and deploy-prod.yml.
   deploy-sandbox:
     needs: validate-build-test
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
     runs-on: blacksmith-2vcpu-ubuntu-2204
     environment: sandbox
     timeout-minutes: 20
@@ -249,3 +260,22 @@ jobs:
             /tmp/stack-events.json
             /tmp/lambda-logs.txt
           retention-days: 14
+
+  # Runs exactly when deploy-sandbox does not, so a push to main always carries
+  # a visible reason rather than an unexplained "skipped" box.
+  deploy-sandbox-unconfigured:
+    name: Sandbox deploy skipped (AWS not configured)
+    needs: validate-build-test
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN == ''
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 5
+    steps:
+      - name: Explain why the sandbox deploy did not run
+        run: |
+          echo "::warning::vars.AWS_DEPLOY_ROLE_ARN is unset, so the sandbox" \
+               "deploy was skipped. This is expected: no AWS account is issued" \
+               "for this org. Before this guard existed, the deploy job ran" \
+               "anyway and failed at assume-role on every push to main." \
+               "To enable it: create the deploy role, then" \
+               "'gh variable set AWS_DEPLOY_ROLE_ARN --body <role-arn>'." \
+               "No workflow change is needed."

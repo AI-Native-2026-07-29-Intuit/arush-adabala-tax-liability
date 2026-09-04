@@ -7,17 +7,28 @@
 name: taxcalc-api ci
 
 on:
+  # DELIBERATELY UNFILTERED on pull_request, unlike the push trigger below.
+  #
+  # `Build + test (taxcalc-api)` is a REQUIRED status check on main. A required
+  # check that is path-filtered is a trap: GitHub waits forever for a context
+  # that will never report, so any PR touching none of the paths below can
+  # never merge - not "runs without the check", but permanently blocked with no
+  # way to override short of an admin bypass or editing the rule.
+  #
+  # That is not hypothetical here. It stranded four Dependabot PRs (#39-#42)
+  # the moment branch protection was created: each touches only .github/
+  # workflow files, so ci.yml never triggered, the required context never
+  # reported, and all four were unmergeable. Every future docs-only or
+  # workflow-only PR would have hit the same wall.
+  #
+  # The cost is real and accepted: every PR now runs the full Testcontainers
+  # suite, including documentation-only ones. The alternative - a twin workflow
+  # publishing the same check name on `paths-ignore` - fires BOTH workflows for
+  # a PR touching matched and unmatched files at once, producing two check runs
+  # with one name. It works, but it is the kind of clever that breaks quietly.
+  # A required check should be unconditional; that is what makes it a gate.
   pull_request:
     branches: [main]
-    paths:
-      - "src/**"
-      - "build.gradle"
-      - "settings.gradle"
-      - "gradlew"
-      - "gradlew.bat"
-      - "gradle/**"
-      - "Dockerfile"
-      - ".github/workflows/ci.yml"
   push:
     branches: [main]
     paths:
