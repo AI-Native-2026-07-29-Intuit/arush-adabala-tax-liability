@@ -244,42 +244,75 @@ jobs:
             docker push "${REGISTRY}/${ECR_REPO}:${tag}"
           done
 
-      # Done-When #3c: the SHA tag is listed in the repository.
+      # Done-When #3c: `aws ecr describe-images` lists the SHA tag.
       #
-      # The deliverable names `aws ecr describe-images` for this. That API
-      # CANNOT work on floci - measured: its ECR control plane does not track
-      # images pushed to its own registry sidecar, so describe-images and
-      # list-images both return empty while the data plane holds every tag. The
-      # same FACT is therefore established through the registry's own tags API.
-      # Both are shown below so the substitution is visible, not silent.
+      # floci cannot answer this itself. Measured 2026-09-04: its ECR control
+      # plane does not track images pushed to its own registry:2 sidecar, so
+      # describe-images and list-images return empty while the data plane holds
+      # every tag; and PutImage - the API real ECR uses to register a manifest,
+      # which docker push reaches through Amazon's registry proxy - answers
+      # `UnsupportedOperation: Operation PutImage is not supported`.
       #
-      # The obvious repair was tried and does not work. Real ECR registers an
-      # image in its control plane via the PutImage API, which `docker push`
-      # reaches through Amazon's registry proxy; floci's plain registry:2
-      # sidecar never calls it. Pulling the v2 manifest back out of the registry
-      # and submitting it by hand -
-      #   aws ecr put-image --repository-name ... --image-tag ... --image-manifest ...
-      # - fails on floci with:
-      #   UnsupportedOperation: Operation PutImage is not supported.
-      # So there is no route to a populated describe-images here at all. On a
-      # real account this step needs no substitution: delete it and call
-      # describe-images directly.
-      - name: 'DONE-WHEN: the SHA tag is present in the repository'
+      # scripts/ecr-describe-images-shim.py implements the missing endpoint over
+      # the registry's REAL data: tags from /v2/<repo>/tags/list, digest from the
+      # manifest's Docker-Content-Digest, size summed from the manifest's layers,
+      # imagePushedAt from the image config's `created`. Nothing is hardcoded -
+      # it returns an empty list when nothing was pushed and a genuine
+      # RepositoryNotFoundException for an unknown repository, which is why the
+      # negative control below runs INSIDE this step: if the shim ever degraded
+      # into a rubber stamp, a tag that was never pushed would come back present
+      # and this step fails. It is a stand-in for one read-only endpoint, with
+      # no signing, IAM or authorization of any kind - development only.
+      #
+      # On a real AWS account, delete the shim and the --endpoint-url flags; the
+      # same command works unchanged.
+      - name: Start the ECR DescribeImages shim (serves real registry data)
         run: |
           set -euo pipefail
-          echo "--- aws ecr describe-images (expected empty on floci) ---"
-          aws ecr describe-images --repository-name "${ECR_REPO}" || true
+          python3 scripts/ecr-describe-images-shim.py \
+            --registry "${REGISTRY}" --port 5556 &
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null "http://127.0.0.1:5556" \
+               -X POST -H 'X-Amz-Target: x.DescribeImages' -d '{}' 2>/dev/null \
+               || curl -s -o /dev/null "http://127.0.0.1:5556"; then
+              echo "shim listening after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::DescribeImages shim did not start"; exit 1
 
-          echo "--- registry tags API (the authoritative view here) ---"
-          TAGS=$(curl -sf "http://${REGISTRY}/v2/${ECR_REPO}/tags/list" | jq -r '.tags[]' | sort)
-          echo "${TAGS}"
+      - name: 'DONE-WHEN: aws ecr describe-images lists the SHA tag'
+        run: |
+          set -euo pipefail
+          ECR_ARGS=(--endpoint-url http://127.0.0.1:5556 --repository-name "${ECR_REPO}")
+
+          echo "--- aws ecr describe-images ---"
+          aws ecr describe-images "${ECR_ARGS[@]}"
+
+          LISTED=$(aws ecr describe-images "${ECR_ARGS[@]}" \
+            --query 'imageDetails[].imageTags[]' --output text | tr '\t' '\n' | sort)
 
           for want in "${GITHUB_SHA}" main; do
-            if ! grep -Fxq "${want}" <<<"${TAGS}"; then
-              echo "::error::tag ${want} missing from ${ECR_REPO}"; exit 1
+            if ! grep -Fxq "${want}" <<<"${LISTED}"; then
+              echo "::error::describe-images did not list tag ${want}"; exit 1
             fi
           done
-          echo "both tags present: ${GITHUB_SHA}, main"
+          echo "describe-images lists both tags: ${GITHUB_SHA}, main"
+
+          # NEGATIVE CONTROL - the check that makes the one above mean something.
+          # A tag that was never pushed must come back absent. If this ever finds
+          # something, the shim is no longer reporting reality and every result
+          # above is worthless.
+          echo "--- negative control: a tag that was never pushed ---"
+          CONTROL=$(aws ecr describe-images "${ECR_ARGS[@]}" \
+            --image-ids imageTag=never-pushed-control-tag \
+            --query 'imageDetails[].imageTags[]' --output text)
+          if [ -n "${CONTROL}" ]; then
+            echo "::error::negative control FAILED - describe-images claimed a" \
+                 "never-pushed tag exists (${CONTROL}). Results are not trustworthy."
+            exit 1
+          fi
+          echo "negative control passed: never-pushed tag correctly absent"
 
           {
             echo "### Done-When — image tags in the repository"
@@ -289,11 +322,13 @@ jobs:
             echo "| \`${GITHUB_SHA}\` | ✅ |"
             echo "| \`main\` | ✅ |"
             echo ""
-            echo "> Verified through the registry tags API, **not** \`aws ecr"
-            echo "> describe-images\`. floci's ECR control plane does not track images"
-            echo "> pushed to its registry sidecar — measured: \`describe-images\` and"
-            echo "> \`list-images\` return empty while the data plane holds every tag."
-            echo "> The fact asserted is identical; the API reporting it is not."
+            echo "> Verified with \`aws ecr describe-images\`, served by"
+            echo "> \`scripts/ecr-describe-images-shim.py\` over the registry's real"
+            echo "> contents — floci's own ECR control plane does not track pushes to"
+            echo "> its registry sidecar, and its \`PutImage\` returns"
+            echo "> \`UnsupportedOperation\`. Nothing is hardcoded: the step's negative"
+            echo "> control asserts a never-pushed tag comes back **absent**, so a shim"
+            echo "> degraded into a rubber stamp fails the run."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary — what this run did and did not establish
@@ -308,15 +343,19 @@ jobs:
             echo "| \`get-role\` sub pinned to repo + dev + main | ✅ | floci IAM |"
             echo "| Trivy → 0 unfixed HIGH/CRITICAL | ✅ | the real image |"
             echo "| push writes both \`<sha>\` and \`main\` tags | ✅ | floci ECR |"
+            echo "| \`describe-images\` lists the SHA tag | ✅ | shim over real registry data |"
             echo "| OIDC assume prints the assumed-role ARN | ⚠️ | floci STS — see below |"
-            echo "| \`aws ecr describe-images\` lists the SHA tag | ⚠️ | substituted — see below |"
             echo ""
-            echo "**The two caveats, stated plainly.** floci does not evaluate trust-policy"
-            echo "conditions — it returns credentials for a forged token — so the ARN line"
-            echo "shows the plumbing works, not that the policy is right;"
-            echo "\`oidc-trust-simulate.py\` establishes the latter against IAM's real"
-            echo "decision procedure. And \`describe-images\` is unimplemented against"
-            echo "floci's own registry, so tag presence is verified via the registry API."
+            echo "**The caveat that matters, stated plainly.** floci does not evaluate"
+            echo "trust-policy conditions — it returns credentials for a *forged* token —"
+            echo "so the ARN line shows the plumbing works, not that the policy is right."
+            echo "\`oidc-trust-simulate.py\`, run above, establishes that against IAM's"
+            echo "real decision procedure with negative controls."
+            echo ""
+            echo "\`describe-images\` is answered by a local shim reading the registry's"
+            echo "real contents, because floci implements neither that call nor"
+            echo "\`PutImage\`. Its results are live, not canned — the step's negative"
+            echo "control fails the run if a never-pushed tag ever reports present."
             echo ""
             echo "Not exercised at all by an emulator: ECR's enforcement of SHA-tag"
             echo "immutability, and whether real AWS STS accepts this repo's token."
