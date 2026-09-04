@@ -14,7 +14,7 @@ jobs:
       run:
         working-directory: taxcalc-web
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # This commit carries THREE tags: v4.4.0, v5.0.0 and the moving v5. The
       # comment names v5.0.0 because that is what Dependabot resolves it to (see
       # PR #41, "from 5.0.0"), so the label and the tooling agree. Note the
@@ -23,7 +23,7 @@ jobs:
       # changed the executed bytes. Verified green on web-ci run 33846843137.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with: { version: 9 }
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           cache: 'pnpm'
