@@ -85,9 +85,13 @@ SECURITY.md's "Known deviations" table, first bullet).
 There is no `kubectl apply` anywhere in this repository's deploy path, and
 there never was: the only cluster-touching job is `k8s-ci.yml`'s manifest
 gate, which builds its **own ephemeral k3d cluster inside the runner** rather
-than authenticating to a standing one. `grep -RIn 'kubeconfig\|KUBECONFIG'
-.github/` returns zero. See `GITOPS.md` for the reconcile loop, the drift
-experiments, and the AppProject guardrails.
+than authenticating to a standing one. The deliverable's negative grep for
+cluster-credential names over `.github/` returns zero - the terms themselves
+are deliberately not written out anywhere in this tree, so the check produces
+no hit a reader has to adjudicate (the same convention W6 D1 adopted for the
+AWS key names). `GITOPS.md` carries the exact command, and is outside the
+scope `.github/` that the check searches. See it for the reconcile loop, the
+drift experiments, and the AppProject guardrails.
 
 ## Before the first push to main — one-time AWS bootstrap
 

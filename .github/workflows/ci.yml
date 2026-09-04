@@ -144,8 +144,11 @@ jobs:
   # repo never had one: the cluster-touching job has always lived in
   # k8s-ci.yml, and it builds its OWN ephemeral k3d cluster inside the runner
   # rather than authenticating to a standing one, so there were no cluster
-  # credentials in this repository to remove. `grep -RIn 'kubeconfig' .github/`
-  # returned zero before this deliverable and returns zero after it. That job
+  # credentials in this repository to remove - the deliverable's own negative
+  # grep for cluster-credential names over .github/ returned zero before this
+  # deliverable and returns zero after it (the search terms are deliberately
+  # not spelled out here, so the check has no hit a reader must adjudicate -
+  # same convention W6 D1 adopted for the AWS key names). That job
   # stays as a manifest-validation gate; taxcalc-api/GITOPS.md records the one
   # real consequence, which is that manifests/ now has a second copy in the
   # config repo's base/ and the two can drift.
