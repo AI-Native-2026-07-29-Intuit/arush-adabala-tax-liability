@@ -207,6 +207,24 @@ the 422 above is what actually refused it.
 
 ## What is NOT in this repo
 
+- **A publicly pullable image. The GHCR package is `private`, and that is
+  blocked rather than chosen.** Package visibility does NOT inherit from
+  repository visibility - the repo went public on 2026-09-04 and the package
+  did not follow. The decision was made to publish it (a public package needs
+  no pull credentials at all, whereas a private one needs a long-lived GitHub
+  PAT living in the cluster as an `imagePullSecret` - which sits badly beside
+  the no-long-lived-credentials premise the OIDC work just established), but
+  it could not be carried out: **the org administrators have disabled changing
+  package visibility.** The REST API cannot do it either - GET, DELETE and
+  restore are the only package operations GitHub exposes, so `PATCH ...
+  -f visibility=public` returns 404 and the web UI is the only route, which is
+  the route that is disabled.
+
+  **Consequence for W6 D2/D3:** the Argo CD / `kubectl` rollout will not be
+  able to pull `ghcr.io/ai-native-2026-07-29-intuit/taxcalc-api` without an
+  `imagePullSecret`. Budget for creating one, or get the org policy changed
+  first. Discovering this at deploy time is the failure mode this note exists
+  to prevent.
 - **`kubectl apply` against EKS** - W6 D3.
 - **`sam deploy` for the LLM cost-monitoring Lambda** - W6 D4.
 - **Argo CD GitOps** - W6 D2 (replaces `deploy-prod.yml`'s eventual
