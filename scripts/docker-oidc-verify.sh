@@ -18,11 +18,23 @@
 # well-formed, accepted by the real IAM API shape, and pinned to the right subject.
 #
 # WHAT IT DOES NOT PROVE, and no emulator can:
-#   1. That GitHub can assume the role. An emulator hands back credentials for any
-#      AssumeRoleWithWebIdentity call without evaluating Condition at all - it passes just
-#      as happily with a WRONG `sub`, which is the one bug worth catching. That question is
-#      answered instead by scripts/oidc-trust-simulate.py, which reproduces IAM's decision
-#      procedure against the real token claims measured by .github/workflows/oidc-probe.yml.
+#   1. That GitHub can assume the role. MEASURED 2026-09-03, not assumed: floci was handed a
+#      deliberately FORGED web-identity token - unsigned, `iss` of https://evil.example.com,
+#      and a `sub` of repo:someone-else/their-repo:ref:refs/heads/main - and it returned
+#      working credentials for taxcalc-api-build-push anyway:
+#
+#        "Arn": "arn:aws:sts::000000000000:assumed-role/taxcalc-api-build-push/..."
+#        "SubjectFromWebIdentityToken": "web-identity-subject"   <- placeholder; never parsed
+#        "Provider": "accounts.google.com"                       <- not even GitHub
+#
+#      That ARN is precisely the string Task 3's Done-When tells you to look for in the run
+#      log. So pointing CI at an emulator would print a convincing "Authenticated as
+#      arn:aws:sts::...:assumed-role/taxcalc-api-build-push/..." with the trust policy
+#      DELETED, or pinned to another repo entirely - manufacturing the evidence instead of
+#      producing it. Never wire the deploy path at an emulator to make this check go green.
+#      The real question is answered instead by scripts/oidc-trust-simulate.py, which
+#      reproduces IAM's decision procedure against the real token claims measured by
+#      .github/workflows/oidc-probe.yml.
 #   2. ECR tag immutability. Measured 2026-09-04: floci backs ECR with a plain `registry:2`
 #      container, so `docker push` bypasses the ECR control plane entirely. A re-push of
 #      DIFFERENT content to an already-existing SHA tag SUCCEEDED against floci, where real

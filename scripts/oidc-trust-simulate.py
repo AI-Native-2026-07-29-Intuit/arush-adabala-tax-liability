@@ -8,6 +8,16 @@ emulators return credentials for any AssumeRoleWithWebIdentity call without
 evaluating the trust policy's conditions at all - so they pass just as
 happily with a wrong `sub`, which is exactly the bug worth catching.
 
+That is measured, not assumed. On 2026-09-03 floci was handed a forged token
+(unsigned, iss=https://evil.example.com, sub=repo:someone-else/their-repo:
+ref:refs/heads/main) and still returned working credentials for the
+taxcalc-api-build-push role, reporting SubjectFromWebIdentityToken as the
+placeholder "web-identity-subject" and Provider as "accounts.google.com" -
+i.e. it never parsed the token at all. An emulator-backed CI run would
+therefore print the exact "assumed-role/taxcalc-api-build-push/..." ARN that
+Task 3's Done-When looks for even with the trust policy deleted. See
+scripts/docker-oidc-verify.sh's header for the full transcript.
+
 Instead this reproduces the decision procedure itself, which is small and
 fully documented: for a web-identity assume, AWS checks that the token's
 issuer matches the Principal.Federated provider, and that the `aud` and `sub`
