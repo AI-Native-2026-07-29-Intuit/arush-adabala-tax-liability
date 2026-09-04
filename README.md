@@ -1184,6 +1184,21 @@ time=19:15:00Z msg="Updated sync status: OutOfSync -> Synced" application=taxcal
 
 **The same patch against `taxcalc-prod` was still un-reverted after 240 seconds, and that is a consequence of `syncWindows` worth stating plainly: a change freeze freezes self-healing too.** The controller logs `Sync prevented by sync window`; prod sat `OutOfSync` with the drift in place. This is not a bug, but it is a trade-off nobody mentions when adding a weekend deny window: for its duration, prod is *unprotected against drift* as well as against deploys, and only a human `manualSync` closes the gap.
 
+### The notification path, verified against a real induced failure
+
+**No Slack incoming-webhook was available in this session**, so delivery to Slack is not claimed and there is no screenshot. Everything upstream of delivery was verified against a deliberate bad merge into the watched branch (`uptimecrew/taxcalc-api:0.0.0-does-not-exist` on the dev overlay), which drove `taxcalc-api-dev` to `Degraded` at `19:27:48Z`:
+
+```
+19:27:50Z info   Trigger on-sync-failed result:      [{... [app-sync-failed]     false}]  resource=argocd/taxcalc-api-dev
+19:27:50Z info   Trigger on-health-degraded result:  [{... [app-health-degraded] true }]  resource=argocd/taxcalc-api-dev
+19:27:50Z info   Sending notification about condition 'on-health-degraded...' to '{slack taxcalc-deploys}'
+19:27:50Z error  Failed to notify recipient {slack taxcalc-deploys}: Post "https://slack.com/api/chat.postMessage": ...
+```
+
+Four things are confirmed there without a working webhook: the trigger evaluated **true** on a real degradation, the `team=taxcalc` subscription selector matched and resolved the recipient, the controller attempted delivery, and **`on-sync-failed` correctly stayed `false`** — the sync itself succeeded and only health degraded, so the two triggers discriminate rather than both firing on any bad news. Rollback was `git revert` on the config repo and nothing touched the cluster: `Healthy` again at `19:30:29Z`, **13 seconds** after the revert reached `main`.
+
+**That error message also exposes a bug in the spec's own instructions.** It says to create the secret as `--from-literal=slack-token=$SLACK_WEBHOOK_URL`. `service.slack` is the Slack **API** integration — the controller sends `slack-token` as a bearer credential to `https://slack.com/api/chat.postMessage` and takes the channel from `recipients: [slack:taxcalc-deploys]`. A webhook URL put there is never requested as a URL at all; it is sent as a token and rejected. The URL in the error above is the whole finding — it is not the URL that was supplied. An incoming webhook needs `service.webhook.<name>` with a `url:` field and a matching `recipients:` entry, which is a different service type entirely.
+
 ### The weekend sync window fired for real, and prod needed the escape hatch
 
 This work ran on a **Friday after 17:00 UTC**, so the AppProject's `syncWindows` deny block (`schedule: "0 17 * * 5"`, `duration: 60h`) was live. `taxcalc-api-prod` came up `OutOfSync` / `Missing` with `SyncWindow: Manual Allowed` and `Assigned Windows: deny:0 17 * * 5:60h`, and reached `Synced` only through the window's documented `manualSync: true` escape hatch. A guardrail that has actually refused something is worth more than one that has only been read.

@@ -38,6 +38,25 @@ kubectl -n taxcalc-prod get cm taxcalc-api-config \
 
 This is intentional. **If a 3am incident fix needs to stick, commit it to the config repo — do not `kubectl edit` it.** An edit that survives is an edit Argo CD has not noticed yet, not an edit that won.
 
+## Notifications — verified as far as they can honestly be verified
+
+**No Slack incoming-webhook was available in this session**, so `argocd-notifications-secret` holds a syntactically valid but non-routable placeholder. Delivery to Slack is therefore **not** claimed. Everything upstream of delivery is verified against a real induced failure rather than asserted.
+
+A deliberate bad merge into the watched branch — `uptimecrew/taxcalc-api:0.0.0-does-not-exist` on the dev overlay — drove `taxcalc-api-dev` to `Degraded` at `19:27:48Z` (the Deployment's `progressDeadlineSeconds: 600` is what sets that delay, and `maxUnavailable: 0` is why the old pod kept serving throughout). Two seconds later:
+
+```
+19:27:50Z info   Trigger on-sync-failed result:      [{... [app-sync-failed]     false}]  resource=argocd/taxcalc-api-dev
+19:27:50Z info   Trigger on-health-degraded result:  [{... [app-health-degraded] true }]  resource=argocd/taxcalc-api-dev
+19:27:50Z info   Sending notification about condition 'on-health-degraded...' to '{slack taxcalc-deploys}'
+                 using the configuration in namespace argocd  resource=argocd/taxcalc-api-dev
+19:27:50Z error  Failed to notify recipient {slack taxcalc-deploys} defined in resource
+                 argocd/taxcalc-api-dev: Post "https://slack.com/api/chat.postMessage": ...
+```
+
+Four separate things are confirmed by those lines, and none of them needs a working webhook: the trigger **evaluated true** on a real degradation; the default subscription's `team=taxcalc` selector **matched** and resolved the recipient to `slack:taxcalc-deploys`; the controller **attempted delivery**; and `on-sync-failed` correctly stayed `false` — the sync itself *succeeded*, and it was health that degraded, so the two triggers discriminate rather than both firing on any bad news.
+
+**Rollback was `git revert`, and nothing touched the cluster.** Reverting the bad commit on the config repo restored `Healthy` at `19:30:29Z` — 13 seconds after the revert reached `main`.
+
 ## Project-scoped RBAC (who can sync what)
 
 - `proj:taxcalc:developers` — `get` + `sync` on `taxcalc-api-dev` and `taxcalc-api-staging`. **Cannot** sync prod. **Cannot** delete any Application.
@@ -81,6 +100,15 @@ The positive control is what stops the script from passing by refusing *everythi
 **5. The textbook `on-sync-failed` trigger throws on Applications that have never synced.** Written as `app.status.operationState.phase in ['Error','Failed']`, it logs `failed to execute when condition: cannot fetch phase from <nil>` and the trigger silently does not evaluate for that Application — observed on `taxcalc-api-staging` seconds after the first controller restart. The window in which it silently does not evaluate is exactly the window in which a brand-new environment is most likely to fail its first sync. Both triggers now carry a `!= nil` guard.
 
 **6. Applying the ApplicationSet over the existing standalone `taxcalc-api-dev` adopted it rather than racing it.** The controller set an `ownerReference` on the existing object instead of creating a second one, so the spec's "delete the standalone Application" step was already satisfied. The file stays in the repo as the one concrete, non-templated Application a new contributor can read.
+
+**7. `service.slack` wants a bot token, not an incoming-webhook URL — and the spec says webhook.** The deliverable instructs you to create the secret as `--from-literal=slack-token=$SLACK_WEBHOOK_URL`. `service.slack` is the Slack *API* integration: the controller sends `slack-token` as a bearer credential to `https://slack.com/api/chat.postMessage` and takes the channel from `recipients: [slack:taxcalc-deploys]`. A webhook URL placed there is never requested as a URL at all — it is sent as a token and rejected. The controller's own outbound request during the failure injection is the proof, and the URL in the error is the whole finding:
+
+```
+Failed to notify recipient {slack taxcalc-deploys} defined in resource
+argocd/taxcalc-api-dev: Post "https://slack.com/api/chat.postMessage": ...
+```
+
+An incoming webhook needs `service.webhook.<name>` with a `url:` field and `recipients: [<name>]` — a different service type and a different subscription entry.
 
 ## Sync waves — two axes, deliberately distinct
 
