@@ -252,6 +252,18 @@ jobs:
       # list-images both return empty while the data plane holds every tag. The
       # same FACT is therefore established through the registry's own tags API.
       # Both are shown below so the substitution is visible, not silent.
+      #
+      # The obvious repair was tried and does not work. Real ECR registers an
+      # image in its control plane via the PutImage API, which `docker push`
+      # reaches through Amazon's registry proxy; floci's plain registry:2
+      # sidecar never calls it. Pulling the v2 manifest back out of the registry
+      # and submitting it by hand -
+      #   aws ecr put-image --repository-name ... --image-tag ... --image-manifest ...
+      # - fails on floci with:
+      #   UnsupportedOperation: Operation PutImage is not supported.
+      # So there is no route to a populated describe-images here at all. On a
+      # real account this step needs no substitution: delete it and call
+      # describe-images directly.
       - name: 'DONE-WHEN: the SHA tag is present in the repository'
         run: |
           set -euo pipefail
