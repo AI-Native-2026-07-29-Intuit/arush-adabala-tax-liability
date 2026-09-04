@@ -152,6 +152,24 @@ tls: failed to verify certificate: x509: certificate signed by unknown authority
 
 Fixed by putting the proxy's CA chain into `argocd-tls-certs-cm` keyed by hostname (`github.com`) and restarting the repo-server — Argo CD's own mechanism for this, and preferable to `insecure: true` on the repository, which would disable verification rather than supply the missing trust anchor.
 
+## The cost of running CI's image on the wrong architecture, measured
+
+`overlays/dev` pins the image CI actually pushed — `ghcr.io/ai-native-2026-07-29-intuit/taxcalc-api:ec36057e…`, digest `sha256:b1b3c2e7…`, byte-identical to what the GitHub packages API reports for that tag. Two blockers stood in the way and both are worth stating, because the second one is invisible until a pod refuses to start:
+
+1. **The GHCR package is private**, and org policy blocks changing package visibility (recorded in `.github/PIPELINE.md` on W6 D1). A real cluster cannot pull it without an `imagePullSecret` holding a long-lived PAT — which sits badly beside the OIDC premise this pipeline just established. The k3d lab sidesteps it by **side-loading**: pull on the host, where Docker is already authenticated, then `k3d image import` into the node image stores so the kubelet never contacts a registry. `imagePullPolicy: IfNotPresent` in the base is what makes that work.
+2. **CI publishes `linux/amd64` only**, and k3d nodes on Apple Silicon are `arm64`. It runs anyway because the Rancher Desktop VM has binfmt registered, so containerd executes it under emulation — verified with a throwaway pod *before* committing the change rather than assumed (`java -version` from the image's own jlinked JRE returned Temurin 21.0.12 on an arm64 node).
+
+**Emulation is not free, and the number is larger than "a bit slower".** Same application, same manifests, idle:
+
+| environment | image | CPU (idle) | memory |
+|---|---|---|---|
+| `taxcalc-dev` | amd64 CI image, emulated | **70–88m** | 772–782Mi |
+| `taxcalc-staging` | arm64 local build, native | **5–6m** | 477–493Mi |
+
+Roughly **14× the idle CPU** and ~60% more memory, for identical work. That is enough to have real consequences rather than just being an interesting number: it pushed `taxcalc-dev` past the HPA's 70%-of-request target and the autoscaler scaled it from 1 to 2 (`New size: 2; reason: cpu resource utilization (percentage of request) above target`). So the deliverable's two Task 1 checks — "running the image tag from CI's push" and "`1/1 replicas`" — are in tension on this hardware, and the tension is the emulation, not the manifests.
+
+It also matters downstream: **W6 D5 gates a canary on the p99 latency SLI from W5 D5.** Measuring p99 against an emulated binary would produce a number that says nothing about production. The real fix is a multi-arch build (`platforms: linux/amd64,linux/arm64`) in `_build-and-push.yml`, which is not free here — the Dockerfile's `builder` stage runs Gradle and the `jlink-builder` stage builds a custom JRE, both slow under QEMU. Recorded as a documented trade-off rather than smuggled into this deliverable.
+
 ## What this layer does NOT do (yet)
 
 - **Sealed Secrets / External Secrets Operator** — W6 D3 wires ESO + IRSA against AWS Secrets Manager. Until then the taxcalc-api Secret is seeded out-of-band and lives outside the manifest set entirely.

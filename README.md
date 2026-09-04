@@ -1220,6 +1220,23 @@ Four things are confirmed there without a working webhook: the trigger evaluated
 
 **That error message also exposes a bug in the spec's own instructions.** It says to create the secret as `--from-literal=slack-token=$SLACK_WEBHOOK_URL`. `service.slack` is the Slack **API** integration — the controller sends `slack-token` as a bearer credential to `https://slack.com/api/chat.postMessage` and takes the channel from `recipients: [slack:taxcalc-deploys]`. A webhook URL put there is never requested as a URL at all; it is sent as a token and rejected. The URL in the error above is the whole finding — it is not the URL that was supplied. An incoming webhook needs `service.webhook.<name>` with a `url:` field and a matching `recipients:` entry, which is a different service type entirely.
 
+### Running the image CI actually pushed — two blockers, and what emulation costs
+
+`overlays/dev` pins `ghcr.io/ai-native-2026-07-29-intuit/taxcalc-api:ec36057e…`, digest `sha256:b1b3c2e7…`, byte-identical to what the GitHub packages API reports for that tag. Getting there meant going through two independent blockers:
+
+**The GHCR package is private** and org policy blocks changing package visibility (recorded on W6 D1). A real cluster cannot pull it without an `imagePullSecret` holding a long-lived PAT — which sits badly beside the OIDC premise the pipeline just established. The k3d lab sidesteps it by **side-loading**: pull on the host where Docker is already authenticated, `k3d image import` into the node stores, and the kubelet never contacts a registry.
+
+**CI publishes `linux/amd64` only, and the k3d nodes are `arm64`** — so the image would not run even if the package were public. It runs here only because the Rancher Desktop VM has binfmt registered; verified with a throwaway pod *before* committing, not assumed. **This affects every engineer in the cohort running k3d on Apple Silicon, and it is invisible until a pod refuses to start.**
+
+**Emulation is not free, and the number is bigger than "a bit slower."** Same application, same manifests, idle:
+
+| environment | image | CPU (idle) | memory |
+|---|---|---|---|
+| `taxcalc-dev` | amd64 CI image, emulated | **70–88m** | 772–782Mi |
+| `taxcalc-staging` | arm64 local build, native | **5–6m** | 477–493Mi |
+
+Roughly **14× the idle CPU** for identical work — enough to push dev past the HPA's 70%-of-request target and trigger a scale-up (`New size: 2; reason: cpu resource utilization (percentage of request) above target`). So Task 1's two checks — "running the image tag from CI's push" and "`1/1` replicas" — are in genuine tension on this hardware, and the cause is the emulation rather than the manifests. It also matters downstream: **W6 D5 gates a canary on W5 D5's p99 latency SLI**, and a p99 measured against an emulated binary says nothing about production. The fix is a multi-arch build in `_build-and-push.yml`, which is not free — the Dockerfile's `builder` stage runs Gradle and `jlink-builder` builds a custom JRE, both slow under QEMU. Recorded as a trade-off rather than smuggled into this deliverable.
+
 ### The weekend sync window fired for real, and prod needed the escape hatch
 
 This work ran on a **Friday after 17:00 UTC**, so the AppProject's `syncWindows` deny block (`schedule: "0 17 * * 5"`, `duration: 60h`) was live. `taxcalc-api-prod` came up `OutOfSync` / `Missing` with `SyncWindow: Manual Allowed` and `Assigned Windows: deny:0 17 * * 5:60h`, and reached `Synced` only through the window's documented `manualSync: true` escape hatch. A guardrail that has actually refused something is worth more than one that has only been read.
