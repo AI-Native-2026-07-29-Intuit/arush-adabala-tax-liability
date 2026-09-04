@@ -147,7 +147,6 @@ BUILD_ARN=$(aws iam get-role --role-name "${BUILD_ROLE}" --query 'Role.Arn' --ou
 PROD_ARN=$(aws iam get-role --role-name "${PROD_ROLE}" --query 'Role.Arn' --output text)
 
 echo ""
-echo "==> ensuring ECR repository ${ECR_REPO} exists (mutability=${ECR_TAG_MUTABILITY}, scan-on-push)"
 # WHY NOT PLAIN `IMMUTABLE`, which is what the deliverable spec's create-repository line says.
 #
 # The spec asks for two things that contradict each other, and AWS's own documentation is
@@ -170,6 +169,7 @@ echo "==> ensuring ECR repository ${ECR_REPO} exists (mutability=${ECR_TAG_MUTAB
 # Override to reproduce the spec literally, knowing it breaks the second main build:
 #   ECR_TAG_MUTABILITY=IMMUTABLE ./scripts/docker-oidc-bootstrap.sh
 ECR_TAG_MUTABILITY="${ECR_TAG_MUTABILITY:-IMMUTABLE_WITH_EXCLUSION}"
+echo "==> ensuring ECR repository ${ECR_REPO} exists (mutability=${ECR_TAG_MUTABILITY}, scan-on-push)"
 MUTABILITY_ARGS=(--image-tag-mutability "${ECR_TAG_MUTABILITY}")
 if [[ "${ECR_TAG_MUTABILITY}" == "IMMUTABLE_WITH_EXCLUSION" ]]; then
   MUTABILITY_ARGS+=(--image-tag-mutability-exclusion-filters 'filterType=WILDCARD,filter=main')
@@ -177,12 +177,24 @@ else
   echo "    WARNING: ${ECR_TAG_MUTABILITY} makes the SECOND push to main fail with" \
        "ImageTagAlreadyExistsException on the floating 'main' tag."
 fi
-aws ecr create-repository \
-  --repository-name "${ECR_REPO}" \
-  --region "${REGION}" \
-  "${MUTABILITY_ARGS[@]}" \
-  --image-scanning-configuration scanOnPush=true \
-  >/dev/null 2>&1 || echo "    (already present)"
+# Tolerate ONLY "it already exists". A blanket `|| echo "(already present)"` here hid a real
+# failure once (an emulator whose ECR service had not finished starting): the repo was never
+# created, the script still exited 0, and the confusing symptom surfaced several steps later
+# in the verifier. Anything that is not RepositoryAlreadyExistsException is now fatal, and
+# prints the API's own message.
+if ! ECR_ERR=$(aws ecr create-repository \
+      --repository-name "${ECR_REPO}" \
+      --region "${REGION}" \
+      "${MUTABILITY_ARGS[@]}" \
+      --image-scanning-configuration scanOnPush=true 2>&1 >/dev/null); then
+  if grep -q 'RepositoryAlreadyExistsException' <<<"${ECR_ERR}"; then
+    echo "    (already present)"
+  else
+    echo "ERROR: could not create ECR repository ${ECR_REPO}:" >&2
+    echo "${ECR_ERR}" >&2
+    exit 1
+  fi
+fi
 
 echo ""
 echo "=============================================================================="

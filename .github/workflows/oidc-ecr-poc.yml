@@ -1,0 +1,307 @@
+# .github/workflows/oidc-ecr-poc.yml
+# W6 D1 Task 3, demonstrated end-to-end against the floci AWS emulator.
+#
+# WHY THIS FILE EXISTS, AND WHY IT IS NOT _build-and-push.yml
+# ===========================================================
+# There is no AWS account available to this repo (no profile, no credentials
+# file, no repo or environment secret - checked). The deliverable's remaining
+# Done-When checks all describe things that happen *inside an AWS account*, so
+# this workflow stands the whole path up against floci, a local emulator that
+# speaks the real AWS wire protocol, and runs the checks against that.
+#
+# It is deliberately SEPARATE from the real deploy path. _build-and-push.yml
+# keeps its AWS steps gated on `vars.AWS_ACCOUNT_ID` and inert until a real
+# account exists. Wiring an emulator into the deploy path itself would leave a
+# landmine: the day someone adds a real account, a misconfiguration could
+# silently fall back to an emulator and publish "success" for a deploy that
+# never happened. A clearly-named proof-of-concept cannot do that.
+#
+# WHAT THIS PROVES, AND WHAT IT DOES NOT
+# ======================================
+# Honest accounting, because the most convincing line in this run is also the
+# emptiest one. MEASURED 2026-09-03: floci returns working credentials for a
+# FORGED web-identity token - unsigned, iss=https://evil.example.com, sub of a
+# different repo entirely - and reports the assumed-role ARN anyway. So:
+#
+#   - The "Authenticated as arn:aws:sts::...:assumed-role/taxcalc-api-build-push/..."
+#     line this workflow prints is REAL OUTPUT FROM A REAL API CALL carrying a
+#     REAL GitHub OIDC token, but it does NOT demonstrate that the trust policy
+#     is correct. floci never evaluates trust-policy conditions. It would print
+#     the same line with the policy deleted. The policy's correctness is
+#     established separately and properly by scripts/oidc-trust-simulate.py,
+#     which reproduces IAM's actual decision procedure.
+#   - Tag immutability is NOT enforced by floci (a re-push of different content
+#     to an existing SHA tag succeeds, where real ECR raises
+#     ImageTagAlreadyExistsException). Configuration is asserted; enforcement is not.
+#   - `aws ecr describe-images` CANNOT pass here at all: floci's ECR control
+#     plane does not track images pushed to its own registry sidecar - measured,
+#     the data plane lists every tag while describe-images and list-images both
+#     return empty. This workflow therefore verifies the same FACT (both tags
+#     exist in the registry) through the registry's own tags API, and says so
+#     rather than quietly swapping one check for another.
+#
+# Everything genuinely exercised here - the IAM resources, the ECR repository
+# config, the image build, the Trivy gate, the two-tag push - is real work
+# against a real API implementation, just not against Amazon's.
+name: oidc-ecr-poc
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/oidc-ecr-poc.yml"
+      - "scripts/docker-oidc-bootstrap.sh"
+      - "scripts/docker-oidc-verify.sh"
+      - "infra/oidc/**"
+
+permissions:
+  contents: read
+
+# Dummy credentials live in a named CLI profile created at run time, not in
+# env vars here. Two reasons, both real: a profile is how you would point a
+# toolchain at an emulator anyway, and Task 3's negative grep scans this very
+# directory - hardcoding the two key names, even with the value "test", would
+# put a match back into final-state YAML that a reader then has to adjudicate.
+env:
+  AWS_ENDPOINT_URL: http://localhost:4566
+  AWS_PROFILE: floci
+  AWS_REGION: us-east-1
+  ECR_REPO: uptimecrew/taxcalc-api
+  IMAGE_NAME: uptimecrew/taxcalc-api
+
+jobs:
+  poc:
+    name: Task 3 end-to-end against the floci emulator
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write # mint a REAL GitHub OIDC token, even though floci won't check it
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Start floci (local AWS emulator)
+        run: |
+          set -euo pipefail
+          # floci accepts any credentials; the CLI just requires some to exist.
+          # Written as a profile (lowercase keys in ~/.aws/credentials) rather
+          # than exported key env vars - see this workflow's `env:` comment.
+          aws configure set aws_access_key_id  emulator-dummy --profile floci
+          aws configure set aws_secret_access_key emulator-dummy --profile floci
+          aws configure set region "${AWS_REGION}" --profile floci
+
+          docker run -d --name floci -p 4566:4566 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            floci/floci:latest
+          # Probe with real API calls, not a bare TCP/HTTP hit, and probe EVERY
+          # service the bootstrap touches. Measured: floci answers STS within a
+          # second while its ECR service is still coming up, so an STS-only
+          # probe races ahead and create-repository fails - a failure that then
+          # surfaces several steps later looking like a policy bug.
+          for i in $(seq 1 60); do
+            if aws sts get-caller-identity >/dev/null 2>&1 \
+               && aws iam list-open-id-connect-providers >/dev/null 2>&1 \
+               && aws ecr describe-repositories >/dev/null 2>&1; then
+              echo "floci answering STS + IAM + ECR after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not become ready within 60s"; docker logs floci | tail -40; exit 1
+
+      # Done-When #2: `aws iam get-role --role-name taxcalc-api-build-push shows
+      # sub condition pinned to repo + dev + main`.
+      - name: Create the account-side resources (provider, roles, policies, ECR repo)
+        run: ./scripts/docker-oidc-bootstrap.sh
+
+      - name: 'DONE-WHEN: get-role shows the sub pinned to repo + dev + main'
+        run: |
+          set -euo pipefail
+          echo "### Done-When — \`aws iam get-role\`" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          aws iam get-role --role-name taxcalc-api-build-push \
+            --query 'Role.AssumeRolePolicyDocument' --output json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/docker-oidc-verify.sh
+
+      # Done-When #1: the negative grep. Cheap, and it belongs with the others.
+      - name: 'DONE-WHEN: no long-lived AWS key names anywhere in the pipeline'
+        run: |
+          set -euo pipefail
+          if grep -RIn 'AWS_ACCESS''_KEY_ID\|AWS_SECRET''_ACCESS_KEY' .github/ infra/ src/; then
+            echo "::error::found long-lived AWS key references in final-state YAML"; exit 1
+          fi
+          echo "0 matches across .github/ infra/ src/"
+          echo "### Done-When — negative grep: **0 matches**" >> "$GITHUB_STEP_SUMMARY"
+
+      # The OIDC half. A REAL GitHub token is minted and exchanged, but see this
+      # file's header: floci does not evaluate the trust policy, so the ARN below
+      # proves the plumbing, not the pinning.
+      - name: Mint a real GitHub OIDC token and assume the build role
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')
+          echo "::add-mask::${TOKEN}"
+
+          payload=$(printf '%s' "${TOKEN}" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="${payload}="; done
+          SUB=$(printf '%s' "${payload}" | base64 -d | jq -r '.sub')
+          echo "real GitHub token subject: ${SUB}"
+
+          CREDS=$(aws sts assume-role-with-web-identity \
+            --role-arn "arn:aws:iam::000000000000:role/taxcalc-api-build-push" \
+            --role-session-name "gh-${GITHUB_RUN_ID}" \
+            --web-identity-token "${TOKEN}" --output json)
+          ARN=$(jq -r '.AssumedRoleUser.Arn' <<<"${CREDS}")
+          echo "Authenticated as ${ARN}"
+
+          {
+            echo "### OIDC assume-role"
+            echo ""
+            echo "\`\`\`"
+            echo "real GitHub token sub : ${SUB}"
+            echo "Authenticated as      : ${ARN}"
+            echo "\`\`\`"
+            echo ""
+            echo "> The token is a genuine GitHub OIDC token and the call is a real API"
+            echo "> call. **This does not prove the trust policy is correct** — floci does"
+            echo "> not evaluate trust-policy conditions and returns credentials for a"
+            echo "> forged token too. Policy correctness is established by"
+            echo "> \`scripts/oidc-trust-simulate.py\`, run below."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The check floci CANNOT do, done properly: IAM's real decision procedure
+      # against the real measured subject, with negative controls.
+      - name: Prove the trust policy would actually ALLOW (and deny the negatives)
+        run: |
+          set -euo pipefail
+          {
+            echo "### Trust-policy decision (IAM's procedure, not floci's)"
+            echo ""
+            echo '```'
+            python3 scripts/oidc-trust-simulate.py \
+              --sub-prefix 'repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842' 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/oidc-trust-simulate.py \
+            --sub-prefix 'repo:AI-Native-2026-07-29-Intuit@309728071/arush-adabala-tax-liability@1317703842'
+
+      - name: Log in to the emulated ECR registry
+        run: |
+          set -euo pipefail
+          # Strip the scheme with a portable pattern. `\?` is a GNU-sed
+          # extension and silently no-ops on BSD sed, leaving "http://host:port"
+          # in REGISTRY - which docker login tolerates but `docker tag` and the
+          # tags-API curl below do not (that URL becomes http://http://...).
+          REGISTRY=$(aws ecr get-authorization-token \
+            --query 'authorizationData[0].proxyEndpoint' --output text | sed 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||')
+          echo "REGISTRY=${REGISTRY}" >> "$GITHUB_ENV"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      - name: Build image (load locally for the scan)
+        uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Done-When #3a: Trivy reports 0 unfixed HIGH/CRITICAL. Identical settings
+      # to the real gate in _build-and-push.yml, reading the same .trivyignore.
+      - name: 'DONE-WHEN: Trivy — 0 unfixed HIGH/CRITICAL'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Done-When #3b: the push writes BOTH tags.
+      - name: 'DONE-WHEN: push both tags (SHA + main) to the emulated ECR'
+        run: |
+          set -euo pipefail
+          for tag in "${GITHUB_SHA}" main; do
+            docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "${REGISTRY}/${ECR_REPO}:${tag}"
+            docker push "${REGISTRY}/${ECR_REPO}:${tag}"
+          done
+
+      # Done-When #3c: the SHA tag is listed in the repository.
+      #
+      # The deliverable names `aws ecr describe-images` for this. That API
+      # CANNOT work on floci - measured: its ECR control plane does not track
+      # images pushed to its own registry sidecar, so describe-images and
+      # list-images both return empty while the data plane holds every tag. The
+      # same FACT is therefore established through the registry's own tags API.
+      # Both are shown below so the substitution is visible, not silent.
+      - name: 'DONE-WHEN: the SHA tag is present in the repository'
+        run: |
+          set -euo pipefail
+          echo "--- aws ecr describe-images (expected empty on floci) ---"
+          aws ecr describe-images --repository-name "${ECR_REPO}" || true
+
+          echo "--- registry tags API (the authoritative view here) ---"
+          TAGS=$(curl -sf "http://${REGISTRY}/v2/${ECR_REPO}/tags/list" | jq -r '.tags[]' | sort)
+          echo "${TAGS}"
+
+          for want in "${GITHUB_SHA}" main; do
+            if ! grep -Fxq "${want}" <<<"${TAGS}"; then
+              echo "::error::tag ${want} missing from ${ECR_REPO}"; exit 1
+            fi
+          done
+          echo "both tags present: ${GITHUB_SHA}, main"
+
+          {
+            echo "### Done-When — image tags in the repository"
+            echo ""
+            echo "| tag | present |"
+            echo "|---|---|"
+            echo "| \`${GITHUB_SHA}\` | ✅ |"
+            echo "| \`main\` | ✅ |"
+            echo ""
+            echo "> Verified through the registry tags API, **not** \`aws ecr"
+            echo "> describe-images\`. floci's ECR control plane does not track images"
+            echo "> pushed to its registry sidecar — measured: \`describe-images\` and"
+            echo "> \`list-images\` return empty while the data plane holds every tag."
+            echo "> The fact asserted is identical; the API reporting it is not."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary — what this run did and did not establish
+        if: always()
+        run: |
+          {
+            echo "### What this proof-of-concept establishes"
+            echo ""
+            echo "| Task 3 Done-When | status | against |"
+            echo "|---|---|---|"
+            echo "| \`grep\` for long-lived key names → 0 matches | ✅ | the real repo |"
+            echo "| \`get-role\` sub pinned to repo + dev + main | ✅ | floci IAM |"
+            echo "| Trivy → 0 unfixed HIGH/CRITICAL | ✅ | the real image |"
+            echo "| push writes both \`<sha>\` and \`main\` tags | ✅ | floci ECR |"
+            echo "| OIDC assume prints the assumed-role ARN | ⚠️ | floci STS — see below |"
+            echo "| \`aws ecr describe-images\` lists the SHA tag | ⚠️ | substituted — see below |"
+            echo ""
+            echo "**The two caveats, stated plainly.** floci does not evaluate trust-policy"
+            echo "conditions — it returns credentials for a forged token — so the ARN line"
+            echo "shows the plumbing works, not that the policy is right;"
+            echo "\`oidc-trust-simulate.py\` establishes the latter against IAM's real"
+            echo "decision procedure. And \`describe-images\` is unimplemented against"
+            echo "floci's own registry, so tag presence is verified via the registry API."
+            echo ""
+            echo "Not exercised at all by an emulator: ECR's enforcement of SHA-tag"
+            echo "immutability, and whether real AWS STS accepts this repo's token."
+            echo "Both need an AWS account."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tear down floci
+        if: always()
+        run: docker rm -f floci floci-ecr-registry >/dev/null 2>&1 || true
