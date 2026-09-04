@@ -47,15 +47,23 @@ permissions:
 jobs:
   build-test:
     name: Build + test (taxcalc-api)
-    # NOTE: the reference spec for this deliverable pins ubuntu-24.04.
-    # GitHub-hosted runners do not work in this org: the whole GitHub
-    # Actions org hit a billing/spending-limit block during W5 D2 (see
-    # README's "Week 5 Day 2" section), and every workflow here -
-    # docker.yml, compose-ci.yml, k8s-ci.yml, observability.yml,
-    # serverless.yml, web-ci.yml - migrated to Blacksmith runners as the
-    # fix, not as a preference. Matching that here rather than reproducing
-    # a runner class that fails to even queue.
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    # The spec's literal runner. This job could NOT use it until 2026-09-04:
+    # the org hit an Actions spending-limit block in W5 D2 and GitHub-hosted
+    # runners would not start at all ("The job was not started because recent
+    # account payments have failed"), which is why every workflow here moved
+    # to Blacksmith - a fix, not a preference. Public repositories get free
+    # standard GitHub-hosted runners, so making this repo public lifted that
+    # block. Measured before changing it, not assumed: a throwaway
+    # ubuntu-24.04 job booted on a Hosted Compute Agent and passed (run
+    # 33851940650), so the constraint is genuinely gone rather than merely
+    # believed to be.
+    #
+    # The other workflows deliberately STAY on Blacksmith, which is now a
+    # choice rather than a constraint: observability.yml's cluster job runs
+    # 5m23s there against 13m52s on a GitHub-hosted runner. This job is the
+    # one the deliverable pins by name, and it is the required status check
+    # on main, so it matches the spec exactly.
+    runs-on: ubuntu-24.04
     # 15 per the deliverable spec. Measured headroom, not a guess: the first
     # cold-cache run of this suite - which boots real Testcontainers-backed
     # Postgres/Mongo/Redis/Kafka across ~35 @SpringBootTest/@DataJpaTest/
