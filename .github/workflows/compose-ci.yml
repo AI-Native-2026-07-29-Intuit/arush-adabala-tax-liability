@@ -54,6 +54,25 @@ jobs:
         run: |
           mkdir -p envs secrets
           cp envs/taxcalc.env.example envs/taxcalc.env
+          # Dependabot PRs and fork PRs receive NO repository secrets - they
+          # read from a separate Dependabot store, or none at all. So
+          # CI_PG_PASSWORD arrives EMPTY there, the file below is written
+          # empty, and Postgres refuses to initialise with "Database is
+          # uninitialized and superuser password is not specified", failing
+          # the job for a reason that has nothing to do with the change under
+          # test. Measured on Dependabot #38, which failed exactly this way
+          # three times in a row while every other check on it passed.
+          #
+          # As the comment above already notes, this value can be anything:
+          # it guards a throwaway container on a job-scoped network that is
+          # destroyed with the runner. So generate one when it is absent
+          # rather than requiring a secret - which also fixes fork PRs, and
+          # removes a CI dependency on a secret that never needed to exist.
+          if [ -z "${CI_PG_PASSWORD}" ]; then
+            CI_PG_PASSWORD="$(openssl rand -hex 24)"
+            echo "::notice::No CI_PG_PASSWORD available (expected on Dependabot" \
+                 "and fork PRs); generated an ephemeral one for this run."
+          fi
           printf '%s' "$CI_PG_PASSWORD" > secrets/pg_password.txt
         env:
           CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
