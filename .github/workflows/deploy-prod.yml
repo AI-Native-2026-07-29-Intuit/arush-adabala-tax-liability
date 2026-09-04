@@ -1,10 +1,13 @@
 # .github/workflows/deploy-prod.yml
 # Promotes a SHA-tagged image already in ECR to the prod environment.
 # Triggered manually via workflow_dispatch with the image SHA as input.
-# The dev environment auto-deploys on merge to main (via _build-and-push.yml);
-# prod stays human-gated by required reviewers on the 'prod' GitHub
-# Environment (configured via the GitHub UI/API, not version-controlled -
-# see .github/PIPELINE.md's "What is NOT in this repo" section).
+# The dev environment auto-deploys on merge to main (via _build-and-push.yml).
+# prod is INTENDED to be human-gated by required reviewers on the 'prod' GitHub
+# Environment, but that rule does not exist today and cannot be created on this
+# repo's billing plan (422 - see the comment on `environment: prod` below and
+# .github/PIPELINE.md's "What is NOT in this repo"). What IS enforced right now:
+# the environment's deployment-branch policy (main only) and the concurrency
+# queue. Treat a dispatch as unreviewed until the plan changes.
 name: deploy-prod
 
 on:
