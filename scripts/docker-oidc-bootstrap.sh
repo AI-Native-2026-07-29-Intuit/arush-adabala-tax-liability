@@ -139,11 +139,22 @@ BUILD_ARN=$(aws iam get-role --role-name "${BUILD_ROLE}" --query 'Role.Arn' --ou
 PROD_ARN=$(aws iam get-role --role-name "${PROD_ROLE}" --query 'Role.Arn' --output text)
 
 echo ""
-echo "==> ensuring ECR repository ${ECR_REPO} exists (immutable tags, scan-on-push)"
+echo "==> ensuring ECR repository ${ECR_REPO} exists (immutable except :main, scan-on-push)"
+# IMMUTABLE_WITH_EXCLUSION, not plain IMMUTABLE. A plain IMMUTABLE repo rejects any push to a
+# tag that already exists, and _build-and-push.yml writes TWO tags on every main build: the
+# git SHA (unique per commit, so immutability is exactly right for it) and a floating `main`
+# pointer (the same tag every time, so a plain IMMUTABLE repo fails the SECOND main build with
+# ImageTagAlreadyExistsException - green once, then permanently broken).
+#
+# The deliverable spec asks for both `--image-tag-mutability IMMUTABLE` and pushing both tags;
+# those two requirements contradict each other and the failure is delayed by one build, which
+# is the worst way to find it. The exclusion filter resolves it honestly rather than dropping
+# either half: every SHA tag stays immutable, and `main` alone is allowed to move.
 aws ecr create-repository \
   --repository-name "${ECR_REPO}" \
   --region "${REGION}" \
-  --image-tag-mutability IMMUTABLE \
+  --image-tag-mutability IMMUTABLE_WITH_EXCLUSION \
+  --image-tag-mutability-exclusion-filters 'filterType=WILDCARD,filter=main' \
   --image-scanning-configuration scanOnPush=true \
   >/dev/null 2>&1 || echo "    (already present)"
 
