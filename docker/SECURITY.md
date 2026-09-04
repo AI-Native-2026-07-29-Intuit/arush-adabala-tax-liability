@@ -393,3 +393,34 @@ The remaining 23 are waived as of **2026-08-27**, re-evaluate by
 This waiver is scoped to image tag `0.1.0` / digest as built on 2026-08-27. A
 rebuild that changes any of the versions above must re-run the scan and
 update this table, not assume the waiver still applies.
+
+### This table is now public — considered, and deliberately kept
+
+The repository was made public on 2026-09-04 (W6 D1, to lift a billing gate on
+branch protection and environment protection rules). That turned this table and
+`.trivyignore` into a **published list of known-unpatched HIGH/CRITICAL CVEs in
+a named image**, which was not a decision anyone made at the time — it fell out
+of the visibility change. It was then reviewed rather than left to sit:
+
+**Kept, unchanged.** Removing or obscuring it would be security-through-obscurity
+and would break the gate itself, since `.trivyignore` *is* the waiver mechanism
+the CI job reads. It also would not withhold anything: the image is built from
+source that is now public, so anyone can build or pull it and run `trivy image`
+themselves in about a minute. This file does not accelerate discovery — it only
+adds the part a scanner cannot tell you, which is *why* each finding is unfixed
+and when it will be revisited. Publishing that is closer to responsible practice
+than hiding it.
+
+Two properties bound the exposure, and both are mechanical rather than
+promises. Every `.trivyignore` line carries `exp:2026-09-27`, so Trivy stops
+honoring them on that date and the gate reverts to enforcing 0 HIGH/CRITICAL
+whether or not anyone remembers. And the waiver has already been shown to be
+non-permanent in practice: the three CRITICAL `tomcat-embed-core` findings of
+2026-09-04 were **fixed by upgrading, not added here** (see the section above) -
+a same-line patch existed, so waiving them would not have been defensible.
+
+What the public status *does* change is the standard for the next review. When
+this table is re-evaluated on 2026-09-27, "deferred to the next pass" is a
+weaker justification for a public image than it was for a private one - the six
+Boot-BOM-managed patch-release items in particular each need their own `ext[]`
+override and nothing else, so they should be closed rather than renewed.

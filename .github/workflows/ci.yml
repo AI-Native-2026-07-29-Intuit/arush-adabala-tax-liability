@@ -7,17 +7,28 @@
 name: taxcalc-api ci
 
 on:
+  # DELIBERATELY UNFILTERED on pull_request, unlike the push trigger below.
+  #
+  # `Build + test (taxcalc-api)` is a REQUIRED status check on main. A required
+  # check that is path-filtered is a trap: GitHub waits forever for a context
+  # that will never report, so any PR touching none of the paths below can
+  # never merge - not "runs without the check", but permanently blocked with no
+  # way to override short of an admin bypass or editing the rule.
+  #
+  # That is not hypothetical here. It stranded four Dependabot PRs (#39-#42)
+  # the moment branch protection was created: each touches only .github/
+  # workflow files, so ci.yml never triggered, the required context never
+  # reported, and all four were unmergeable. Every future docs-only or
+  # workflow-only PR would have hit the same wall.
+  #
+  # The cost is real and accepted: every PR now runs the full Testcontainers
+  # suite, including documentation-only ones. The alternative - a twin workflow
+  # publishing the same check name on `paths-ignore` - fires BOTH workflows for
+  # a PR touching matched and unmatched files at once, producing two check runs
+  # with one name. It works, but it is the kind of clever that breaks quietly.
+  # A required check should be unconditional; that is what makes it a gate.
   pull_request:
     branches: [main]
-    paths:
-      - "src/**"
-      - "build.gradle"
-      - "settings.gradle"
-      - "gradlew"
-      - "gradlew.bat"
-      - "gradle/**"
-      - "Dockerfile"
-      - ".github/workflows/ci.yml"
   push:
     branches: [main]
     paths:
@@ -47,15 +58,23 @@ permissions:
 jobs:
   build-test:
     name: Build + test (taxcalc-api)
-    # NOTE: the reference spec for this deliverable pins ubuntu-24.04.
-    # GitHub-hosted runners do not work in this org: the whole GitHub
-    # Actions org hit a billing/spending-limit block during W5 D2 (see
-    # README's "Week 5 Day 2" section), and every workflow here -
-    # docker.yml, compose-ci.yml, k8s-ci.yml, observability.yml,
-    # serverless.yml, web-ci.yml - migrated to Blacksmith runners as the
-    # fix, not as a preference. Matching that here rather than reproducing
-    # a runner class that fails to even queue.
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    # The spec's literal runner. This job could NOT use it until 2026-09-04:
+    # the org hit an Actions spending-limit block in W5 D2 and GitHub-hosted
+    # runners would not start at all ("The job was not started because recent
+    # account payments have failed"), which is why every workflow here moved
+    # to Blacksmith - a fix, not a preference. Public repositories get free
+    # standard GitHub-hosted runners, so making this repo public lifted that
+    # block. Measured before changing it, not assumed: a throwaway
+    # ubuntu-24.04 job booted on a Hosted Compute Agent and passed (run
+    # 33851940650), so the constraint is genuinely gone rather than merely
+    # believed to be.
+    #
+    # The other workflows deliberately STAY on Blacksmith, which is now a
+    # choice rather than a constraint: observability.yml's cluster job runs
+    # 5m23s there against 13m52s on a GitHub-hosted runner. This job is the
+    # one the deliverable pins by name, and it is the required status check
+    # on main, so it matches the spec exactly.
+    runs-on: ubuntu-24.04
     # 15 per the deliverable spec. Measured headroom, not a guess: the first
     # cold-cache run of this suite - which boots real Testcontainers-backed
     # Postgres/Mongo/Redis/Kafka across ~35 @SpringBootTest/@DataJpaTest/
