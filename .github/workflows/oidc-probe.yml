@@ -1,0 +1,166 @@
+# .github/workflows/oidc-probe.yml
+# Diagnostic, not part of the deploy path. Answers the two OIDC questions this
+# repo cannot otherwise settle without an AWS account:
+#
+#   1. What is this org's ACTUAL OIDC `sub` claim, and do the committed trust
+#      policies in infra/oidc/ match it? (scripts/oidc-bootstrap.sh's header
+#      records a non-standard, numeric-id-bearing subject observed for this
+#      org during W5 D4 - if that is still true, the trust policies as
+#      committed would fail with an opaque "Not authorized to perform
+#      sts:AssumeRoleWithWebIdentity" and nothing pointing at the cause.)
+#
+#   2. Does REAL AWS STS accept a real GitHub token from this repo?
+#      sts:AssumeRoleWithWebIdentity requires no AWS credentials to call - it
+#      is how a caller bootstraps credentials from nothing - so this can be
+#      asked of the real endpoint from a repo with no AWS account at all.
+#      It cannot succeed (no role exists to assume), but the ERROR CLASS is
+#      the signal, and a tampered-token control run separates "AWS verified
+#      the signature" from "AWS never got that far".
+#
+# Sending the token to sts.amazonaws.com is its intended use: it is minted
+# with exactly that audience, lives ~10 minutes, and can only assume a role
+# whose trust policy names this repo. None exists. The token is masked and
+# never printed - only its decoded claims, which are identity metadata.
+name: oidc-probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/oidc-probe.yml"
+      - "infra/oidc/**"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Inspect OIDC claims + probe real AWS STS
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write # the whole point: mint a real OIDC token
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Mint a real OIDC token and decode its claims
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')
+          echo "::add-mask::${TOKEN}"
+          printf '%s' "${TOKEN}" > "${RUNNER_TEMP}/oidc-token"
+
+          # base64url -> base64: swap the alphabet, restore padding.
+          payload=$(printf '%s' "${TOKEN}" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="${payload}="; done
+          printf '%s' "${payload}" | base64 -d > "${RUNNER_TEMP}/claims.json"
+
+          echo "### OIDC claims" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          jq '{iss, aud, sub, repository, repository_owner, ref, environment, event_name}' \
+            "${RUNNER_TEMP}/claims.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Q1: does the sub this org actually issues match what infra/oidc/ pins?
+      - name: Compare the real subject against the committed trust policies
+        run: |
+          set -euo pipefail
+          SUB=$(jq -r '.sub' "${RUNNER_TEMP}/claims.json")
+
+          # A sub is `repo:<owner>/<repo>:<context>`; only the prefix is in
+          # question. Strip this event's context suffix to recover it.
+          PREFIX="${SUB%:pull_request}"
+          PREFIX="${PREFIX%:ref:refs/heads/*}"
+          PREFIX="${PREFIX%:environment:*}"
+
+          COMMITTED=$(jq -r '
+            .Statement[0].Condition
+            | (.StringLike."token.actions.githubusercontent.com:sub" //
+               .StringEquals."token.actions.githubusercontent.com:sub")
+            | if type == "array" then .[0] else . end' \
+            infra/oidc/trust-policy-build.json)
+          COMMITTED_PREFIX="${COMMITTED%:environment:dev}"
+
+          {
+            echo "### Subject-claim check"
+            echo ""
+            echo "| | value |"
+            echo "|---|---|"
+            echo "| observed \`sub\` | \`${SUB}\` |"
+            echo "| observed prefix | \`${PREFIX}\` |"
+            echo "| committed prefix | \`${COMMITTED_PREFIX}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${PREFIX}" = "${COMMITTED_PREFIX}" ]; then
+            echo "MATCH: infra/oidc/*.json pin the right subject prefix."
+            echo "✅ **MATCH** - the committed trust policies pin the correct prefix." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "MISMATCH: the committed trust policies would never match this org's tokens."
+            {
+              echo "❌ **MISMATCH** - the committed trust policies would be rejected."
+              echo ""
+              echo "Re-run the bootstrap with the real subjects:"
+              echo '```bash'
+              echo "SUBJECT_DEV='${PREFIX}:environment:dev' \\"
+              echo "SUBJECT_MAIN='${PREFIX}:ref:refs/heads/main' \\"
+              echo "SUBJECT_PROD='${PREFIX}:environment:prod' \\"
+              echo "  ./scripts/docker-oidc-bootstrap.sh"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Q2: does REAL AWS STS accept this token? The call needs no AWS
+      # credentials. It must fail (no such role); the error CODE is the answer,
+      # and the tampered control is what makes the result interpretable.
+      - name: Probe real AWS STS (genuine token vs tampered control)
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat "${RUNNER_TEMP}/oidc-token")
+          echo "::add-mask::${TOKEN}"
+          # Same header+payload, destroyed signature: if AWS distinguishes the
+          # two, it demonstrably verified the signature against GitHub's JWKS.
+          TAMPERED="$(printf '%s' "${TOKEN}" | cut -d. -f1,2).SIGNATUREdeliberatelyBROKEN"
+          echo "::add-mask::${TAMPERED}"
+
+          probe() {
+            curl -sS -X POST "https://sts.amazonaws.com/" \
+              -d "Action=AssumeRoleWithWebIdentity" \
+              -d "Version=2011-06-15" \
+              -d "RoleArn=arn:aws:iam::000000000000:role/taxcalc-api-build-push" \
+              -d "RoleSessionName=oidc-probe" \
+              --data-urlencode "WebIdentityToken=$1" \
+            | grep -o '<Code>[^<]*</Code>' | head -1 | sed 's/<[^>]*>//g'
+          }
+
+          GENUINE=$(probe "${TOKEN}" || true)
+          BROKEN=$(probe "${TAMPERED}" || true)
+
+          echo "genuine token  -> ${GENUINE:-<none>}"
+          echo "tampered token -> ${BROKEN:-<none>}"
+
+          {
+            echo "### Real AWS STS probe"
+            echo ""
+            echo "| token | AWS STS error code |"
+            echo "|---|---|"
+            echo "| genuine | \`${GENUINE:-none}\` |"
+            echo "| tampered (broken signature) | \`${BROKEN:-none}\` |"
+            echo ""
+            if [ "${GENUINE}" != "${BROKEN}" ]; then
+              echo "✅ AWS distinguishes the two, so it **verified the signature**"
+              echo "against GitHub's JWKS. The genuine token was accepted as a valid"
+              echo "GitHub identity and failed only on authorization (no such role),"
+              echo "which is the expected outcome with no AWS account."
+            else
+              echo "⚠️ Both tokens produced \`${GENUINE:-none}\`, so this probe does"
+              echo "NOT show signature verification - AWS likely rejects on the"
+              echo "nonexistent role/account before inspecting the token. The"
+              echo "question stays open until a real role exists."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
