@@ -31,7 +31,7 @@ jobs:
   # account payments have failed" - not a test failure, a runner that never
   # booted.
   validate-build-test:
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: blacksmith-2vcpu-ubuntu-2204-arm
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -192,7 +192,7 @@ jobs:
   deploy-sandbox:
     needs: validate-build-test
     if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: blacksmith-2vcpu-ubuntu-2204-arm
     environment: sandbox
     timeout-minutes: 20
     env:
@@ -267,7 +267,7 @@ jobs:
     name: Sandbox deploy skipped (AWS not configured)
     needs: validate-build-test
     if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN == ''
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: blacksmith-2vcpu-ubuntu-2204-arm
     timeout-minutes: 5
     steps:
       - name: Explain why the sandbox deploy did not run
