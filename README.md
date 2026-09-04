@@ -1228,14 +1228,18 @@ Four things are confirmed there without a working webhook: the trigger evaluated
 
 **CI publishes `linux/amd64` only, and the k3d nodes are `arm64`** — so the image would not run even if the package were public. It runs here only because the Rancher Desktop VM has binfmt registered; verified with a throwaway pod *before* committing, not assumed. **This affects every engineer in the cohort running k3d on Apple Silicon, and it is invisible until a pod refuses to start.**
 
-**Emulation is not free, and the number is bigger than "a bit slower."** Same application, same manifests, idle:
+**Emulation is not free, and the number is bigger than "a bit slower."** Same application, same manifests, **both at rest** (three samples 20s apart, after the HPA had settled):
 
-| environment | image | CPU (idle) | memory |
+| environment | image | CPU (steady state) | memory |
 |---|---|---|---|
-| `taxcalc-dev` | amd64 CI image, emulated | **70–88m** | 772–782Mi |
-| `taxcalc-staging` | arm64 local build, native | **5–6m** | 477–493Mi |
+| `taxcalc-dev` | amd64 CI image, emulated | **56–62m** | 796Mi |
+| `taxcalc-staging` | arm64 local build, native | **6–8m** | 479–497Mi |
 
-Roughly **14× the idle CPU** for identical work — enough to push dev past the HPA's 70%-of-request target and trigger a scale-up (`New size: 2; reason: cpu resource utilization (percentage of request) above target`). So Task 1's two checks — "running the image tag from CI's push" and "`1/1` replicas" — are in genuine tension on this hardware, and the cause is the emulation rather than the manifests. It also matters downstream: **W6 D5 gates a canary on W5 D5's p99 latency SLI**, and a p99 measured against an emulated binary says nothing about production. The fix is a multi-arch build in `_build-and-push.yml`, which is not free — the Dockerfile's `builder` stage runs Gradle and `jlink-builder` builds a custom JRE, both slow under QEMU. Recorded as a trade-off rather than smuggled into this deliverable.
+Roughly **8–9× the idle CPU** and ~1.6× the memory for identical work.
+
+**The first version of this table said 14×, and it was wrong** — those samples were taken while the rollout was still settling, so they measured the startup spike rather than steady state. Re-measured at rest. A resource measurement taken during a rollout is a measurement of the rollout.
+
+The spike is real and visible: it pushed dev past the HPA's 70%-of-request target and the autoscaler scaled 1 → 2, then back to 1 about **390 seconds** later — W5 D3's 300s `scaleDown` stabilization window plus a reconcile. So **`1/1` does hold at rest**, and Task 1's two checks are not in permanent conflict; they simply cannot both be observed in the ~6 minutes after a deploy. It also matters downstream: **W6 D5 gates a canary on W5 D5's p99 latency SLI**, and a p99 measured against an emulated binary says nothing about production. The fix is a multi-arch build in `_build-and-push.yml`, which is not free — the Dockerfile's `builder` stage runs Gradle and `jlink-builder` builds a custom JRE, both slow under QEMU. Recorded as a trade-off rather than smuggled into this deliverable.
 
 ### The weekend sync window fired for real, and prod needed the escape hatch
 

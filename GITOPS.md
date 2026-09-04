@@ -159,14 +159,18 @@ Fixed by putting the proxy's CA chain into `argocd-tls-certs-cm` keyed by hostna
 1. **The GHCR package is private**, and org policy blocks changing package visibility (recorded in `.github/PIPELINE.md` on W6 D1). A real cluster cannot pull it without an `imagePullSecret` holding a long-lived PAT — which sits badly beside the OIDC premise this pipeline just established. The k3d lab sidesteps it by **side-loading**: pull on the host, where Docker is already authenticated, then `k3d image import` into the node image stores so the kubelet never contacts a registry. `imagePullPolicy: IfNotPresent` in the base is what makes that work.
 2. **CI publishes `linux/amd64` only**, and k3d nodes on Apple Silicon are `arm64`. It runs anyway because the Rancher Desktop VM has binfmt registered, so containerd executes it under emulation — verified with a throwaway pod *before* committing the change rather than assumed (`java -version` from the image's own jlinked JRE returned Temurin 21.0.12 on an arm64 node).
 
-**Emulation is not free, and the number is larger than "a bit slower".** Same application, same manifests, idle:
+**Emulation is not free, and the number is larger than "a bit slower".** Same application, same manifests, **both at rest** (three samples, 20s apart, after the HPA had settled):
 
-| environment | image | CPU (idle) | memory |
+| environment | image | CPU (steady state) | memory |
 |---|---|---|---|
-| `taxcalc-dev` | amd64 CI image, emulated | **70–88m** | 772–782Mi |
-| `taxcalc-staging` | arm64 local build, native | **5–6m** | 477–493Mi |
+| `taxcalc-dev` | amd64 CI image, emulated | **56–62m** | 796Mi |
+| `taxcalc-staging` | arm64 local build, native | **6–8m** | 479–497Mi |
 
-Roughly **14× the idle CPU** and ~60% more memory, for identical work. That is enough to have real consequences rather than just being an interesting number: it pushed `taxcalc-dev` past the HPA's 70%-of-request target and the autoscaler scaled it from 1 to 2 (`New size: 2; reason: cpu resource utilization (percentage of request) above target`). So the deliverable's two Task 1 checks — "running the image tag from CI's push" and "`1/1 replicas`" — are in tension on this hardware, and the tension is the emulation, not the manifests.
+Roughly **8–9× the idle CPU** and ~1.6× the memory, for identical work.
+
+**The first version of this table said 14×, and it was wrong** — those samples were taken while the rollout was still settling, not at rest, so they measured the startup spike rather than steady state. Re-measured after the autoscaler stabilised. The lesson generalises past this table: a resource measurement taken during a rollout is a measurement of the rollout.
+
+The spike is real, though, and it has a visible consequence. It pushed `taxcalc-dev` past the HPA's 70%-of-request target and the autoscaler scaled 1 → 2 (`New size: 2; reason: cpu resource utilization (percentage of request) above target`), then scaled back to 1 about **390 seconds** later — the 300s `scaleDown.stabilizationWindowSeconds` from W5 D3 plus a reconcile. So **`1/1` does hold at rest**; the deliverable's two Task 1 checks are not in permanent conflict, they just cannot both be observed in the ~6 minutes after a deploy.
 
 It also matters downstream: **W6 D5 gates a canary on the p99 latency SLI from W5 D5.** Measuring p99 against an emulated binary would produce a number that says nothing about production. The real fix is a multi-arch build (`platforms: linux/amd64,linux/arm64`) in `_build-and-push.yml`, which is not free here — the Dockerfile's `builder` stage runs Gradle and the `jlink-builder` stage builds a custom JRE, both slow under QEMU. Recorded as a documented trade-off rather than smuggled into this deliverable.
 
