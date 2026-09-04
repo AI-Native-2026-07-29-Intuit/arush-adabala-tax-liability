@@ -74,7 +74,7 @@ jobs:
     # 5m23s there against 13m52s on a GitHub-hosted runner. This job is the
     # one the deliverable pins by name, and it is the required status check
     # on main, so it matches the spec exactly.
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     # 15 per the deliverable spec. Measured headroom, not a guess: the first
     # cold-cache run of this suite - which boots real Testcontainers-backed
     # Postgres/Mongo/Redis/Kafka across ~35 @SpringBootTest/@DataJpaTest/
