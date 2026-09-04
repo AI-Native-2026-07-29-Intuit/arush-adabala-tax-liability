@@ -25,8 +25,13 @@ permissions:
 
 jobs:
   # ----- PR gate: everything that needs no AWS account at all ---------------
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 3s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted.
   validate-build-test:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -168,10 +173,15 @@ jobs:
           retention-days: 7
 
   # ----- Merge to main: deploy to a sandbox stack via OIDC ------------------
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 3s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted.
   deploy-sandbox:
     needs: validate-build-test
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     environment: sandbox
     timeout-minutes: 20
     env:

@@ -22,8 +22,13 @@ permissions:
   contents: read
 
 jobs:
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 3s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted.
   manifests-validate-and-deploy:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     # Headroom over the inner budgets (8m rollout + 3m ingress wait + image
     # build): a deliberately-failed run measured 12m37s end to end, which left
     # almost nothing under the previous 15m cap - and hitting the JOB timeout
