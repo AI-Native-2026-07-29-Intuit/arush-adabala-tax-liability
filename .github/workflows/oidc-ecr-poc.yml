@@ -53,6 +53,15 @@ on:
       - "scripts/docker-oidc-bootstrap.sh"
       - "scripts/docker-oidc-verify.sh"
       - "infra/oidc/**"
+      # This workflow builds and Trivy-scans the real image, so the image's own
+      # inputs belong here - a dependency bump changes the scan result. `src/**`
+      # is deliberately NOT listed: this is a demonstration artefact, not a
+      # required gate, and rebuilding it on every source edit would burn a
+      # ~10-minute build to re-prove something no code change can affect.
+      # docker.yml already gates PR-time build+scan on source changes.
+      - "build.gradle"
+      - "Dockerfile"
+      - ".trivyignore"
 
 permissions:
   contents: read
