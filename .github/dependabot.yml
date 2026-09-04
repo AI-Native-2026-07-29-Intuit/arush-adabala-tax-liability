@@ -1,0 +1,28 @@
+# .github/dependabot.yml
+# Keep the SHA-pinned actions in our workflows current. Dependabot opens a PR
+# per action when an upstream tag advances; the comment alongside the SHA
+# (e.g. # v4.5.0) tells humans which version the SHA corresponds to, and is
+# what Dependabot itself rewrites on a bump.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      official-actions:
+        patterns:
+          - "actions/*"
+      aws-actions:
+        patterns:
+          - "aws-actions/*"
+      docker-actions:
+        patterns:
+          - "docker/*"

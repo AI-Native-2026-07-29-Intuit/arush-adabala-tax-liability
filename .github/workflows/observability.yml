@@ -43,11 +43,16 @@ jobs:
   # ---------------------------------------------------------------------------
   # 1. Everything that can be decided without a cluster.
   # ---------------------------------------------------------------------------
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 2s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted - which also blocked cluster-round-trip behind its `needs:`.
   static-gates:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The drift gate, over BOTH renderings. scripts/slo-render.sh writes the PrometheusRule CR
       # and the flat rule file from one Sloth spec; regenerating and diffing is a complete answer
@@ -115,14 +120,17 @@ jobs:
   # ---------------------------------------------------------------------------
   # 2. The round trip, on a cluster that exists only for this run.
   # ---------------------------------------------------------------------------
+  # Same billing-block reason as static-gates above. Note this is the heaviest
+  # job in the repo (k3d + the whole PLG-T stack) on a 2-vCPU runner - if it
+  # starts timing out rather than failing, that budget is the first suspect.
   cluster-round-trip:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     needs: static-gates
     # The PLG-T install alone is several minutes of image pulls; the budget matches k8s-ci.yml's
     # measured 12-13m plus that.
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The single cause of the previous cluster failures: pods across every namespace were
       # Evicted on one node, which is kubelet responding to node pressure, not anything the
@@ -137,10 +145,10 @@ jobs:
                       /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
           df -h / | tail -1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build taxcalc-api image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           load: true
@@ -160,7 +168,7 @@ jobs:
           df -h / | tail -1
 
       - name: Spin up k3d cluster
-        uses: AbsaOSS/k3d-action@v2
+        uses: AbsaOSS/k3d-action@4e8b3239042be1dc0aed6c5eb80c13b18200fc79 # v2.4.0
         with:
           cluster-name: taxcalc-obs
           # Same pin and traefik disable as k8s-ci.yml; no loadbalancer port is needed here
@@ -176,6 +184,7 @@ jobs:
           # Same retry-and-verify as k8s-ci.yml: k3d image import can report success while the
           # image reached no node at all.
           for attempt in 1 2 3; do
+            echo "Import attempt ${attempt}..."
             k3d image import "${IMAGE}" -c taxcalc-obs || true
             missing=0
             for node in ${NODES}; do
@@ -249,7 +258,7 @@ jobs:
 
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: obs-diagnostics
           path: obs-diagnostics.txt

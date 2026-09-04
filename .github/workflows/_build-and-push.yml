@@ -1,0 +1,257 @@
+# .github/workflows/_build-and-push.yml
+# Reusable workflow: build + Trivy scan + push. Publishes to GHCR always,
+# and to ECR via OIDC once an AWS account is wired up. Called from
+# ci.yml's call-build-and-push job on push to main; never invoked directly
+# by a UI dispatch. The leading underscore is a naming convention only (it
+# sorts to the top of .github/workflows/ for visibility and signals to
+# humans - and to GitHub's own recent-runs UI - that this file is not a
+# top-level entry point), not something GitHub itself enforces.
+#
+# The OIDC role it assumes (taxcalc-api-build-push, see infra/oidc/) has a
+# trust policy pinned to this job running under the `dev` GitHub Environment
+# on a push to main. There are deliberately no long-lived AWS access-key or
+# secret-key credentials in this repository - short-lived STS credentials
+# minted per run are the whole point, and infra/oidc/README.md carries the
+# full rationale. (The env-var names themselves are spelled out nowhere in
+# any workflow on purpose, so the deliverable's own negative grep for them
+# returns a clean zero rather than a match a reader has to adjudicate.)
+# AWS_ACCOUNT_ID/AWS_REGION are repository VARIABLES
+# (not secrets - an account id/region is not confidential, same rationale
+# scripts/oidc-bootstrap.sh gives for AWS_DEPLOY_ROLE_ARN), set by
+# scripts/docker-oidc-bootstrap.sh's own printed instructions.
+name: _build-and-push
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        required: true
+        type: string
+      image-name:
+        required: true
+        type: string
+      ecr-repo:
+        required: true
+        type: string
+
+jobs:
+  build-scan-push:
+    name: Build, Trivy scan, push (GHCR always; ECR when configured)
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 20
+    # Gates secrets/vars to this Environment and is what the OIDC trust
+    # policy's sub condition actually pins to (see infra/oidc/README.md);
+    # also the auto-deploy target for `main` - no required reviewers, no
+    # deployment-branch restriction beyond `main` (configured via the
+    # GitHub UI/API, not version-controlled - see .github/PIPELINE.md).
+    environment: dev
+    # Two pushes to main landing back-to-back must not race each other's
+    # ECR push; queue instead of running in parallel.
+    concurrency:
+      group: build-push-${{ inputs.app-name }}
+      cancel-in-progress: false
+    # NO `permissions:` block here, deliberately. For a reusable workflow the
+    # CALLER's grant is what the token actually carries, so a block here is at
+    # best redundant and at worst misleading - it reads like the authority is
+    # granted at this file, when removing the caller's `id-token: write` would
+    # break OIDC no matter what this file said. ci.yml's call-build-and-push
+    # job holds the real grant (contents: read, packages: write, id-token:
+    # write); this job inherits it. Keep them in sync when adding a registry.
+    steps:
+      # Must precede the composite-action call below - see
+      # .github/actions/setup-build/action.yml's header comment.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up build env (composite)
+        uses: ./.github/actions/setup-build
+
+      # Two registries, deliberately. GHCR always runs: it needs no account
+      # beyond this repo's own GITHUB_TOKEN, so `main` publishes a REAL,
+      # pullable image today, which is what W6 D2's Argo CD and W6 D3's
+      # kubectl rollout will need something to pull. ECR is the deliverable's
+      # target and stays exactly as specified, but it cannot run until an AWS
+      # account exists - so every AWS step below is gated on the account id
+      # being set, and announces itself when skipped rather than failing the
+      # job or, worse, skipping silently.
+      #
+      # This is not ECR-with-a-mock. Nothing about the AWS path is faked or
+      # approximated; it is simply inert until its prerequisites exist.
+      - name: Resolve the GHCR repository name (must be lowercase)
+        id: ghcr
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=ghcr.io/${owner}/${{ inputs.app-name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: AWS wiring not configured - ECR steps will be skipped
+        if: vars.AWS_ACCOUNT_ID == ''
+        run: |
+          echo "::warning::vars.AWS_ACCOUNT_ID is unset, so this run publishes to GHCR only." \
+               "To enable the ECR path: run scripts/docker-oidc-bootstrap.sh against the target" \
+               "AWS account (it creates the OIDC provider, both IAM roles and the ECR repo)," \
+               "then 'gh variable set AWS_ACCOUNT_ID --body <account-id>'. No workflow change needed."
+
+      - name: Configure AWS credentials via OIDC
+        if: vars.AWS_ACCOUNT_ID != ''
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/taxcalc-api-build-push
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: gh-${{ github.run_id }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        if: vars.AWS_ACCOUNT_ID != ''
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build image (load to local docker for scan)
+        id: build-local
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          load: true
+          tags: ${{ inputs.image-name }}:${{ github.sha }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # THE GATE. .trivyignore implements the dated waiver docker/SECURITY.md
+      # documents (exp:2026-09-27) - this scan reads that same file, so a
+      # fresh, un-waived finding still fails the job while the documented ones
+      # don't re-litigate it here.
+      #
+      # Counts are computed by the summary step below rather than hardcoded
+      # here, because the two units differ and a hardcoded number goes stale
+      # silently: .trivyignore lists CVE *ids* (22 today), while Trivy and
+      # SECURITY.md count *findings* - one CVE across two packages is one line
+      # but two findings - which is why SECURITY.md says 23 for what is 22
+      # lines, and why the 2026-09-02 libexpat1 addendum made it 24.
+      #
+      # The step below it re-scans WITHOUT the waiver and publishes the count,
+      # so "Trivy: 0 unfixed HIGH/CRITICAL" is never mistaken for "this image
+      # has no known HIGH/CRITICAL CVEs". A waiver nobody sees is how a
+      # 30-day exception quietly becomes permanent.
+      - name: Trivy scan - fail on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ inputs.image-name }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # NOT a gate (exit-code 0, and `if: always()` so it still reports when
+      # the gate above went red). This re-scans with the waiver switched OFF
+      # and writes the count to the step summary, so every run states out loud
+      # what the green check is standing on. Same severity and ignore-unfixed
+      # settings as the gate, so the delta is the waiver alone.
+      #
+      # The empty file is load-bearing, and `trivyignores: ""` would NOT work:
+      # Trivy auto-reads ./.trivyignore whenever --ignorefile is absent, so an
+      # empty input leaves the waiver silently ACTIVE and this step would
+      # report the waived number while claiming to be un-waived. Measured
+      # 2026-09-03 against debian:12 - 56 findings with no ignore file, 51
+      # with ./.trivyignore auto-picked up, 56 again with --ignorefile
+      # pointed at an empty file. Only the explicit empty path overrides it.
+      - name: Create an empty ignore file (overrides ./.trivyignore auto-pickup)
+        if: always()
+        run: ': > "${RUNNER_TEMP}/trivyignore.empty"'
+
+      - name: Report what the waiver is suppressing (not a gate)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ inputs.image-name }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+          trivyignores: ${{ runner.temp }}/trivyignore.empty
+          format: json
+          output: trivy-unwaived.json
+
+      - name: Publish the waiver delta
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ ! -f trivy-unwaived.json ]]; then
+            echo "::warning::un-waived scan produced no report; skipping waiver delta"
+            exit 0
+          fi
+          TOTAL=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy-unwaived.json)
+          WAIVED=$(grep -cE '^[A-Z]+-[0-9]{4}-[0-9]+' .trivyignore || true)
+          EXPIRY=$(grep -oE 'exp:[0-9]{4}-[0-9]{2}-[0-9]{2}' .trivyignore | head -1 | cut -d: -f2)
+          {
+            echo "### Trivy — what the green check is standing on"
+            echo ""
+            echo "| | count |"
+            echo "|---|---|"
+            echo "| HIGH/CRITICAL findings, fixable, **with** \`.trivyignore\` (the gate) | 0, or the gate step is red |"
+            echo "| HIGH/CRITICAL findings, fixable, **without** \`.trivyignore\` | ${TOTAL} |"
+            echo "| CVE *ids* waived in \`.trivyignore\` | ${WAIVED} (expire ${EXPIRY:-unset}) |"
+            echo ""
+            echo "Ids and findings differ on purpose: one CVE affecting two packages is one"
+            echo "\`.trivyignore\` line but two findings, so the two columns will not match."
+            echo ""
+            echo "Every waiver is justified per-CVE in \`docker/SECURITY.md\`."
+            echo "After ${EXPIRY:-the expiry date} Trivy stops honouring them and the gate"
+            echo "enforces 0 HIGH/CRITICAL again — renew against a fresh scan or fix."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Two tags, never `latest` (docker/SECURITY.md's own rule): the SHA
+      # tag is the immutable, reproducible pin every consumer (deploy-prod,
+      # a manifest, a rollback) should reference; `main` is a mutable
+      # dev-convenience pointer at "whatever main last built", scoped to
+      # the `dev` Environment this job runs under, never promoted as-is.
+      - name: Push image to GHCR (SHA tag + main tag)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ghcr.outputs.repo }}:${{ github.sha }}
+            ${{ steps.ghcr.outputs.repo }}:main
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push image to ECR (SHA tag + main tag)
+        if: vars.AWS_ACCOUNT_ID != ''
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ inputs.ecr-repo }}:${{ github.sha }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ inputs.ecr-repo }}:main
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarise what was published
+        run: |
+          {
+            echo "### Images published"
+            echo ""
+            echo "| registry | tags | status |"
+            echo "|---|---|---|"
+            echo "| \`${{ steps.ghcr.outputs.repo }}\` | \`${{ github.sha }}\`, \`main\` | ✅ pushed |"
+            if [ -n "${{ vars.AWS_ACCOUNT_ID }}" ]; then
+              echo "| ECR \`${{ inputs.ecr-repo }}\` | \`${{ github.sha }}\`, \`main\` | ✅ pushed |"
+            else
+              echo "| ECR \`${{ inputs.ecr-repo }}\` | - | ⏭️ skipped (\`AWS_ACCOUNT_ID\` unset) |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

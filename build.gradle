@@ -58,7 +58,18 @@ sourceSets {
 // within their existing 3.3-compatible lines (10.1.x, 4.1.x respectively), so Spring Boot's
 // documented ext[] override mechanism can pull the fix in without changing the BOM/plugin
 // version itself. See docker/SECURITY.md for the CVE IDs this closes.
-ext['tomcat.version'] = '10.1.55'
+// 10.1.55 -> 10.1.59 on 2026-09-04. Three CRITICAL, already-FIXED CVEs landed against
+// tomcat-embed-core 10.1.55 after the 2026-08-27 waiver was written, so `ignore-unfixed: true`
+// does not hide them and no .trivyignore entry covers them: CVE-2026-65182 (security
+// constraint bypass), CVE-2026-65905 (authentication bypass) and CVE-2026-68525 (unauthorized
+// access). Waiving an authentication bypass that has a drop-in patch available would be the
+// wrong call, and 10.1.x is inside Spring Boot 3.3's line - exactly what this block is for.
+//
+// NOTE the version is 10.1.59, not the 10.1.58 Trivy names as the fix: 10.1.58 was never
+// published to Maven Central (the 10.1.x metadata goes ...56, 57, 59, and a direct fetch of
+// 10.1.58 is a 404, so Gradle resolves it as FAILED). 10.1.59 supersedes it and carries the
+// same fixes. Do not "correct" this to 10.1.58 to match the advisory - it will not resolve.
+ext['tomcat.version'] = '10.1.59'
 ext['netty.version'] = '4.1.136.Final'
 ext['jackson-bom.version'] = '2.18.8'
 

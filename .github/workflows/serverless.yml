@@ -25,19 +25,24 @@ permissions:
 
 jobs:
   # ----- PR gate: everything that needs no AWS account at all ---------------
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 3s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted.
   validate-build-test:
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      - uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/setup-sam@f84ec7d548307efafe33230528756de3c5841a17 # v2
         with:
           use-installer: true
 
@@ -56,7 +61,7 @@ jobs:
       # The token itself is registered as a secret and never printed: it is a live
       # credential, even though it is short-lived and audience-restricted.
       - name: Inspect OIDC token claims (no AWS call)
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const token = await core.getIDToken('sts.amazonaws.com');
@@ -101,7 +106,7 @@ jobs:
       #   returned a non-zero code: 255
       # because it cannot execute the arm64 RIE binary at all.
       - name: Set up QEMU (arm64 emulation for the Lambda runtime image)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           platforms: arm64
 
@@ -153,7 +158,7 @@ jobs:
           mvn -B -ntp validate > /tmp/diag/mvn-validate.txt 2>&1 || true
           ls -la target/ > /tmp/diag/target-listing.txt 2>&1 || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: sam-diagnostics
@@ -161,17 +166,22 @@ jobs:
           retention-days: 14
 
       - name: Upload sam build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sam-build
           path: .aws-sam/build
           retention-days: 7
 
   # ----- Merge to main: deploy to a sandbox stack via OIDC ------------------
+  # Blacksmith, not ubuntu-22.04: GitHub-hosted runners do not start in this
+  # org since the W5 D2 Actions billing block (see README's "Week 5 Day 2").
+  # This job was failing in 3s with "The job was not started because recent
+  # account payments have failed" - not a test failure, a runner that never
+  # booted.
   deploy-sandbox:
     needs: validate-build-test
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     environment: sandbox
     timeout-minutes: 20
     env:
@@ -179,24 +189,26 @@ jobs:
       STAGE: dev
       AWS_REGION: ${{ vars.AWS_REGION }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: sam-build, path: .aws-sam/build }
 
-      - uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/setup-sam@f84ec7d548307efafe33230528756de3c5841a17 # v2
         with: { use-installer: true }
 
       # OIDC federated auth: GitHub mints a short-lived OIDC token, AWS STS
       # exchanges it for temporary credentials against a role whose trust
       # policy is pinned to this repo and branch. There are deliberately NO
-      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets in this repository -
-      # a long-lived key in GitHub Secrets is the exact anti-pattern this
-      # replaces. The role ARN is a repository *variable*, not a secret: an
-      # ARN is not confidential, and hiding it only makes failures harder to
-      # read.
+      # long-lived AWS access-key or secret-key credentials in this
+      # repository - a static key pair sitting in GitHub Secrets is the exact
+      # anti-pattern this replaces. (Their env-var names are not spelled out
+      # here on purpose, so W6 D1 Task 3's negative grep over .github/ stays a
+      # clean zero instead of matching a comment.) The role ARN is a
+      # repository *variable*, not a secret: an ARN is not confidential, and
+      # hiding it only makes failures harder to read.
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -229,7 +241,7 @@ jobs:
             --since 10m --region "${AWS_REGION}" \
             > /tmp/lambda-logs.txt || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: sam-diagnostics

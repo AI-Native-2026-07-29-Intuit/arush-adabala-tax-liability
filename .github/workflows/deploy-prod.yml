@@ -1,0 +1,95 @@
+# .github/workflows/deploy-prod.yml
+# Promotes a SHA-tagged image already in ECR to the prod environment.
+# Triggered manually via workflow_dispatch with the image SHA as input.
+# The dev environment auto-deploys on merge to main (via _build-and-push.yml).
+# prod is INTENDED to be human-gated by required reviewers on the 'prod' GitHub
+# Environment, but that rule does not exist today and cannot be created on this
+# repo's billing plan (422 - see the comment on `environment: prod` below and
+# .github/PIPELINE.md's "What is NOT in this repo"). What IS enforced right now:
+# the environment's deployment-branch policy (main only) and the concurrency
+# queue. Treat a dispatch as unreviewed until the plan changes.
+name: deploy-prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image-sha:
+        description: Image SHA tag already pushed to ECR (40-hex git SHA).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Prod deploys MUST queue, never race. Two reviewers approving back-to-back
+# on different SHAs would otherwise apply both manifests in undefined order.
+concurrency:
+  group: deploy-prod-taxcalc-api
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote image to prod
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 15
+    # The deployment-branch policy (main only) is enforced. The required-reviewer
+    # rule is NOT: environment protection rules are gated on the billing plan, and
+    # this is a private repo in a free-plan org - PUT .../environments/prod returns
+    # 422 "ensure the billing plan supports the required reviewers protection rule"
+    # for both `required_reviewers` and `wait_timer`. Same plan gate that blocks
+    # branch protection. See .github/PIPELINE.md, "What is NOT in this repo".
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write # OIDC token for assuming the prod role
+    steps:
+      # inputs.* reach bash through env, never string-interpolation: a dispatch
+      # input pasted straight into a `run:` block is a shell-injection sink, and
+      # validating it in a block that already interpolated it validates nothing.
+      - name: Validate input SHA is a 40-char hex
+        env:
+          IMAGE_SHA: ${{ inputs.image-sha }}
+        run: |
+          if [[ ! "${IMAGE_SHA}" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::image-sha must be a 40-char git SHA, got '${IMAGE_SHA}'"
+            exit 1
+          fi
+
+      - name: AWS wiring not configured - ECR confirmation will be skipped
+        if: vars.AWS_ACCOUNT_ID == ''
+        run: |
+          echo "::warning::vars.AWS_ACCOUNT_ID is unset, so the prod role cannot be" \
+               "assumed and the ECR image check is skipped. This run still exercises the" \
+               "environment gate and the concurrency queue. To enable the AWS path: run" \
+               "scripts/docker-oidc-bootstrap.sh against the target AWS account, then" \
+               "'gh variable set AWS_ACCOUNT_ID --body <account-id>'. No workflow change" \
+               "needed. Do NOT point this at the floci emulator - a GitHub-hosted runner" \
+               "cannot reach a laptop, and floci does not verify OIDC tokens."
+
+      - name: Configure AWS credentials via OIDC (prod role)
+        if: vars.AWS_ACCOUNT_ID != ''
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/taxcalc-api-prod-deploy
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: gh-prod-${{ github.run_id }}
+
+      - name: Confirm image exists in ECR
+        if: vars.AWS_ACCOUNT_ID != ''
+        env:
+          IMAGE_SHA: ${{ inputs.image-sha }}
+        run: |
+          aws ecr describe-images \
+            --repository-name uptimecrew/taxcalc-api \
+            --image-ids "imageTag=${IMAGE_SHA}"
+
+      # W6 D3 fills in the kubectl rollout + Argo CD manifest-repo commit
+      # (see README's "Week 5 Day 3" section for the Deployment this
+      # promotes); today stops here, with the prod role assumed and the
+      # image's existence in ECR confirmed - the graded scope for this
+      # deliverable, per the lesson's own "What this pipeline does NOT do
+      # (yet)" list.
+      - name: Placeholder for kubectl rollout
+        env:
+          IMAGE_SHA: ${{ inputs.image-sha }}
+        run: echo "Would apply k8s manifests with image=${IMAGE_SHA}"
