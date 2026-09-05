@@ -75,12 +75,29 @@ SECURITY.md's "Known deviations" table, first bullet).
    round matters just as much, since a token that could write back here
    would let a compromised CI run rewrite its own pipeline.
 
-   **One required secret:** `GITOPS_REPO_TOKEN`, a fine-grained PAT on the
-   config repo with `contents: write` + `pull_requests: write`. Until it is
-   set, `call-bump-config` fails on `main` (loudly, which is the intended
+   **One required secret:** `GITOPS_REPO_TOKEN`, a fine-grained PAT scoped to
+   the config repo only, with `Contents: Read and write` +
+   `Pull requests: Read and write`. Until it is set AND approved,
+   `call-bump-config` fails on `main` (loudly, which is the intended
    behaviour - a silently-skipped bump would leave the config repo pinning
    an older image than the newest green build, exactly the drift GitOps
    exists to prevent).
+
+   **A fine-grained PAT against an org needs owner approval, and until it is
+   granted the token has NO effective access** - GitHub words this as
+   "3 permissions for none of your repositories" on the token page. An owner
+   approves it under *Organization settings -> Personal access token
+   requests*. Do not "fix" the permissions while a request is pending: GitHub
+   requires cancelling the request to change anything, which restarts the
+   approval clock.
+
+   **Do not diagnose this from a read succeeding.** Both repositories here are
+   public, so `GET /repos/.../contents/...` returns 200 for an unauthenticated
+   caller and therefore tells you nothing about the token. A pending PAT and a
+   read-only PAT look identical from a read. The decisive probe is a write
+   that changes nothing - `POST /git/refs` with a ref that already exists
+   returns 422 ("Reference already exists") if the token can write, and 403 if
+   it cannot.
 
 There is no `kubectl apply` anywhere in this repository's deploy path, and
 there never was: the only cluster-touching job is `k8s-ci.yml`'s manifest
