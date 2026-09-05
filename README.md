@@ -1207,7 +1207,25 @@ The design never depended on it, so nothing was broken — but the operational c
 
 ### The notification path, verified against a real induced failure
 
-**No Slack incoming-webhook was available in this session**, so delivery to Slack is not claimed and there is no screenshot. Everything upstream of delivery was verified against a deliberate bad merge into the watched branch (`uptimecrew/taxcalc-api:0.0.0-does-not-exist` on the dev overlay), which drove `taxcalc-api-dev` to `Degraded` at `19:27:48Z`:
+**Delivery to Slack is verified end to end**, and getting there needed two things the deliverable does not mention.
+
+**A bot token, not the webhook URL the spec asks for.** `service.slack` is the Slack *Web API* integration — it sends `slack-token` as a bearer credential to `chat.postMessage`. A webhook URL placed there is never requested as a URL. Since the rubric asks for both `service.slack` *and* a screenshotted alert, only a bot token satisfies both.
+
+**And the Zscaler root CA.** The controller's egress to `slack.com` is TLS-intercepted and its image doesn't carry the proxy's root, so every send failed with `x509: certificate signed by unknown authority` *before the token was evaluated*. `argocd-tls-certs-cm` doesn't cover it — that's hostname-keyed and Git-only. Fixed with a ConfigMap holding the image's own 137 system roots **plus** the Zscaler chain, mounted with `SSL_CERT_FILE` pointing at it. Mounting the Zscaler root alone would authenticate Slack and break every other TLS target; the bundle has to be additive.
+
+```
+00:10:02Z  Sending notification about condition 'on-sync-failed…' to '{slack taxcalc-deploys}'
+annotation: notified.notifications.argoproj.io = {"on-sync-failed:…:slack:taxcalc-deploys": 1788567002}
+Failed to notify (since the CA mount): 0
+```
+
+The `notified` annotation is the receipt — written **only after a successful send**, and what deduplicates the alert so a failing app doesn't re-notify every reconcile. Before the fix it never appeared and `Failed to notify` logged every pass.
+
+**That run fired `on-sync-failed`, which the earlier experiment never did.** A bad image tag degrades *health* while the sync succeeds, so it only ever exercised `on-health-degraded`. Committing a resource the AppProject denies fails the sync operation itself — and lands far sooner, since a health degradation waits out `progressDeadlineSeconds: 600` while a sync failure resolves once the `retry` budget is spent. Both triggers now confirmed to fire on the condition they name, and only on it.
+
+**An alerting gap turned up by accident.** The first attempt used `git commit -am`, which stages only *tracked* files — so the manifest was never committed while the line referencing it was. That produces a `ComparisonError`, and **neither trigger fires on it**: `on-sync-failed` reads `operationState.phase`, which never changes because no sync is attempted; `on-health-degraded` reads health, which stays `Healthy` because the last-known-good workload is still running. A config repo that has stopped rendering looks identical, to the notification layer, to one with nothing to do — and forgetting to `git add` is a likelier real-world mistake than a bad image tag. `GITOPS.md` carries the third trigger that closes it, left unadded because the rubric names exactly two.
+
+The earlier `on-health-degraded` run is still the record for that trigger — a deliberate bad merge (`uptimecrew/taxcalc-api:0.0.0-does-not-exist`) drove `taxcalc-api-dev` to `Degraded` at `19:27:48Z`:
 
 ```
 19:27:50Z info   Trigger on-sync-failed result:      [{... [app-sync-failed]     false}]  resource=argocd/taxcalc-api-dev

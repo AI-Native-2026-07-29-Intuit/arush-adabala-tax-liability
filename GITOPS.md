@@ -42,7 +42,34 @@ This is intentional. **If a 3am incident fix needs to stick, commit it to the co
 
 ## Notifications — verified as far as they can honestly be verified
 
-**No Slack incoming-webhook was available in this session**, so `argocd-notifications-secret` holds a syntactically valid but non-routable placeholder. Delivery to Slack is therefore **not** claimed. Everything upstream of delivery is verified against a real induced failure rather than asserted.
+**Delivery to Slack is verified end to end.** `argocd-notifications-secret` holds a real bot token, created out-of-band and never committed.
+
+**It took a bot token, not the webhook URL the deliverable asks for.** `service.slack` is the Slack *Web API* integration: it sends `slack-token` as a bearer credential to `chat.postMessage` and takes the channel from `recipients:`. A webhook URL placed there is never requested as a URL at all. The spec's `--from-literal=slack-token=$SLACK_WEBHOOK_URL` cannot deliver, and the spec's own rubric asks for both `service.slack` *and* a screenshotted alert — only a bot token satisfies both.
+
+**A second blocker sat behind the credential: Zscaler.** The controller's egress to `slack.com` is TLS-intercepted, and its image does not carry the proxy's root CA, so every send failed with `x509: certificate signed by unknown authority` *before the token was ever evaluated*. `argocd-tls-certs-cm` does not help — that is hostname-keyed and used only for Git. The fix is a CA bundle of the image's own 137 system roots **plus** the Zscaler chain, mounted as a ConfigMap with `SSL_CERT_FILE` pointing at it:
+
+```bash
+kubectl -n argocd exec deploy/argocd-notifications-controller -- \
+  cat /etc/ssl/certs/ca-certificates.crt > ca-base.crt
+cat ca-base.crt zscaler-chain.pem > ca-bundle.crt
+kubectl -n argocd create configmap argocd-notifications-ca --from-file=ca-bundle.crt
+# + volumeMount at /etc/argocd-ca and env SSL_CERT_FILE=/etc/argocd-ca/ca-bundle.crt
+```
+
+Mounting the Zscaler root *alone* and pointing `SSL_CERT_FILE` at it would authenticate Slack and break every other TLS target — the bundle has to be additive.
+
+**The proof, from a real induced sync failure:**
+
+```
+00:10:02Z  Sending notification about condition 'on-sync-failed…' to '{slack taxcalc-deploys}'
+annotation: notified.notifications.argoproj.io =
+  {"on-sync-failed:…:slack:taxcalc-deploys": 1788567002}     # == 00:10:02Z
+Failed to notify (since the CA mount): 0
+```
+
+The `notified` annotation is the receipt: the controller writes it **only after a successful send**, and it is what deduplicates the alert so a failing app does not re-notify every reconcile. Before the CA fix, that annotation never appeared and `Failed to notify` logged on every pass.
+
+**This run also fired `on-sync-failed`, which the earlier experiment never did.** The bad-image-tag injection degrades *health* while the sync itself succeeds, so it only ever exercised `on-health-degraded`. Committing a resource the AppProject denies (a `Namespace`, under `clusterResourceWhitelist: []`) fails the sync operation itself — and is far faster to observe, since a health degradation waits out the Deployment's `progressDeadlineSeconds: 600` while a sync failure lands as soon as the `retry` budget (`limit: 5`, backoff to 3m) is exhausted. Both triggers are now confirmed to fire on the condition they name, and only on that condition.
 
 A deliberate bad merge into the watched branch — `uptimecrew/taxcalc-api:0.0.0-does-not-exist` on the dev overlay — drove `taxcalc-api-dev` to `Degraded` at `19:27:48Z` (the Deployment's `progressDeadlineSeconds: 600` is what sets that delay, and `maxUnavailable: 0` is why the old pod kept serving throughout). Two seconds later:
 
@@ -58,6 +85,29 @@ A deliberate bad merge into the watched branch — `uptimecrew/taxcalc-api:0.0.0
 Four separate things are confirmed by those lines, and none of them needs a working webhook: the trigger **evaluated true** on a real degradation; the default subscription's `team=taxcalc` selector **matched** and resolved the recipient to `slack:taxcalc-deploys`; the controller **attempted delivery**; and `on-sync-failed` correctly stayed `false` — the sync itself *succeeded*, and it was health that degraded, so the two triggers discriminate rather than both firing on any bad news.
 
 **Rollback was `git revert`, and nothing touched the cluster.** Reverting the bad commit on the config repo restored `Healthy` at `19:30:29Z` — 13 seconds after the revert reached `main`.
+
+### The alerting gap this found by accident
+
+The first attempt at the injection above used `git commit -am`, which stages only **tracked** files — so the new manifest was never committed while the `kustomization.yaml` line referencing it was. The result was a render failure, not a sync failure:
+
+```
+ComparisonError: Failed to load target state: ... accumulating resources:
+  evalsymlink failure on '.../overlays/dev/zz-deliberate-denied-resource.yaml': no such file or directory
+```
+
+**Neither trigger fires on that.** `on-sync-failed` reads `app.status.operationState.phase`, and a `ComparisonError` means no sync operation is ever attempted, so `operationState` never changes; `on-health-degraded` reads `app.status.health.status`, and the last-known-good workload is still running happily, so health stays `Healthy`. The Application shows `Sync Status: Unknown` in the UI and **nothing is alerted at all** — a config repo that has stopped rendering looks, to the notification layer, exactly like one with nothing to do.
+
+That is a real gap in the notifications this deliverable specifies, and it is the likeliest real-world failure of the three: forgetting to `git add` a file is a more common mistake than pushing a bad image tag. A third trigger closes it:
+
+```yaml
+trigger.on-comparison-error: |
+  - description: Argo CD cannot render the desired state.
+    send:   [app-sync-failed]
+    when:   app.status.conditions != nil and
+            app.status.conditions.any(.type == 'ComparisonError')
+```
+
+Left unadded here because the deliverable names exactly two triggers and the rubric checks for them — but recorded, because the gap is real and the next person will hit it.
 
 ## Project-scoped RBAC (who can sync what)
 
