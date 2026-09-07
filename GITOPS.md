@@ -194,6 +194,21 @@ This also settles the `base/` question for good. The reference layout wants `00-
 
 **A regression test exists for this**, because a comment is not a guarantee: `scripts/verify-appproject-guardrails.sh` in the config repo asserts the `Namespace` deny as one of its five deny paths, so anyone who "fixes" the whitelist to make `CreateNamespace` work will see the check flip and have to make the decision consciously.
 
+**9. `kustomize edit set image NAME=NAME:SHA` silently deletes the registry, and the guard written to catch that passed anyway.** Found by the first real `call-bump-config` run, on the merge that made the workflow live — which is the argument for the `workflow_dispatch` entry point in one sentence. `kustomize edit set image` sets **both** `newName` and `newTag`. The dev overlay pins `newName: ghcr.io/ai-native-2026-07-29-intuit/taxcalc-api`, so passing the bare `uptimecrew/taxcalc-api` as the target reset `newName` to the bare name:
+
+```diff
+-  - name:    uptimecrew/taxcalc-api
+-    newName: ghcr.io/ai-native-2026-07-29-intuit/taxcalc-api
++- name: uptimecrew/taxcalc-api
++  newName: uptimecrew/taxcalc-api
+```
+
+Merging that would have pointed dev at an image that exists in no registry — `ImagePullBackOff` on an Application that was `Healthy` a minute earlier.
+
+**The guard was satisfied *by* the bug.** The step asserted `grep -q "image: <image-name>:<sha>"` against the rendered output, and once `newName` was clobbered the rendered image was exactly `uptimecrew/taxcalc-api:<sha>` — the string being searched for. The check was written to catch a silently-inert edit; it could not catch this one, because this failure makes the assertion *more* likely to match, not less. Third instance of the same shape in this deliverable, after `Synced` with the wrong replica count and the green `CreateNamespace` path: **a check whose passing condition is produced by the failure it is meant to detect.** The fix asserts against the *effective* reference read back out of the file — `newName` if set, else `name` — plus a second check that the effective reference still contains a registry host.
+
+**The rewrite is now surgical rather than `kustomize edit`.** Beyond the `newName` bug, `kustomize edit` re-serialises the entire file: list indentation flattened, map keys alphabetised, the `patches:` block relocated — which detached this repo's comments from the fields they document. `newName` is now read and never written, and only the `newTag:` value changes, preserving indentation and quoting. The bump diff is one line, which is also the only size of diff a human will actually review on a deploy PR.
+
 ## Sync waves — two axes, deliberately distinct
 
 - **Within one Application** (`base/kustomization.yaml`): the ConfigMap and the postgres/redis/mongo Deployments are wave `-1`; everything else is wave `0`. Argo CD does not advance to wave 0 until every wave `-1` resource is Synced *and* Healthy, so a first sync into an empty namespace does not create the Deployment until Postgres is Running. Without it the pods come up, fail the datasource check, and crash-loop through the startupProbe's 150-second grace while an operator watches an unexplained `Degraded`.
