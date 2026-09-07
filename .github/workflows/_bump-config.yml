@@ -213,10 +213,19 @@ jobs:
           lines[tag_line] = f"{m.group(1)}{m.group(2)}{sha}{m.group(3)}\n"
 
           open(path, "w").write("".join(lines))
+
+          # Two sinks on purpose. GITHUB_ENV is for LATER steps - it is read
+          # when the next step starts, so a variable written here is NOT set
+          # in this shell (with `set -u`, referencing it aborts the run; that
+          # is exactly how the first dispatch failed). The plain file is what
+          # the guards below read, in this same step.
           with open(os.environ["GITHUB_ENV"], "a") as fh:
               fh.write(f"EFFECTIVE_IMAGE={effective}\n")
+          open("/tmp/effective_image", "w").write(effective)
           print(f"newTag -> {sha}; effective image reference {effective}")
           PY
+
+          EFFECTIVE_IMAGE="$(cat /tmp/effective_image)"
 
           # Render before opening the PR. An edit can happily leave a
           # kustomization.yaml that does not build - a bad path, a patch whose
