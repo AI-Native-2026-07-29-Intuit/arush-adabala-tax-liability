@@ -260,28 +260,50 @@ jobs:
           set -euo pipefail
           BR="bump-${{ inputs.image-sha }}"
 
-          # Idempotent: a re-run of the same workflow (or a retry after a
-          # transient failure) must not fail on "branch already exists" or
-          # open a second PR for one SHA.
-          if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
-            echo "Branch $BR already exists on the config repo - nothing to do."
-            exit 0
-          fi
-
           git config user.name  "uptimecrew-ci"
           git config user.email "ci@uptimecrew.example.internal"
-          git checkout -b "$BR"
           git add "${{ inputs.overlay-path }}/kustomization.yaml"
 
           # A no-op bump is a success, not a failure: pushing the same image
           # twice (a re-run, or a main commit that changed nothing the image
           # depends on) leaves the overlay byte-identical, and `git commit`
-          # exits non-zero on an empty tree.
+          # exits non-zero on an empty tree. Checked FIRST, before anything
+          # below touches a remote branch.
           if git diff --cached --quiet; then
             echo "Overlay already pins ${{ inputs.image-sha }} - nothing to do."
             exit 0
           fi
 
+          # WHAT COUNTS AS "ALREADY DONE" IS AN OPEN PR, NOT A BRANCH.
+          #
+          # This guard used to be `git ls-remote --heads origin "$BR"` -> exit
+          # 0, which conflates two different states. Closing a bump PR does
+          # NOT delete its branch, so a SHA whose PR was closed could never be
+          # re-bumped: every later dispatch found the orphaned branch, skipped,
+          # and REPORTED SUCCESS. Observed for real - config#6 was closed as
+          # defective, the fixed workflow was dispatched for the same SHA, and
+          # the run went green having done nothing at all.
+          #
+          # That is the same failure shape as the newName guard it replaced:
+          # a check whose passing condition is produced by the situation it
+          # should have flagged. The distinction that matters:
+          #
+          #   open PR exists      -> genuinely nothing to do
+          #   branch, no open PR  -> orphaned; recreate it
+          OPEN_PR="$(gh pr list --repo "${{ inputs.config-repo }}" \
+                       --head "$BR" --state open --json number \
+                       --jq '.[0].number // ""')"
+          if [ -n "$OPEN_PR" ]; then
+            echo "PR #${OPEN_PR} is already open for ${BR} - nothing to do."
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            echo "Branch ${BR} exists with no open PR (closed or abandoned) - recreating."
+            git push origin --delete "$BR"
+          fi
+
+          git checkout -b "$BR"
           git commit -m "bump(dev): ${{ inputs.image-name }} -> ${{ inputs.image-sha }}"
           git push -u origin "$BR"
 

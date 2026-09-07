@@ -209,6 +209,20 @@ Merging that would have pointed dev at an image that exists in no registry — `
 
 **The rewrite is now surgical rather than `kustomize edit`.** Beyond the `newName` bug, `kustomize edit` re-serialises the entire file: list indentation flattened, map keys alphabetised, the `patches:` block relocated — which detached this repo's comments from the fields they document. `newName` is now read and never written, and only the `newTag:` value changes, preserving indentation and quoting. The bump diff is one line, which is also the only size of diff a human will actually review on a deploy PR.
 
+**10. A closed bump PR leaves its branch behind, and the idempotency guard then suppresses that SHA forever — reporting success each time.** Found immediately after fixing finding 9, while trying to prove the fix. The guard read:
+
+```bash
+if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+  echo "Branch $BR already exists - nothing to do."; exit 0
+fi
+```
+
+That conflates two states. Closing a PR does not delete its branch, so after the defective bump PR was closed, dispatching the *fixed* workflow for the same SHA found the orphaned branch, skipped, and **exited green having done nothing**. The evidence that anything was wrong was a single info line in a successful run's log.
+
+**The guard now keys on an open PR rather than a branch** — `gh pr list --head "$BR" --state open`. An open PR means genuinely nothing to do; a branch with no open PR is orphaned and gets deleted and recreated. The no-op check (`git diff --cached --quiet`) moved ahead of both, so a genuinely unchanged overlay never deletes a remote branch on its way to doing nothing.
+
+**This is the fourth occurrence of one pattern in this deliverable, and the pattern is the real finding.** `Synced` with the wrong replica count; a green `CreateNamespace` path that never created a namespace; a grep guard satisfied by the very bug it should have caught; and now a skip-guard whose success condition is produced by the failure it should have flagged. In each case a check passed *because* something was broken, not despite it. The generalisation worth carrying forward: **a check that cannot fail in the situation it is meant to detect is not a weak check, it is an inverted one** — and the way to find them is to induce the failure and confirm the check goes red, which is exactly what `scripts/verify-appproject-guardrails.sh` does by running against a deliberately permissive scratch project.
+
 ## Sync waves — two axes, deliberately distinct
 
 - **Within one Application** (`base/kustomization.yaml`): the ConfigMap and the postgres/redis/mongo Deployments are wave `-1`; everything else is wave `0`. Argo CD does not advance to wave 0 until every wave `-1` resource is Synced *and* Healthy, so a first sync into an empty namespace does not create the Deployment until Postgres is Running. Without it the pods come up, fail the datasource check, and crash-loop through the startupProbe's 150-second grace while an operator watches an unexplained `Degraded`.
