@@ -58,9 +58,57 @@ SECURITY.md's "Known deviations" table, first bullet).
      Setting `AWS_ACCOUNT_ID` activates the ECR half with no workflow change.
 3. The job runs under the `dev` GitHub Environment, which both gates its
    secrets/vars and is what the `taxcalc-api-build-push` trust policy's
-   `sub` condition pins to - this **is** the "dev auto-deploys on merge to
-   main" step; there is no separate deploy action beyond the push itself
-   until W6 D2/D3 land Argo CD / `kubectl rollout` against it.
+   `sub` condition pins to.
+4. **`call-bump-config` (W6 D2) - the deploy half now lives in the gitops
+   repo.** It invokes `_bump-config.yml`, which opens a PR against
+   `AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config` bumping
+   `overlays/dev/kustomization.yaml`'s image tag to the SHA just pushed.
+   **Merging that PR is what deploys.** Argo CD runs inside the cluster,
+   watches the config repo, and converges on its next poll (~3 minutes).
+
+   The important property is what this job canNOT do: `contents: read` on
+   this repo plus a fine-grained PAT scoped to the config repo, and nothing
+   else - no `packages: write`, no `id-token: write`, no cluster access of
+   any kind. The built-in `GITHUB_TOKEN` deliberately cannot be used here,
+   because it is scoped to *this* repository and can neither push a branch
+   to nor open a PR against the config repo; scoping the PAT the other way
+   round matters just as much, since a token that could write back here
+   would let a compromised CI run rewrite its own pipeline.
+
+   **One required secret:** `GITOPS_REPO_TOKEN`, a fine-grained PAT scoped to
+   the config repo only, with `Contents: Read and write` +
+   `Pull requests: Read and write`. Until it is set AND approved,
+   `call-bump-config` fails on `main` (loudly, which is the intended
+   behaviour - a silently-skipped bump would leave the config repo pinning
+   an older image than the newest green build, exactly the drift GitOps
+   exists to prevent).
+
+   **A fine-grained PAT against an org needs owner approval, and until it is
+   granted the token has NO effective access** - GitHub words this as
+   "3 permissions for none of your repositories" on the token page. An owner
+   approves it under *Organization settings -> Personal access token
+   requests*. Do not "fix" the permissions while a request is pending: GitHub
+   requires cancelling the request to change anything, which restarts the
+   approval clock.
+
+   **Do not diagnose this from a read succeeding.** Both repositories here are
+   public, so `GET /repos/.../contents/...` returns 200 for an unauthenticated
+   caller and therefore tells you nothing about the token. A pending PAT and a
+   read-only PAT look identical from a read. The decisive probe is a write
+   that changes nothing - `POST /git/refs` with a ref that already exists
+   returns 422 ("Reference already exists") if the token can write, and 403 if
+   it cannot.
+
+There is no `kubectl apply` anywhere in this repository's deploy path, and
+there never was: the only cluster-touching job is `k8s-ci.yml`'s manifest
+gate, which builds its **own ephemeral k3d cluster inside the runner** rather
+than authenticating to a standing one. The deliverable's negative grep for
+cluster-credential names over `.github/` returns zero - the terms themselves
+are deliberately not written out anywhere in this tree, so the check produces
+no hit a reader has to adjudicate (the same convention W6 D1 adopted for the
+AWS key names). `GITOPS.md` carries the exact command, and is outside the
+scope `.github/` that the check searches. See it for the reconcile loop, the
+drift experiments, and the AppProject guardrails.
 
 ## Before the first push to main — one-time AWS bootstrap
 
@@ -227,8 +275,13 @@ the 422 above is what actually refused it.
   to prevent.
 - **`kubectl apply` against EKS** - W6 D3.
 - **`sam deploy` for the LLM cost-monitoring Lambda** - W6 D4.
-- **Argo CD GitOps** - W6 D2 (replaces `deploy-prod.yml`'s eventual
-  `kubectl apply` push pattern with a manifest-repo commit instead).
+- **The Kubernetes desired state.** As of W6 D2 it lives in
+  `AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config`, and Argo
+  CD pulls it from there. `manifests/` still exists here as the W5 D3
+  artefact that `k8s-ci.yml` validates, so the same YAML now has two copies
+  and they can drift; the migration (delete `manifests/`, point `k8s-ci.yml`
+  at the config repo) is recorded in `GITOPS.md` and deliberately out of
+  scope for W6 D2.
 - **SLSA provenance / cosign image signing** - a later security day.
 
 ## AI-tool review note
