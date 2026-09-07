@@ -28,15 +28,30 @@ The dev, staging and prod Applications all carry `automated.selfHeal: true`.
 
 **The ignore also hid a real conflict, which is the cost of having it.** `base/50-taxcalc-api.hpa.yaml` originally set `minReplicas: 2` for every environment while the overlays set 1 / 2 / 3. In dev the HPA pulled the Deployment straight back up to 2 — and because the field is ignored, **Argo CD reported `Synced` throughout**. Git said 1, the cluster ran 2, nothing flagged it, and Task 1's `1/1 replicas` Done-When silently failed. This is the W5 D3 `replicas`-vs-`minReplicas` conflict surviving into GitOps and getting *quieter*, because reconciliation papers over it. Each overlay now patches the HPA floor to match the replica count it asks for (dev 1, staging 2, prod 3), so the two agree at rest while the HPA keeps ownership above the floor. Anything under `ignoreDifferences` needs an independent check that the ignored field actually holds the value Git asks for; `Synced` will not tell you.
 
-**A ConfigMap value does the job.** `LOGGING_LEVEL_ROOT` is `WARN` in `overlays/prod`:
+**A ConfigMap value does the job.** `overlays/dev` patches `LOGGING_LEVEL_ROOT` to `DEBUG`, and unlike `/spec/replicas` that key is not ignored and has no second controller competing for it — Argo CD owns it outright. Run against `taxcalc-api-dev` on **2026-09-04**:
 
 ```bash
-kubectl -n taxcalc-prod patch cm taxcalc-api-config \
+kubectl -n taxcalc-dev patch cm taxcalc-api-config \
   --type=merge -p '{"data":{"LOGGING_LEVEL_ROOT":"TRACE"}}'
-kubectl -n taxcalc-prod get cm taxcalc-api-config \
+kubectl -n taxcalc-dev get cm taxcalc-api-config \
   -o jsonpath='{.data.LOGGING_LEVEL_ROOT}'
-# reverts to WARN on the next reconcile
+# reverts to DEBUG on the next reconcile
 ```
+
+**The controller log is the evidence** — `kubectl -n argocd logs statefulset/argocd-application-controller --tail=200 | grep taxcalc-api-dev`:
+
+```
+time=19:14:59Z msg="Updated sync status: Synced -> OutOfSync" application=taxcalc-api-dev reason=ResourceUpdated
+time=19:14:59Z msg=Syncing application=argocd/taxcalc-api-dev syncId=00018-jVkwK
+time=19:14:59Z msg="Tasks (dry-run)" tasks="[Sync/-1 resource /ConfigMap:taxcalc-dev/taxcalc-api-config obj->obj (,,)]"
+time=19:15:00Z msg="Adding resource result, status: 'Synced', phase: 'Running', message: 'configmap/taxcalc-api-config serverside-applied'"
+time=19:15:00Z msg="Updating operation state. phase: Running -> Succeeded, message: ... -> 'successfully synced (all tasks run)'"
+time=19:15:00Z msg="Updated sync status: OutOfSync -> Synced" application=taxcalc-api-dev reason=ResourceUpdated
+```
+
+**Detected and healed inside two seconds** — `19:14:59Z` to `19:15:00Z` — against a deliverable that allows three minutes. That gap is worth understanding rather than banking, because the two numbers measure different things. The ~3-minute figure is the **Git polling interval**: how long a change *committed to the config repo* waits before the controller notices it. Drift in the *cluster* takes a different path entirely — the controller watches live resources through an informer, so the patch above lands as a watch event and the `Synced -> OutOfSync` transition is stamped in the same second as the write. Nothing here was polled. An operator who reasons "Argo CD reconciles every 3 minutes, so I have a 3-minute window to test something by hand" has the model backwards: for a live edit there is effectively no window at all.
+
+The `Tasks (dry-run)` line is the one to read closely. It names exactly one task, `Sync/-1 resource /ConfigMap:taxcalc-dev/taxcalc-api-config` — `ApplyOutOfSyncOnly=true` means the heal touched only the drifted ConfigMap and left the Deployment, Service, Ingress and HPA alone. `selfHeal` is not a full re-apply, so a drift repair does not restart pods as a side effect. The `Sync/-1` prefix is the sync wave: the ConfigMap sits in wave `-1` alongside the datastores, which is also why it heals before anything that consumes it would be reconsidered.
 
 This is intentional. **If a 3am incident fix needs to stick, commit it to the config repo — do not `kubectl edit` it.** An edit that survives is an edit Argo CD has not noticed yet, not an edit that won.
 
@@ -186,6 +201,29 @@ This also settles the `base/` question for good. The reference layout wants `00-
 
 These are set with **per-resource patches, not `commonAnnotations`**. `commonAnnotations` stamps every resource with the same number, and a wave every resource shares orders nothing.
 
+## Three places this repo departs from the assignment's literal wording
+
+Each of these is a deviation a reviewer can grep for and not find. All three are deliberate, all three were measured, and in each case following the literal instruction produces a system that does not work. They are collected here so the decision is auditable in one place rather than reconstructed from three file headers.
+
+**1. "Within each overlay, the Namespace resource carries `argocd.argoproj.io/sync-wave: "-1"` via `commonAnnotations`."**
+
+No overlay contains a `Namespace`, and `commonAnnotations` appears nowhere. Two independent reasons:
+
+- *It cannot sync.* The AppProject sets `clusterResourceWhitelist: []` — the guardrail the previous deliverable asks for by name. `Namespace` is cluster-scoped, so an overlay carrying one is refused (`resource :Namespace is not permitted in project taxcalc`) and **the whole sync fails**, not just that resource. Measured against a scratch project with the identical deny; see the `CreateNamespace` finding above.
+- *It would not order anything even if it synced.* `commonAnnotations` stamps every rendered resource with the same value. A wave that every resource shares is not an ordering.
+
+What replaces it: the ordering guarantee lives on the resources that actually need it — `base/kustomization.yaml` puts the ConfigMap and the postgres/redis/mongo Deployments in wave `-1` and everything else in wave `0`, so the Deployment is not created until its datastores are Healthy. That is the outcome wave `-1` on a Namespace is reaching for, applied where a first sync can actually race. The Namespaces themselves carry `argocd.argoproj.io/sync-wave: "-1"` in `platform/00-namespaces.yaml`, where the objects live; it is **inert today** (`kubectl apply` ignores sync waves) and becomes live if a platform-owned Application under a project that permits `Namespace` ever manages that directory.
+
+Three checks in `scripts/verify-appproject-guardrails.sh` (7–9) assert that each overlay renders no `Namespace`, precisely because "restoring" it looks like fixing a deviation rather than breaking every sync. **Reverting this deviation means widening the whitelist and flipping four checks of that script** — it is a conscious retraction of the guardrail deliverable, not a one-line correction.
+
+**2. "its own ConfigMap patch (`SPRING_PROFILES_ACTIVE` … `LOG_LEVEL` …)" — the key here is `LOGGING_LEVEL_ROOT`.**
+
+`LOG_LEVEL` is read by nothing in this application. `LOGGING_LEVEL_ROOT` is the key the W5 D3 base ships and the one Spring Boot's relaxed binding maps to `logging.level.root`. Using the literal name would have produced three overlays that differ visibly in Git and identically at runtime — the worst kind of green. The tightening the instruction asks for is intact and observable: `DEBUG` → `INFO` → `WARN`, confirmed in the live ConfigMaps.
+
+**3. "`SPRING_PROFILES_ACTIVE` matches the env" — the value is `k8s,<env>`, not bare `<env>`.**
+
+`application.yml` defines documents for `docker`, `k8s` and `test` only, and the `k8s` document is what supplies the in-cluster Postgres, Redis, Mongo and Kafka coordinates. A bare `dev` profile leaves the app on its default localhost datasource and it never starts. The env-specific half is present and does match the environment; the `k8s` half is what makes the pod boot. `dev` / `staging` / `prod` currently match no document and are there for a future `on-profile:` block.
+
 ## Installing Argo CD behind a TLS-intercepting proxy
 
 Two failures worth recording, because neither is in any tutorial and both look like "Argo CD is broken".
@@ -234,17 +272,65 @@ It also matters downstream: **W6 D5 gates a canary on the p99 latency SLI from W
 
 ## AI deliverable — `argocd-author` Skill audit notes
 
-**The `argocd-author` Claude Skill this deliverable names was not available in this session's tool listing.** The available-skills list contained `design`, `dataviz`, `artifact-*`, `update-config`, `keybindings-help`, `code-review`, `simplify`, `fewer-permission-prompts`, `loop`, `schedule`, `claude-api`, `run`, `init` and `security-review` — no `argocd-author`, and invoking a skill that is not listed is a guess at a name. This is the second deliverable where the named authoring Skill was absent; W6 D1's `github-actions-author` was missing the same way, and the README's Week 6 Day 1 section records it.
+### Provenance — read this before weighing the findings
 
-The seven artefacts were therefore hand-authored directly against the cohort checklist, and the checklist's own three named "common quirks" were audited for explicitly rather than assumed absent:
+**The `argocd-author` Skill was not distributed by the course.** It was absent from the session's skill listing, exactly as W6 D1's `github-actions-author` was (recorded in the README's Week 6 Day 1 section). It was therefore **authored locally** at `.claude/skills/argocd-author/SKILL.md`, written to standard Argo CD conventions and the cohort reference layout, and then run:
+
+```
+/argocd-author taxcalc-api --namespace-prefix taxcalc --strategy canary --secrets-mode eso
+```
+
+Output is on the config repo's `scratch/argocd-author` branch under `.argocd-author-out/`, mirroring the real paths so each artefact diffs against its counterpart. The branch is never merged.
+
+**A generator written by the same person who wrote the artefacts under review is a weaker check than an independent one, and it will tend to agree.** That caveat is in the SKILL.md's own first section, not just here. Two consequences worth stating rather than hiding:
+
+- **The pass was not fully cold.** The SKILL.md carries a hard rule against reading `argocd/`, `base/`, `overlays/` or `argocd-system/` before generating, and generation wrote to a separate output tree so no existing file was read to write it. But the author of the skill had already read those files. The rule constrains the procedure, not the memory behind it.
+- **A clean diff would therefore not have been evidence of correctness.** The deviations below are worth something because they exist; their *absence* would have proven nothing.
+
+### What the generated output actually disagreed about
+
+Six substantive deviations, from `diff -u` per artefact. Comment-only differences are excluded — the generated files are terse and the hand-written ones are heavily commented, which accounts for most of the raw diff and none of the meaning.
+
+| # | Field | Generated | Committed | Correct |
+|---|---|---|---|---|
+| 1 | ApplicationSet template `finalizers` | present | omitted, with `preserveResourcesOnDeletion: true` | **committed** |
+| 2 | `ignoreDifferences` on `/spec/replicas` | absent | present | **committed** |
+| 3 | `syncPolicy.automated.allowEmpty` | absent | `false` | **committed** |
+| 4 | `trigger.on-sync-succeeded` | present, and subscribed | omitted deliberately | **committed** |
+| 5 | dev overlay image | `1f1f1f…` placeholder, no `newName` | real SHA + GHCR `newName` | **committed** |
+| 6 | `Rollout` + `AnalysisTemplate` | scaffolded | absent | **generated** |
+
+**1 is the one that would have caused real damage.** The generator carried `resources-finalizer.argocd.argoproj.io` into the ApplicationSet template — the textbook rule, applied uniformly. It is wrong here for a non-obvious reason: `preserveResourcesOnDeletion: true` is not a flag the controller reads at deletion time, it works *by withholding that finalizer*. An explicit `finalizers:` block in the template silently overrides it, and dropping an env from the `elements:` list would then tear down a running environment on the next reconcile. The failure is invisible until the day it deletes prod. This is the strongest argument in the whole audit for reading generated YAML rather than applying it: the generator was following good general practice, and good general practice is what breaks this file.
+
+**4 is a case where the generator followed upstream and the deliverable overrides it.** `on-sync-succeeded` is part of Argo CD's stock trigger catalogue, so a convention-following generator emits it. Subscribing every Application to it produces the deploy-firehose the spec forbids — and the failure mode is that somebody mutes the channel, which silences the failures too.
+
+**6 is the one the generator won, and it is quirk 3 behaving exactly as the checklist predicts.** `--strategy canary` produced `base/80-taxcalc-api.rollout.yaml` with a weighted canary and a Prometheus `AnalysisTemplate`, plus the `Rollout`/`AnalysisTemplate` kinds added to the AppProject whitelist. Argo Rollouts is not installed, so applying it today fails for want of the CRD — but that is a sequencing problem, not a wrong artefact, and emitting nothing would have silently downgraded the strategy that was asked for. Per the checklist it is **commented out with a `# W6 D5 lands this` note** rather than deleted.
+
+### The two quirks that did not appear
+
+**Quirk 1 — `spec.project: default`. Not observed.** The generated Application and ApplicationSet template both set `spec.project: taxcalc`. Recorded as *not observed* rather than manufactured: a generator instructed to create an AppProject and reference it will not usually forget to. The committed artefacts are independently verified anyway — `kubectl -n argocd get app -o jsonpath='{.items[*].spec.project}'` returns `taxcalc taxcalc taxcalc` — because this is the quirk with the worst blast radius. `default` permits `*` for source repos, destinations *and* cluster-scoped resources, so an Application that lands there is unguarded while the dashboard stays green.
+
+**Quirk 2 — a missing finalizer. Observed inverted.** The generator did not omit the finalizer; it added one where it must not be (deviation 1). The checklist frames this quirk in one direction only, and the opposite error is the more dangerous of the two: a *missing* finalizer orphans running resources, which is visible and recoverable, while a *surplus* one deletes them, which is neither.
+
+**Deviation 7, outside the seven artefacts.** `--secrets-mode eso` generated a `SecretStore` + `ExternalSecret` under `base/`, ahead of the External Secrets Operator install that W6 D3 lands. Structurally identical to quirk 3, and handled the same way — the artefact is correct for the mode requested, the CRD does not exist yet. It is not adopted here; the placeholder Secret stays in `platform/secret/`, applied out-of-band, for the reason in finding 1 above.
+
+The three checklist quirks were also audited directly against the committed artefacts, independent of what the generator emitted:
 
 **Quirk 1 — `spec.project: default` on a generated Application. Checked, and it is the check that matters most.** Every Application here sets `spec.project: taxcalc`; `kubectl -n argocd get app -o jsonpath='{.items[*].spec.project}'` returns `taxcalc taxcalc taxcalc`. An Application that lands in `default` is completely unguarded — `default` permits `*` for source repos, destinations *and* cluster-scoped resources — so this quirk produces a green dashboard with no guardrail at all, which is strictly worse than an obvious failure.
 
 **Quirk 2 — a missing `resources-finalizer.argocd.argoproj.io`. Audited, and deliberately resolved BOTH ways.** The standalone `taxcalc-api-dev.yaml` and the `AppProject` carry it; the ApplicationSet template deliberately does **not**, because the finalizer defeats `preserveResourcesOnDeletion: true` (finding 3 above). Treating "add the finalizer everywhere" as a blanket rule would have reintroduced the exact bug the experiment found.
 
-**Quirk 3 — a `Rollout` CR scaffolded before Argo Rollouts is installed.** None was written. Argo Rollouts is not installed on this cluster; a `Rollout` object would be rejected by the API server for want of its CRD, and it would also be denied by this project's `clusterResourceWhitelist: []`/`namespaceResourceWhitelist` in any case. W6 D5 lands the install.
+**Quirk 3 — a `Rollout` CR scaffolded before Argo Rollouts is installed.** None is committed. The generator did produce one (deviation 6 above), which is the correct behaviour for `--strategy canary`; it is commented out with a `# W6 D5 lands this` note rather than deleted. Argo Rollouts is not installed on this cluster, so a live `Rollout` would be rejected by the API server for want of its CRD — and, until the generator's whitelist addition is adopted, denied by this project's `namespaceResourceWhitelist` as well. W6 D5 lands the install.
 
 ### One suggestion accepted, and one rejected
+
+Both from the `argocd-author` run above.
+
+**Accepted — the `Rollout` + `AnalysisTemplate` scaffold (deviation 6).** Taken as correct against the first instinct, which was to delete it because Argo Rollouts is not installed. "The CRD is missing" is an argument about *when* to apply an artefact, not about whether the artefact is right, and `--strategy canary` was the strategy asked for. Deleting it would have silently downgraded the request to a rolling update and left W6 D5 starting from nothing. Commented out with the required note, and the generator's `Rollout`/`AnalysisTemplate` entries for the AppProject whitelist are recorded with it, since the install is inert without them.
+
+**Rejected — carrying `resources-finalizer.argocd.argoproj.io` into the ApplicationSet template (deviation 1).** The generator applied the finalizer uniformly, which is right for a standalone Application and wrong for a generated one: it silently defeats `preserveResourcesOnDeletion: true`, because that setting works precisely by withholding the finalizer. Accepting the suggestion would have converted "drop an env from the `elements:` list" from a no-op into a teardown of that environment's live resources. Rejected, and the reasoning is in the ApplicationSet's own comments so the next reader does not re-add it.
+
+### Earlier reference-layout calls, kept for the record
 
 **Accepted — the reference layout's `syncOptions` block, in full.** `CreateNamespace=true`, `ServerSideApply=true`, `PrunePropagationPolicy=foreground`, `PruneLast=true` and `ApplyOutOfSyncOnly=true` were taken as given rather than trimmed to the two that were obviously needed. `ServerSideApply=true` earned it immediately: the taxcalc-dev resources already existed from W5 D3's client-side `kubectl apply`, carrying `last-applied-configuration` annotations, and server-side apply is what let Argo CD adopt them cleanly with no field-manager conflict and no `--force`.
 

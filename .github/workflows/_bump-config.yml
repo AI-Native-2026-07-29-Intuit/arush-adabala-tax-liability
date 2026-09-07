@@ -58,6 +58,49 @@ on:
       GITOPS_REPO_TOKEN:
         required: true
 
+  # A MANUAL ENTRY POINT, and it exists because of a gap the deliverable's own
+  # rubric exposed. `call-bump-config` in ci.yml is gated to `push` on `main`,
+  # so on a feature branch every ci.yml run is a `pull_request` event and this
+  # workflow never executes at all. That makes it unprovable before the merge
+  # that makes it live - the one job in the pipeline whose first real run is
+  # in production, which is precisely the property CI is supposed to remove.
+  #
+  # It also separates two failures that otherwise arrive together. This path
+  # rebuilds and pushes nothing; it only checks out the config repo, rewrites
+  # a tag and opens a PR. So a red run here is unambiguously a CREDENTIAL or
+  # PR-creation problem, not a build one - which is the exact question left
+  # open while GITOPS_REPO_TOKEN sits pending org approval. Dispatch it with a
+  # SHA that already has an image, and the result answers "is the PAT live
+  # yet?" in about forty seconds without touching a registry.
+  #
+  # Two things to know before reaching for it. GitHub only offers a
+  # workflow_dispatch entry for a file present on the DEFAULT branch, so this
+  # cannot be run until PR #45 merges. And a PR opened this way is a real PR
+  # against the config repo - close it, or merge it and let Argo CD deploy
+  # that SHA. There is no dry-run mode, deliberately: a dry run would exercise
+  # everything except the write, and the write is the part in doubt.
+  workflow_dispatch:
+    inputs:
+      image-sha:
+        description: "Git SHA to pin. Must already exist as a pushed image tag."
+        required: true
+        type: string
+      image-name:
+        description: "Image repository as it appears in the Kustomize overlay"
+        required: false
+        default: uptimecrew/taxcalc-api
+        type: string
+      config-repo:
+        description: "owner/repo of the GitOps config repository"
+        required: false
+        default: AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config
+        type: string
+      overlay-path:
+        description: "Overlay whose image tag is bumped"
+        required: false
+        default: overlays/dev
+        type: string
+
 # `contents: read` on THIS repository - the job checks nothing else out of it
 # and, critically, needs no cluster access at all. The write it performs
 # happens in the config repo and is authorised entirely by the PAT above, not
