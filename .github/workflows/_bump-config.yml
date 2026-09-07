@@ -135,14 +135,90 @@ jobs:
       - name: Set up Kustomize
         uses: imranismail/setup-kustomize@2ba527d4d055ab63514ba50a99456fc35684947f # v2.1.0
 
+      # NOT `kustomize edit set image`, and the first real run is why.
+      #
+      # `kustomize edit set image NAME=NAME:SHA` sets BOTH newName and newTag.
+      # The dev overlay carries `newName: ghcr.io/ai-native-2026-07-29-intuit/
+      # taxcalc-api`, so passing the bare `uptimecrew/taxcalc-api` as the
+      # target reset newName to the bare name and threw the registry away.
+      # The rendered Deployment then pointed at an image that does not exist
+      # anywhere, and dev would have gone ImagePullBackOff on merge.
+      #
+      # THE OLD GUARD PASSED BECAUSE OF THE BUG. It grepped the rendered
+      # output for `image: <image-name>:<sha>` - and once newName was
+      # clobbered, the rendered image was EXACTLY that. An assertion written
+      # to catch a silently-inert edit was satisfied precisely by the edit
+      # that broke the registry. It is checked against the effective
+      # reference below instead, computed from the file rather than assumed.
+      #
+      # `kustomize edit` also rewrites the whole file through its YAML
+      # serialiser: list indentation is flattened, map keys are alphabetised,
+      # and blocks move - which detaches this repo's comments from the fields
+      # they explain. Every bump degraded the documentation a little. A
+      # surgical newTag rewrite touches one line and leaves the rest byte for
+      # byte, which also makes the PR diff readable.
       - name: Rewrite the image tag on the dev overlay
         working-directory: gitops/${{ inputs.overlay-path }}
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          IMAGE_SHA: ${{ inputs.image-sha }}
         run: |
           set -euo pipefail
-          kustomize edit set image \
-            "${{ inputs.image-name }}=${{ inputs.image-name }}:${{ inputs.image-sha }}"
 
-          # Render before opening the PR. `kustomize edit` happily writes a
+          # Rewrites ONLY the newTag value of the images: entry whose name
+          # matches IMAGE_NAME. newName is read, never written, so whatever
+          # registry the overlay pins survives the bump.
+          python3 - <<'PY'
+          import os, re, sys
+
+          name, sha = os.environ["IMAGE_NAME"], os.environ["IMAGE_SHA"]
+          path = "kustomization.yaml"
+          lines = open(path).read().splitlines(keepends=True)
+
+          entry = None
+          for i, line in enumerate(lines):
+              m = re.match(r"^(\s*)-\s+name:\s*[\"']?" + re.escape(name) + r"[\"']?\s*$", line)
+              if m:
+                  entry = (i, len(m.group(1)))
+                  break
+          if entry is None:
+              sys.exit(f"no images: entry with name '{name}' in {path}")
+
+          start, indent = entry
+          # The entry runs until the next list item at the same indent, or a
+          # line dedented past it.
+          end = len(lines)
+          for j in range(start + 1, len(lines)):
+              s = lines[j]
+              if not s.strip() or s.lstrip().startswith("#"):
+                  continue
+              cur = len(s) - len(s.lstrip())
+              if cur <= indent:
+                  end = j
+                  break
+
+          effective, tag_line = name, None
+          for j in range(start, end):
+              m = re.match(r"^(\s*)newName:\s*[\"']?([^\"'\s]+)[\"']?\s*$", lines[j])
+              if m:
+                  effective = m.group(2)
+              if re.match(r"^\s*newTag:\s*", lines[j]):
+                  tag_line = j
+
+          if tag_line is None:
+              sys.exit(f"images: entry for '{name}' has no newTag: to rewrite")
+
+          # Preserve the original indentation, key spacing and quoting style.
+          m = re.match(r"^(\s*newTag:\s*)([\"']?)[^\"'\s]*([\"']?)\s*$", lines[tag_line])
+          lines[tag_line] = f"{m.group(1)}{m.group(2)}{sha}{m.group(3)}\n"
+
+          open(path, "w").write("".join(lines))
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write(f"EFFECTIVE_IMAGE={effective}\n")
+          print(f"newTag -> {sha}; effective image reference {effective}")
+          PY
+
+          # Render before opening the PR. An edit can happily leave a
           # kustomization.yaml that does not build - a bad path, a patch whose
           # target no longer exists - and without this the first thing to
           # notice would be Argo CD failing to sync AFTER a human merged it.
@@ -152,12 +228,20 @@ jobs:
           kustomize build . > /tmp/rendered.yaml
           test -s /tmp/rendered.yaml
 
-          # Assert the tag actually landed in the RENDERED output, not merely
-          # in the kustomization file. These are different claims: `images:`
-          # only takes effect if `name:` matches the image reference in the
-          # base Deployment, and a rename in the base would leave this edit
-          # silently inert - a green pipeline pinning nothing.
-          grep -q "image: ${{ inputs.image-name }}:${{ inputs.image-sha }}" /tmp/rendered.yaml
+          # Assert against the EFFECTIVE reference - newName if the overlay
+          # sets one, otherwise name - so the registry is part of the claim.
+          # Checking the rendered output rather than the kustomization file
+          # still matters for the original reason: `images:` only takes effect
+          # if `name:` matches the image reference in the base Deployment, and
+          # a rename in the base would leave this edit silently inert.
+          grep -q "image: ${EFFECTIVE_IMAGE}:${IMAGE_SHA}" /tmp/rendered.yaml
+
+          # And assert the registry did not vanish, which is the specific
+          # regression that shipped once already.
+          case "${EFFECTIVE_IMAGE}" in
+            */*/*|*.*/*) ;;
+            *) echo "::error::effective image '${EFFECTIVE_IMAGE}' has no registry host - newName was lost" && exit 1 ;;
+          esac
 
       - name: Open a PR against the gitops repo
         working-directory: gitops
