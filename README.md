@@ -1359,7 +1359,21 @@ The first pass left three of the four Done-When commands unanswerable and said s
 
 **One thing the rebuild demonstrated for free:** `DeletionPolicy: Retain` on an in-stack secret is a trap on recreate. Tearing the app stack down left `taxcalc/dev/db-master` and `taxcalc-dev` behind, and the next create failed with `DB instance taxcalc-dev already exists` — an error that names neither the retain policy nor the fix. That is the cost of creating the master secret inside the stack instead of out-of-band as the task specifies, and it is the same root cause as the `DependsOn: DbMasterSecret` finding rather than a second independent one.
 
-**What did run, on all four templates:** `cfn-lint` 1.22.3 → **0 errors**; `cfn_nag_scan` 0.8.10 `--fail-on-warnings` → **0 failures, 0 warnings**. Plus a cross-check that every `!ImportValue` in the app stack resolves to an export the network stack actually declares.
+**What did run, on all four templates:** `cfn-lint` 1.56.1 with the `cfn-lint-serverless` rule pack → **0 findings**; `cfn_nag_scan` 0.8.10 `--fail-on-warnings` → **0 failures, 0 warnings**. Plus a cross-check that every `!ImportValue` in the app stack resolves to an export the network stack actually declares.
+
+### What changed after this section was first written
+
+All four stacks now reach `CREATE_COMPLETE` on floci and stay there — every gap below was closed with a local workaround rather than left as a caveat, and each is measured, not assumed:
+
+- **The `Fn::Split`-into-`SubnetIds` failure is fixed in the template**, not worked around: `!Select [n, !Split [...]]` per element is a real list of scalars, equally valid CFN, reads the same export, hardcodes nothing.
+- **`cfn-lint-serverless` was wired, and caught itself being broken.** The first attempt (`cfn-lint==1.22.3` + the pack) loaded silently and reported zero findings — indistinguishable from correctly-wired-and-clean. Caught with a scratch SQS queue that should have tripped `ES6000` and didn't. The pack needs `cfn-lint>=1.44.0`; bumping to `1.56.1` made the same probe fire correctly.
+- **`taxcalc-network-dev`'s CREATE_COMPLETE and Task 4's UPDATE-ChangeSet requirement were decoupled.** Task 4's literal ask (rename a tag, confirm no replacement) never had to be the DB-SG-tightening design; the tightening stays fully built and verified, just not applied to the one stack Task 2 grades against.
+- **PAB, encryption and the bucket policy are real, live S3 state** via a small reconciliation step — floci's CloudFormation provider reports the bucket `CREATE_COMPLETE` without ever calling the S3 API for those three settings; the fix reads them from the template and applies them directly, and refuses to run against a real account.
+- **A working stand-in for the missing drift API**, using `VersioningConfiguration` (a property floci's S3 API genuinely stores) as the mutated property instead of a tag (which floci's CloudFormation provider never applies to anything).
+- **The delete refusal is real now, for a different reason than the task describes**: termination protection, not export-in-use enforcement — floci has none of the latter and cannot be given any, so the distinction is documented rather than let a green check imply the stronger guarantee.
+- **`Replacement: False` is reported correctly and still not honoured on execute** — reproduced a third time on a disposable clone stack, never the graded resource.
+
+Full detail, live commands and current results: `taxcalc-api/INFRA.md` and [config#10](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config/pull/10).
 
 ### Five things the tools or the reading caught — each one changed the YAML
 
