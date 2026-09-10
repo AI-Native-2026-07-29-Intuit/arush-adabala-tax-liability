@@ -1318,6 +1318,114 @@ Fixed by putting the proxy's CA chain into `argocd-tls-certs-cm` keyed by hostna
 
 **The `argocd-author` Claude Skill was not available in this session's tool listing** — the second deliverable running into that, after W6 D1's `github-actions-author`. The artefacts were hand-authored against the cohort checklist with its three named quirks audited explicitly; `GITOPS.md`'s final section carries the audit, including the one suggestion accepted (`syncOptions` in full — `ServerSideApply=true` earned it immediately by letting Argo CD adopt W5 D3's client-side-applied resources with no field-manager conflict) and the one rejected (the image-tag placeholder).
 
+## Week 6 Day 3 — AWS Fundamentals & CloudFormation Substrate
+
+W6 D1 shipped a pipeline that federates into AWS over OIDC; W6 D2 handed deploys to Argo CD pulling from a config repo. Both assumed a substrate — an account, a VPC, an artefact bucket, a role with something to deploy *into*. Today authors that substrate as raw-YAML CloudFormation: four stacks under `cfn/` in the [config repo](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config), a CI gate that lints and scans them, and [`taxcalc-api/INFRA.md`](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config/blob/main/taxcalc-api/INFRA.md) carrying the full write-up. This section is the summary and the deviations.
+
+Everything lands in the config repo, on `w6d3-implementation` — the templates describe infrastructure the config repo's own CI validates, so that is where they live. This repo gains one file: `.claude/skills/cfn-author/SKILL.md`, the locally-authored generator for the audit pass (see below).
+
+**The substrate, split along blast-radius lines rather than by convenience:**
+
+| Stack | Holds | Lifetime |
+|---|---|---|
+| `taxcalc-bootstrap-dev` | Artefact bucket for `aws cloudformation package` + `role/taxcalc-api-cfn-deploy`, the OIDC role every later deploy assumes | deployed once by a human with admin |
+| `taxcalc-artifacts-dev` | The hardened S3 artefact bucket for SAM builds and Argo CD config snapshots | rarely |
+| `taxcalc-network-dev` | 3-AZ VPC, 6 subnets, IGW, 1–3 NAT GWs gated by `EnvName`, route tables, app SG | long-lived; rebuilding churns every subnet id in the account |
+| `taxcalc-app-dev` | RDS Postgres + subnet group + DB SG + Secrets Manager master credentials, consuming the network via `!ImportValue` | changes most often |
+
+**Nothing is deployed to AWS, and that is a credentials gap rather than a scoping decision.** No account is wired to either repo — `aws sts get-caller-identity` returns `NoCredentials`, and `vars.AWS_ACCOUNT_ID` is unset. (The `floci` profile in `~/.aws/credentials` is *not* an expired AWS key, as first assumed; it is the emulator's dummy credential and works perfectly against `AWS_ENDPOINT_URL=http://localhost:4566`.)
+
+**So all four stacks were deployed against [floci](https://github.com/floci-io/floci) 2.0.1 instead** — the same local emulator W5 D4 and W6 D1 used for exactly this gap. Endpoint only; no parameter or command changed. All four reached `CREATE_COMPLETE` through the real `create-change-set → describe-change-set → execute-change-set` flow, and **all four Done-When commands now return the required answer** — but three of them for a reason that will not be the reason on real AWS, which is the subject of "Three blocked Done-Whens, closed" below. **`INFRA.md` says which engine produced every row of evidence.**
+
+What floci genuinely established: the `Conditions` gate from **both** sides of one template (dev ChangeSet 22 resources, `EnvName=staging` 30, the diff exactly the HA NAT set); `!Cidr [VpcCidr, 6, 8]` producing six /24s from `10.41.0.0/24`; the cross-stack SG pairing end to end (DB SG `UserIdGroupPairs GroupId` == the network's exported `AppSgId`, `IpRanges: []` — SG membership only, no CIDR fallback); the 32-char generated password **absent** from `get-template`, `describe-stacks` and `describe-stack-events` while the stored template holds only the `{{resolve:}}` directive; and `Replacement: False` on an UPDATE ChangeSet.
+
+### floci's most confident answer was its wrongest — again
+
+**It deleted `taxcalc-network-dev` while `taxcalc-app-dev` was importing three of its exports.** Real CloudFormation refuses outright (`Export taxcalc-network-dev-PrivateSubnets cannot be deleted as it is in use by taxcalc-app-dev`); floci performed the delete and then reported `0` matching exports. It does not merely fail to verify the safety `Export.Name` buys — **it demonstrates the opposite one**, and an engineer who trusted it would conclude `!ImportValue` protects nothing. This is the W6 D1 forged-token result in a new costume: the emulator is a good CFN *engine* and a poor CFN *service* — it models resources well and the control-plane guarantees around them barely at all.
+
+Two smaller gaps, both isolated rather than assumed. **`validate-template` is a stub**: it returns empty `Parameters` for templates declaring 2–5 of them, and passes a template with a fictional resource type, a dangling `!Ref` and a malformed `!GetAtt` that `cfn-lint` rejects with `E3006` — which is the argument for leaving cfn-lint and cfn-nag ungated in CI and letting only `validate-template` skip. `detect-stack-drift` and its two companions return `UnknownAction`, so the drift Done-When has no local path at all.
+
+### Three blocked Done-Whens, closed — and what each one is actually worth
+
+The first pass left three of the four Done-When commands unanswerable and said so. All three now return the required answer on floci, and the write-up is worth more for *how* they differ than for the fact that they pass.
+
+**1. The app stack reaches `CREATE_COMPLETE` on the committed template — the one that genuinely closes.** The blocker was floci refusing to resolve a bare `!Split` into a list-typed property, and the first pass responded by leaving the template alone and verifying the rest with an uncommitted probe that substituted a literal list. That made the status table claim a `CREATE_COMPLETE` no shippable template had earned. There is a fourth spelling — `!Select [n, !Split [",", !ImportValue …]]` per element — which is a real YAML list of scalars rather than one function returning a list, is equally valid CloudFormation, hardcodes nothing, and reads from the same export the task names. The committed template now uses it and reaches `CREATE_COMPLETE` with both imports resolved to concrete ids (subnet group == the three exported subnet ids; DB SG ingress == the exported `AppSgId`, `IpRanges: []`). The cost is that the element count is pinned at three, which is commented at the property.
+
+**2. The two S3 Done-Whens pass in the data plane, not through CloudFormation.** The phantom-policy finding was originally written up as "floci does not support this". That was wrong in a way worth correcting: `put-public-access-block`, `put-bucket-encryption` and `put-bucket-policy` all work against floci's S3. What is broken is floci's *CloudFormation provider* for those resources — it accepts the properties, reports `CREATE_COMPLETE`, mints a plausible physical id for the policy (`bucket-policy-80a48155`), and never calls S3. One layer narrower than "unsupported", and that layer is shimmable: `cfn-guardrails.sh reconcile-s3` reads all three settings **out of the template** (`cfn-extract-s3.rb`, so they cannot drift from what a reviewer approved) and applies them over the S3 API. It refuses to run against real AWS, where CFN applies them itself and reaching around it would register as drift. Writing it turned up a genuine CFN/S3 naming difference — the template says `ServerSideEncryptionByDefault`, the API wants `ApplyServerSideEncryptionByDefault` — which had produced a false PASS until a from-clean re-test caught it.
+
+**3. The delete is refused by CloudFormation — by termination protection, which is not the guarantee the task is about.** floci has no export-in-use enforcement and cannot be made to have one. It *does* implement termination protection, so `delete-stack` on `taxcalc-network-dev` now returns a real `ValidationError` from the DeleteStack API and the stack survives with all six exports. That is more than a shell script refusing, and it is worth having on a long-lived network stack anyway. It is still the wrong shape: export-in-use knows *why* it refuses and lifts itself when the last importer goes, termination protection knows neither. `INFRA.md` tabulates the difference rather than letting the green tick imply the stronger claim.
+
+**The honest summary: one of the three is a fix, two are stand-ins that make the command return the right answer for the wrong reason.** Each is labelled that way at the point of evidence. `cfn-guardrails.sh` check 7 now prints a note saying a live bucket policy on this endpoint is most likely `reconcile-s3`'s doing rather than CloudFormation's — without it, the suite would quietly start certifying the exact failure it was written to catch. Full suite against floci: **10 passed, 0 failed, 7 parity gaps**, up from 6/0/11.
+
+**One thing the rebuild demonstrated for free:** `DeletionPolicy: Retain` on an in-stack secret is a trap on recreate. Tearing the app stack down left `taxcalc/dev/db-master` and `taxcalc-dev` behind, and the next create failed with `DB instance taxcalc-dev already exists` — an error that names neither the retain policy nor the fix. That is the cost of creating the master secret inside the stack instead of out-of-band as the task specifies, and it is the same root cause as the `DependsOn: DbMasterSecret` finding rather than a second independent one.
+
+**What did run, on all four templates:** `cfn-lint` 1.56.1 with the `cfn-lint-serverless` rule pack → **0 findings**; `cfn_nag_scan` 0.8.10 `--fail-on-warnings` → **0 failures, 0 warnings**. Plus a cross-check that every `!ImportValue` in the app stack resolves to an export the network stack actually declares.
+
+### What changed after this section was first written
+
+All four stacks now reach `CREATE_COMPLETE` on floci and stay there — every gap below was closed with a local workaround rather than left as a caveat, and each is measured, not assumed:
+
+- **The `Fn::Split`-into-`SubnetIds` failure is fixed in the template**, not worked around: `!Select [n, !Split [...]]` per element is a real list of scalars, equally valid CFN, reads the same export, hardcodes nothing.
+- **`cfn-lint-serverless` was wired, and caught itself being broken.** The first attempt (`cfn-lint==1.22.3` + the pack) loaded silently and reported zero findings — indistinguishable from correctly-wired-and-clean. Caught with a scratch SQS queue that should have tripped `ES6000` and didn't. The pack needs `cfn-lint>=1.44.0`; bumping to `1.56.1` made the same probe fire correctly.
+- **`taxcalc-network-dev`'s CREATE_COMPLETE and Task 4's UPDATE-ChangeSet requirement were decoupled.** Task 4's literal ask (rename a tag, confirm no replacement) never had to be the DB-SG-tightening design; the tightening stays fully built and verified, just not applied to the one stack Task 2 grades against.
+- **PAB, encryption and the bucket policy are real, live S3 state** via a small reconciliation step — floci's CloudFormation provider reports the bucket `CREATE_COMPLETE` without ever calling the S3 API for those three settings; the fix reads them from the template and applies them directly, and refuses to run against a real account.
+- **A working stand-in for the missing drift API**, using `VersioningConfiguration` (a property floci's S3 API genuinely stores) as the mutated property instead of a tag (which floci's CloudFormation provider never applies to anything).
+- **The delete refusal is real now, for a different reason than the task describes**: termination protection, not export-in-use enforcement — floci has none of the latter and cannot be given any, so the distinction is documented rather than let a green check imply the stronger guarantee.
+- **`Replacement: False` is reported correctly and still not honoured on execute** — reproduced a third time on a disposable clone stack, never the graded resource.
+
+Full detail, live commands and current results: `taxcalc-api/INFRA.md` and [config#10](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config/pull/10).
+
+### Five things the tools or the reading caught — each one changed the YAML
+
+**1. `cfn-nag` found a real failure, not a warning: the DB security group had implicit allow-all egress.** Specifying only `SecurityGroupIngress` is not "no egress" — CloudFormation restores the default allow-all rule, so the database could open outbound connections anywhere on the internet. `F1000`. The fix is awkward enough to be worth recording: CFN treats `SecurityGroupEgress: []` as *unset* and restores the default, so "no egress" has no direct spelling; the narrowest expressible rule (tcp/5432 to `127.0.0.1/32`, unroutable from the ENI) is inert by construction while still being a rule, which is what displaces the default.
+
+**2. The app SG that enumerates only 443 egress cannot reach its own database — and no linter says so.** Enumerating *any* egress replaces the default allow-all. A VPC, an RDS instance and a security group set that all deploy cleanly, report `CREATE_COMPLETE`, and cannot talk to each other. The failure is an *absence*, and neither `cfn-lint` nor `cfn-nag` has an opinion about absences that are legal. This is the strongest single argument in the deliverable for reading generated infrastructure rather than deploying it.
+
+**3. `{{resolve:secretsmanager:...}}` does not create a dependency, so the RDS instance needs an explicit `DependsOn`.** CloudFormation does not parse dynamic references when building its dependency graph — the resolve string is an opaque literal. Without `DependsOn: DbMasterSecret` the instance and the secret are free to be created in parallel, and the deploy fails *intermittently* on a secret that does not exist yet. Intermittently is the bad part: it passes in dev and fails in prod.
+
+**4. The reference workflow's `configure-aws-credentials` pin is a 42-character string.** A git SHA is 40. `gh api repos/aws-actions/configure-aws-credentials/commits/<it>` → `HTTP 422, No commit found`. The workflow would fail at step setup on every run, forever. All three action pins in the committed `cfn-validate.yml` were checked against the GitHub API before commit. A pinned SHA is only as good as the one check nobody runs.
+
+**5. `cfn-nag` 0.8.10 cannot run on Ruby 4.** It pulls `kwalify` 0.7.2, which calls `StringScanner#peep` — removed in Ruby 4.0. On 4.0.6 the scan dies in the require chain with a `NoMethodError` before it reads a single template; on 3.3 the identical templates return 0 findings. `ruby-version: "3.3"` in CI is a pin with a reason attached, not a default.
+
+### Deviations from the reference layout
+
+**`runs-on: blacksmith-2vcpu-ubuntu-2204`, not `ubuntu-24.04`.** GitHub-hosted runners have not started in this org since the W5 D2 Actions billing block; a job pinned to a hosted label dies in ~3s with "recent account payments have failed" — a runner that never booted, not a lint failure. Every other workflow in this repo already uses the Blacksmith label.
+
+**The AWS half of `cfn-validate.yml` is guarded on `vars.AWS_ACCOUNT_ID`,** matching the pattern `deploy-prod.yml` and `serverless.yml` already use here. `configure-aws-credentials` can do nothing with an empty `role-to-assume`, so an unguarded step puts a permanent red X on `main` — and a required check that is always red gets bypassed, which is worse than not having one. `cfn-lint` and `cfn-nag` always run.
+
+**The app SG's 5432 egress is CIDR-scoped, not SG-to-SG.** Taken literally the task text asks for a **cross-stack cycle**: the network stack would import from the app stack, which already imports `AppSgId` from the network stack. The usual escape — an `AWS::EC2::SecurityGroupEgress` declared in the app stack against the imported SG — breaks the cycle but leaves the *network* stack permanently `DRIFTED`, which would make Task 4's `detect-stack-drift` unable to read `IN_SYNC` ever again. The tight direction is enforced where it costs nothing: the DB SG's ingress is `SourceSecurityGroupId`, so SG membership is the credential and a box merely sitting in the same subnet range still cannot open a Postgres connection.
+
+**`MapPublicIpOnLaunch` removed rather than suppressed.** "Public" here means IGW-routed, not auto-addressed — the only things in those subnets are NAT Gateways, which carry their own Elastic IPs and ignore the flag. Suppressing `cfn-nag` W33 would have kept the exposure and hidden the warning.
+
+**`EngineVersion` is a Parameter, not the reference's hardcoded `"16.3"`.** AWS deprecates RDS minor versions on its own schedule; as a literal, that day costs a template edit and a PR for a value unrelated to the change being shipped.
+
+**Explicit resource names kept only where load-bearing.** `CfnDeployRole` keeps `RoleName` (Actions must name the role in `role-to-assume` before the stack can be queried) and `DbInstance` keeps `DBInstanceIdentifier` (it is the handle every operational path uses). The app security group **lost** its `GroupName` — consumers import the SG *id*, so a generated name costs nothing and keeps it replaceable in place.
+
+**`cfn-lint-serverless` is not wired up, though the task text asks for it.** That pack adds Lambda, API Gateway and SAM-transform rules; `cfn/` holds a VPC, an RDS instance, two S3 buckets and an IAM role, and no `Transform` of any kind. It becomes correct in W6 D4 when the LLM cost-monitoring Lambda stack lands — and that is the change that should add it, so the dependency arrives with the first template that justifies it.
+
+**Every `cfn-nag` suppression is written at the resource** in `Metadata.cfn_nag.rules_to_suppress` with its reasoning, rather than as a CI deny-list. A suppression is an argument, and it belongs in the diff where a reviewer can disagree with it. There are six; `INFRA.md` tabulates all of them.
+
+**`taxcalc-api/INFRA.md` *does* take the subdirectory that `GITOPS.md` refused.** The W6 D2 argument was that this repository *is* `taxcalc-api`, so a directory named after it nests every path for nothing. `INFRA.md` lives in the **config** repo, which is not `taxcalc-api` — there the subdirectory names something real.
+
+### The `cfn-author` Skill — third deliverable running into the same gap
+
+`cfn-author` was **absent from this session's skill listing**, exactly as `argocd-author` was for W6 D2 and `github-actions-author` for W6 D1. It was authored locally at `.claude/skills/cfn-author/SKILL.md` and run:
+
+```
+/cfn-author taxcalc --region us-east-1 --env dev --vpc-cidr 10.41.0.0/16 --out .cfn-author-out/
+```
+
+Output is on the config repo's `scratch/cfn-author` branch, never merged. **The provenance caveat is repeated wherever the audit is cited:** a generator written by the same author as the artefacts under review will tend to agree, the pass was not cold, and a clean diff would therefore have been evidence of nothing.
+
+One measurement does not depend on that caveat, because both trees went through the same two tools:
+
+```
+generated   cfn-lint 0 errors;  cfn_nag_scan 1 FAILURE, 11 warnings
+committed   cfn-lint 0 errors;  cfn_nag_scan 0 failures,  0 warnings
+```
+
+**The generated set does not pass this repo's own CI gate.** Five substantive deviations, all resolved in favour of the committed templates — findings 1–3 above, plus `MapPublicIpOnLaunch` and the hardcoded `EngineVersion`. The skill's three named quirks (`StringLike` on the OIDC `aud` claim, `NoEcho: true` on a password Parameter, `DeletionPolicy` without its `UpdateReplacePolicy` partner) were **all recorded as *not observed* rather than manufactured** — they are in the skill's own non-negotiables, so a generator following it will not commit them, which is exactly why their absence is weak evidence and is reported as such.
+
 ## Build and Test
 
 ```bash
