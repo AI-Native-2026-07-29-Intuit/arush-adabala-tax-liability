@@ -5,6 +5,12 @@ out/
 .vscode/
 *.iml
 
+# Machine-local Claude Code permission grants. The skill under
+# .claude/skills/ IS committed (it is the W6 D2 argocd-author deliverable);
+# this file is not - it authorises actions on THIS machine only, and
+# committing it would hand those grants to everyone who clones the repo.
+.claude/settings.local.json
+
 # Compose-managed dev state (W5 D2). NEVER commit any of these.
 envs/*.env
 !envs/*.env.example
