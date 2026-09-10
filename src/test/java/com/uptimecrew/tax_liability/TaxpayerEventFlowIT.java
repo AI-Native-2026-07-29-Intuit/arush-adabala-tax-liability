@@ -48,9 +48,37 @@ import org.testcontainers.utility.DockerImageName;
 @ActiveProfiles("test")
 class TaxpayerEventFlowIT {
 
+    /**
+     * How long an asynchronous step gets before it is called a failure.
+     *
+     * <p>Was a hardcoded 5s (10s in one place) per await. W6 D4 widened it to 30s and gave it a
+     * name, after this class's first assertion failed in two consecutive full-suite runs while
+     * passing every time the class ran alone.
+     *
+     * <p>The cause is contention, not a broken chain. {@code OutboxPublisher} sweeps on
+     * {@code @Scheduled(fixedDelay = 1000L)}, so 5s was only five sweeps of headroom; and by the
+     * time this class runs, Spring's test-context cache is holding several earlier ITs' contexts
+     * open, each with its own scheduled sweep and its own Kafka listener still reconnecting. The
+     * evidence for contention rather than breakage is in the log immediately before the failure -
+     * a consumer retrying {@code localhost:9092}, the default, which belongs to an older cached
+     * context rather than to this test's mapped container port.
+     *
+     * <p>W6 D4's move from {@code postgres:16-alpine} to {@code pgvector/pgvector:pg16} (required
+     * by {@code V5__create_taxpayer_embeddings.sql}, see {@link TestImages}) added startup time
+     * and memory pressure across nine containers, which is what pushed an already-tight budget
+     * over. The suite was clean on the lighter image immediately before that change.
+     *
+     * <p><b>Widening this does not weaken the assertion.</b> What these tests are for is that a
+     * domain write reaches Kafka through the outbox at all - the latency of that path is not a
+     * property any of them was written to pin, and no production behaviour depends on it
+     * completing inside five seconds. A timeout tuned so tightly that it fails on a loaded
+     * machine tests the machine, not the code.
+     */
+    private static final Duration ASYNC_BUDGET = Duration.ofSeconds(30);
+
     @Container
     @ServiceConnection
-    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>(TestImages.POSTGRES);
 
     @Container
     @ServiceConnection
@@ -88,12 +116,12 @@ class TaxpayerEventFlowIT {
 
         service.computeLiability(aggregateId, "Ada Lovelace", "SINGLE", new BigDecimal("75000.00"));
 
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+        await().atMost(ASYNC_BUDGET).untilAsserted(() ->
                 assertThat(outboxRepository.findAll())
                         .anyMatch(r -> r.getAggregateId().equals(aggregateId) && r.getPublishedAt() != null));
 
         try (KafkaConsumer<String, String> probe = newProbe("probe-1", OutboxTopics.TAXPAYER_EVENTS)) {
-            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            await().atMost(ASYNC_BUDGET).untilAsserted(() -> {
                 ConsumerRecord<String, String> rec = pollOne(probe);
                 assertThat(rec).isNotNull();
                 assertThat(rec.key()).isEqualTo(aggregateId);
@@ -110,7 +138,7 @@ class TaxpayerEventFlowIT {
 
         kafkaTemplate.send(OutboxTopics.TAXPAYER_EVENTS, aggregateId, payload).get(5, TimeUnit.SECONDS);
 
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+        await().atMost(ASYNC_BUDGET).untilAsserted(() ->
                 assertThat(readModelRepository.findById(aggregateId)).isPresent());
     }
 
@@ -122,7 +150,7 @@ class TaxpayerEventFlowIT {
                 .get(5, TimeUnit.SECONDS);
 
         try (KafkaConsumer<String, String> dlt = newProbe("dlt-probe", OutboxTopics.TAXPAYER_EVENTS_DLT)) {
-            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+            await().atMost(ASYNC_BUDGET).untilAsserted(() ->
                     assertThat(pollOne(dlt)).isNotNull());
         }
     }

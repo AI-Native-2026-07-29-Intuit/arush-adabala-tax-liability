@@ -55,6 +55,40 @@ spec:
             - name: JAVA_TOOL_OPTIONS
               value: "-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
 
+            # ----- W6 D4 Task 2: the Anthropic API key.
+            #
+            # secretKeyRef and NEVER a literal, a ConfigMap entry or an image layer.
+            # The key is the credential for the one thing in this application that
+            # spends real money per request, and unlike the AWS-resident spend it is
+            # invisible to every Budget and alarm the W6 D3 substrate carries - a
+            # leaked key is spend nothing in AWS can see, capped only by the Anthropic
+            # Console workspace spend limit.
+            #
+            # Create it out of band (it is not in git, and this manifest names it
+            # rather than carrying it):
+            #   kubectl -n taxcalc-dev create secret generic anthropic-api \
+            #     --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+            #
+            # `optional: true` so a cluster without the Secret still starts: the app
+            # falls back to application.yml's `${ANTHROPIC_API_KEY:dummy}` and every
+            # non-LLM route keeps working. A missing key should disable one feature,
+            # not crashloop the whole API.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-api
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+
+            # ----- W6 D4 Task 3: the in-cluster embeddings service.
+            #
+            # Cluster-internal DNS, so this call never leaves the cluster: no API key,
+            # no egress, and - relevant to this deliverable - no NAT Gateway data
+            # processing charge, which is the AWS line item every outbound byte does
+            # cross. An embedding call costs nothing per request; see COST.md.
+            - name: TAXCALC_EMBEDDINGS_URL
+              value: "http://embeddings.taxcalc-dev.svc.cluster.local/embed"
+
           # ----- resources (requests = scheduler floor; limits = kubelet kill line)
           #
           # NOTE - `limits.cpu` is deliberately omitted here (Topic 6: a CPU

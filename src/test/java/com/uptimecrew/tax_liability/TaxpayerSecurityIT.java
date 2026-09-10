@@ -57,7 +57,7 @@ class TaxpayerSecurityIT {
 
     @Container
     @ServiceConnection
-    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(TestImages.POSTGRES);
 
     @Container
     @ServiceConnection
