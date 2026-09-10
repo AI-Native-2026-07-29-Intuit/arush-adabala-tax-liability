@@ -1426,6 +1426,150 @@ committed   cfn-lint 0 errors;  cfn_nag_scan 0 failures,  0 warnings
 
 **The generated set does not pass this repo's own CI gate.** Five substantive deviations, all resolved in favour of the committed templates — findings 1–3 above, plus `MapPublicIpOnLaunch` and the hardcoded `EngineVersion`. The skill's three named quirks (`StringLike` on the OIDC `aud` claim, `NoEcho: true` on a password Parameter, `DeletionPolicy` without its `UpdateReplacePolicy` partner) were **all recorded as *not observed* rather than manufactured** — they are in the skill's own non-negotiables, so a generator following it will not commit them, which is exactly why their absence is weak evidence and is reported as such.
 
+## Week 6 Day 4 — Cost Governance & a Governed LLM Feature
+
+W6 D3 built the substrate and taught that the NAT gateway is the silent budget killer. It did not
+measure or guard that spend. This day does — and adds the first feature in this application that
+spends real money on every request, which turns out to be invisible to every guardrail the day
+also builds. Full detail in [`COST.md`](COST.md); the cost stack and tag edits are in the
+[config repo](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config).
+
+**Two spending planes, and only one is visible to AWS billing.** The AWS-resident plane (NAT, RDS,
+S3) gets a tag-scoped `AWS::Budgets::Budget` plus an account-wide `EstimatedCharges` alarm, both
+publishing to one SNS topic. The Anthropic plane gets neither, because it *cannot*: Anthropic bills
+the Anthropic workspace, so no Budget, Cost Explorer report or billing alarm will ever show it. It
+is capped at the platform (a Console workspace spend limit) and attributed in-app (a per-request
+EMF cost log plus an `X-Cost-Usd` header). A third case makes the axis clear — the self-hosted
+embeddings service is an "AI feature" whose marginal cost per call is zero, because it runs on the
+cluster's own CPU. "Is it AI?" is the wrong question; "who is the merchant?" is the right one.
+
+### The real API call paid for itself immediately
+
+`AnthropicCostPathLiveIT` calls the live API rather than a stub, and the first run exposed a bug
+no stub could:
+
+```
+model=claude-haiku-4-5  resolved=claude-haiku-4-5-20251001  in=12 out=4  X-Cost-Usd=0.00005
+```
+
+The request names a floating **alias**; the response names the dated **snapshot** that served it.
+Pricing off the response id — the obvious reading of "the model that served the call" — throws
+`no price for model claude-haiku-4-5-20251001` on the first real request, and every unit test
+stays green, because a stub echoes back whatever it was handed. `UpstreamResponse` now carries
+both: the alias is the pricing key, the snapshot is logged so a cost line can still be reconciled
+against an invoice after the alias floats.
+
+### Three places the reference implementation fails while looking healthy
+
+1. **An unpriced model costing `0.00` instead of throwing.** A silent zero produces a cost log and
+   a header that look perfectly fine while reporting a paid call as free, and nothing downstream
+   can distinguish "free model" from "unknown model".
+2. **`Double.toString` for the `X-Cost-Usd` header.** Java switches to scientific notation below
+   `1e-3`, and a real Haiku call costs ~$0.0002 — so the reference spelling emits `2.0E-4`, which a
+   k6 threshold or an `awk` pipeline reads as near-zero rather than rejecting.
+   `CostResponseHeaderTest` asserts both spellings side by side so a revert is a test failure.
+3. **String-concatenated EMF.** `tenant` is caller-influenced; one quote produces malformed JSON,
+   and CloudWatch answers malformed EMF by dropping the metric and keeping the text — the cost
+   series quietly reads low with nothing failing anywhere.
+
+Cost is carried as an integer count of 1e-5 USD, a **deliberate departure from `CLAUDE.md`'s
+scale-2 money rule**, documented at the class. That rule is right for tax liability, where scale 2
+*is* the domain; per-call LLM cost sits four orders of magnitude below it, so at scale 2 every call
+rounds to `0.00` and a million of them still round to zero. The rule's intent — never accumulate
+money in floating point — is kept harder than the letter: `BigDecimal` at scale 8, rounded once,
+then integers, which sum without error.
+
+### Three bugs that passed in isolation and failed in aggregate
+
+The pgvector work (Task 3) produced the most instructive failures of the day, all of the same
+shape — invisible when you run the class you are editing:
+
+- **`CREATE EXTENSION` landed the type in the wrong schema.** The test harness set Flyway's
+  `schemas=taxcalc`, which the application does not, so `vector` became `taxcalc.vector` and all
+  five query-side tests failed with `type "vector" does not exist` — while every schema-shape
+  assertion still passed. Fixed on both sides: the migration pins `SCHEMA public`, and the harness
+  now configures Flyway the way production does. **A test harness configured differently from
+  production can manufacture failures, and hide real ones.**
+- **`withReuse(true)` made a suite order-dependent.** 11/11 alone, then `initializationError` on
+  the next full run, because the reused container had been reaped and left a stale entry.
+- **An index test that asserted table size, not correctness.** At 300 rows Postgres correctly costs
+  a sort below an index scan, so the plan was `Sort` and the test failed for its own reasons. It now
+  runs with `enable_seqscan`/`enable_sort` off — soft preferences, not overrides, so Postgres still
+  falls back when no index can serve — and pairs the `<=>` assertion with an L2 (`<->`) **positive
+  control**. Without that control the test would pass just as happily against an index built with
+  the wrong operator class, which is the silent failure it exists to catch.
+
+All eight Postgres ITs moved to `pgvector/pgvector:pg16` (stock Postgres has no pgvector;
+`IF NOT EXISTS` covers "already created", not "not installed"). That heavier image is also why
+`TaxpayerEventFlowIT`'s await budgets are now a named 30s constant: its first assertion failed in
+two consecutive full-suite runs while passing every time alone. `OutboxPublisher` sweeps on a 1s
+`fixedDelay`, so 5s was five sweeps of headroom against a context cache holding several earlier
+ITs open. Widening does not weaken it — those tests pin that a write reaches Kafka through the
+outbox, never that it does so within five seconds.
+
+### What the emulator could and could not settle
+
+No AWS account, unchanged since W6 D3, so everything ran against floci 2.0.1. It genuinely settled
+the stack's creation, the alarm, and the `IsUsEast1` condition **from both sides** (4 resources in
+us-east-1, 3 in eu-west-1). Three parity gaps, each measured:
+
+- **`AWS::Budgets::Budget` reports `CREATE_COMPLETE` against a service that is not running** —
+  floci has no `budgets` service at all, yet mints `MonthlyCostBudget-7636191f` and reports success.
+  W6 D3's phantom-bucket-policy finding, landing this time on the deliverable's headline resource.
+- **The SNS `TopicPolicy`, `KmsMasterKeyId` and tags are silently dropped.** The live topic keeps
+  the default `Principal {"AWS":"*"}` policy — **wider** than the committed template, not narrower.
+- **`TreatMissingData` is dropped from the alarm**, which is the one property deciding whether it
+  fires correctly on a gappy metric.
+
+**Cost Explorer is not emulable, as opposed to unimplemented.** floci's `ce` answers correctly and
+returns 36 service groups with every amount `0.0000000000`, and `get-tags` returns nothing at all —
+an emulator does not bill anybody, so there is no spend to report and no activated tag to group by.
+Unlike the three gaps above, that one cannot be fixed by a later version. The NAT line item can
+only be read on a real account; `cfn-guardrails.sh --static` check 5 verifies the *input* to that
+report instead, which is an honestly weaker claim.
+
+### The `cost-author` Skill — fourth deliverable, same gap
+
+`cost-author` was **absent from this session's skill listing**, exactly as `cfn-author`,
+`argocd-author` and `github-actions-author` were. Authored locally at
+`.claude/skills/cost-author/SKILL.md`. The provenance caveat does not weaken with repetition: a
+generator written by the same author as the artefacts under review will tend to agree, and **this
+pass was not cold** — the cost stack and cost package were written first. One suggestion accepted
+(tag the Elastic IPs: attached they are free, detached they bill ~$3.60/mo and a detached EIP is
+what a half-finished teardown leaves behind), one rejected (deriving the billing-alarm threshold
+from the Budget limit — they measure different things, and coupling them encodes the assumption
+that this service is the only thing in the account). `COST.md` carries both.
+
+### Deviations from the brief
+
+**`POST /api/v1/taxpayers/{id}/explanation`, not `POST /v1/completions`.** The brief's Done-When
+assumes a `llmproxy` module with a router and provider adapters from "W3 D1"; this repository's
+W3 D1 was *Spring Security 7, JWT Resource Server & Rate-Limited LLM API*, and no such module
+exists here. The endpoint follows this application's actual conventions — the existing controller,
+its `@PreAuthorize` scope/role pattern, its URL family — rather than inventing a generic completions
+route that nothing else resembles. Same for the package: `llm.cost`, not `llmproxy.cost`.
+
+**Migration numbered V5, not V3.** V3 and V4 are the W3 D3 outbox table and the W3 D5 trace-context
+column. Flyway keys on version, so a second V3 fails context startup everywhere the real one ran.
+
+**`cfn-validate.yml` gained no new validation step.** Every tool in it is already directory-scoped
+and `validate-template` already loops the glob, so the cost stack was linted, scanned and
+API-validated the moment it was committed. What the generic tools have no opinion about went into
+`cfn-guardrails.sh` instead — tag coverage and `TreatMissingData`, both proved to fire by breaking
+a template on purpose.
+
+**The embeddings model is mounted, not downloaded.** TEI's `hf-hub` 0.3.2 disables reqwest's
+redirect following and re-implements it by parsing the raw `Location` header as an absolute URL, so
+a TLS-intercepting proxy that rewrites that redirect to a relative path fails with
+`relative URL without a base`. Confirmed from the shipped crate source; 0.4.3 is byte-identical, so
+an image bump does not fix it, and `HF_ENDPOINT` is not an escape hatch (0.3.2 hardcodes the
+endpoint). TEI loads from a local directory without contacting the Hub — verified end to end,
+`Ready` and `/embed` returning 1024 floats with zero outbound requests. Two traps worth recording:
+the CPU build needs `onnx/model.onnx` rather than `model.safetensors` (with only safetensors it
+reaches `Starting model backend` then dies naming a missing file), and on macOS a `-v /tmp/…` mount
+is silently **empty**, because `/tmp` is a symlink to `/private/tmp` that Docker does not resolve —
+which invalidated three of this session's test runs before it was spotted.
+
 ## Build and Test
 
 ```bash
