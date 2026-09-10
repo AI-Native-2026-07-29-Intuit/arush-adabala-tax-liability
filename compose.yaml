@@ -32,7 +32,18 @@ services:
 
   # ----- primary data store -----------------------------------------------
   postgres:
-    image: postgres:16
+    # pgvector/pgvector:pg16, not postgres:16 - the same PostgreSQL 16 plus the
+    # `vector` extension. W6 D4's V5__create_taxpayer_embeddings.sql runs
+    # `CREATE EXTENSION IF NOT EXISTS vector`, and a stock image does not ship
+    # it, so Flyway fails at application startup with `extension "vector" is
+    # not available`. Note IF NOT EXISTS does not save it: that covers
+    # "already created", not "not installed on the server".
+    #
+    # The migration set runs wherever the application starts - not only in
+    # tests - so the test images (see TestImages) and these runtime images have
+    # to move together. They did not in the first push of this branch, and CI
+    # caught it here and in manifests/05-dev-dependencies.yaml.
+    image: pgvector/pgvector:pg16
     networks: [taxcalc_net]
     environment:
       POSTGRES_DB: taxcalc_dev

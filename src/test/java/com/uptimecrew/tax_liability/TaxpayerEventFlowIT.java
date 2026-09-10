@@ -55,24 +55,44 @@ class TaxpayerEventFlowIT {
      * name, after this class's first assertion failed in two consecutive full-suite runs while
      * passing every time the class ran alone.
      *
-     * <p>The cause is contention, not a broken chain. {@code OutboxPublisher} sweeps on
-     * {@code @Scheduled(fixedDelay = 1000L)}, so 5s was only five sweeps of headroom; and by the
-     * time this class runs, Spring's test-context cache is holding several earlier ITs' contexts
-     * open, each with its own scheduled sweep and its own Kafka listener still reconnecting. The
-     * evidence for contention rather than breakage is in the log immediately before the failure -
-     * a consumer retrying {@code localhost:9092}, the default, which belongs to an older cached
-     * context rather than to this test's mapped container port.
+     * <p><b>That first explanation - scheduler contention - was wrong, and is corrected here
+     * rather than quietly deleted, because the way it was wrong is the useful part.</b> Widening
+     * the budget made one run pass and the next fail on the <em>following</em> assertion, which is
+     * the signature of a cause that is not slowness at all. A widened timeout is a plausible
+     * response to almost any async failure, and that is exactly what makes it dangerous: it turns
+     * a reproducible failure into an intermittent one and buys silence instead of information.
      *
-     * <p>W6 D4's move from {@code postgres:16-alpine} to {@code pgvector/pgvector:pg16} (required
-     * by {@code V5__create_taxpayer_embeddings.sql}, see {@link TestImages}) added startup time
-     * and memory pressure across nine containers, which is what pushed an already-tight budget
-     * over. The suite was clean on the lighter image immediately before that change.
+     * <h2>The actual cause, still unfixed</h2>
      *
-     * <p><b>Widening this does not weaken the assertion.</b> What these tests are for is that a
-     * domain write reaches Kafka through the outbox at all - the latency of that path is not a
-     * property any of them was written to pin, and no production behaviour depends on it
-     * completing inside five seconds. A timeout tuned so tightly that it fails on a loaded
-     * machine tests the machine, not the code.
+     * <p>A per-class {@code @Container} is stopped when its class finishes, but Spring's
+     * test-context cache does <em>not</em> close the context. The context lives on for the rest of
+     * the JVM and so does its {@code @Scheduled} work, so a dead {@code OutboxPublisher} keeps
+     * trying to open transactions against a container that no longer exists:
+     *
+     * <pre>
+     * [scheduling-1] Connection to localhost:33732 refused
+     * [scheduling-1] HikariPool-1 - Connection is not available, request timed out after 30001ms
+     *     at OutboxPublisher$$SpringCGLIB$$0.publishPending(&lt;generated&gt;)
+     * </pre>
+     *
+     * <p>{@code HikariPool-1} is the first pool created in the JVM - an early class's context,
+     * long after that class ended. Each zombie holds a connection attempt open for the pool's full
+     * 30s timeout, every second. W6 D4's heavier {@code pgvector/pgvector:pg16} image (required by
+     * {@code V5__create_taxpayer_embeddings.sql}, see {@link TestImages}) added enough startup cost
+     * and memory pressure to make a latent problem reproducible; it did not create it.
+     *
+     * <p><b>The fix is a JVM-lifetime container, and it was attempted and reverted.</b> The
+     * standard singleton-container pattern relies on Ryuk to reap the container at JVM exit, and
+     * Ryuk cannot start on a Rancher Desktop host - which is why this machine sets
+     * {@code ryuk.container.disabled=true}. With Ryuk off the singleton left the suite worse (7
+     * failures rather than 1); with Ryuk forced on nothing runs locally at all. It needs an
+     * environment where it can actually be verified, so it is left as a known issue rather than
+     * shipped unvalidated.
+     *
+     * <p>The 30s stays, because the original 5s was independently too tight - the sweep runs on
+     * {@code fixedDelay = 1000L}, so it allowed five attempts. It does not weaken anything: these
+     * tests pin that a write reaches Kafka through the outbox at all, never that it does so within
+     * any particular number of seconds.
      */
     private static final Duration ASYNC_BUDGET = Duration.ofSeconds(30);
 
