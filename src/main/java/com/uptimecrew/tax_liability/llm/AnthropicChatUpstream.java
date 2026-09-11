@@ -39,7 +39,7 @@ import org.springframework.stereotype.Component;
  * the bare form, and {@link com.uptimecrew.tax_liability.llm.cost.PriceBook} is keyed to match.
  */
 @Component
-public class AnthropicChatUpstream {
+public class AnthropicChatUpstream implements ChatUpstream {
 
     private static final Logger LOG = LoggerFactory.getLogger(AnthropicChatUpstream.class);
 
@@ -74,6 +74,7 @@ public class AnthropicChatUpstream {
      * @throws IllegalArgumentException if either argument is blank
      * @throws IllegalStateException    if the provider call fails
      */
+    @Override
     public UpstreamResponse complete(String prompt, String modelId) {
         requireText(prompt, "prompt");
         requireText(modelId, "modelId");
