@@ -57,7 +57,27 @@ jobs:
     # keep this job simpler and faster.
     services:
       postgres:
-        image: postgres:16
+        # pgvector/pgvector:pg16, not postgres:16 - the same PostgreSQL 16 plus
+        # the `vector` extension. This job boots the real application image, so
+        # Flyway runs the full migration set against this service, and W6 D4's
+        # V5__create_taxpayer_embeddings.sql opens with
+        # `CREATE EXTENSION IF NOT EXISTS vector`. On a stock image that fails
+        # the smoke test at startup with:
+        #
+        #   ERROR: extension "vector" is not available
+        #   Could not open extension control file ".../vector.control"
+        #
+        # IF NOT EXISTS does not save it - that covers "already created", not
+        # "not installed on the server".
+        #
+        # THIRD place this had to change, which is the part worth remembering:
+        # the migration set runs everywhere the application starts, so the
+        # Testcontainers images (see TestImages), compose.yaml,
+        # manifests/05-dev-dependencies.yaml and this CI service all have to
+        # move together. Each of the first two was fixed believing it was the
+        # last one; this is a reminder to grep the whole repository for a
+        # database image rather than fixing the copy that is currently red.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: devpass
         ports:
