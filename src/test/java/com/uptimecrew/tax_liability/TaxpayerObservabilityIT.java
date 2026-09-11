@@ -49,6 +49,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.graphql.test.tester.GraphQlTester;
 import org.springframework.http.MediaType;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
@@ -94,6 +95,25 @@ import org.testcontainers.utility.DockerImageName;
 @AutoConfigureMockMvc
 @AutoConfigureGraphQlTester
 @ActiveProfiles("test")
+// @DirtiesContext: close this context when the class ends instead of leaving it in Spring's
+// test-context cache for the rest of the JVM.
+//
+// This class and TaxpayerEventFlowIT are the only two that own a Kafka container, and the only two that
+// have ever flaked in the full suite - each green alone, then failing once among 263. Not a
+// coincidence: they are also the only two whose context keeps BACKGROUND WORK running after the
+// class ends - a @KafkaListener container, and OutboxPublisher's @Scheduled(fixedDelay = 1000L)
+// sweep. JUnit's Testcontainers extension stops the @Container fields at afterAll; the cached
+// context does not stop with them, so the listener and the sweep go on hammering a broker and a
+// database that no longer exist, once a second, for every class that follows. The logs name it:
+// consumers retrying localhost:9092 - the default - long after the class that configured them.
+//
+// Not the singleton-container pattern, which fixes the same root cause more generally: that
+// needs Ryuk to reap at JVM exit, and Ryuk cannot start on this Rancher Desktop host (hence
+// ryuk.container.disabled=true here). Tried, and it left the suite at 7 failures rather than 1.
+// This needs no Ryuk, changes no container's lifetime, and is scoped to the two classes that
+// demonstrably cause the problem. The cost is one context rebuild; a cached context that keeps a
+// consumer alive against a dead broker is not an optimisation worth keeping.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class TaxpayerObservabilityIT {
 
     private static final String READ_SCOPE = "taxpayers.read";

@@ -27,6 +27,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
@@ -46,6 +47,25 @@ import org.testcontainers.utility.DockerImageName;
 @Testcontainers
 @SpringBootTest
 @ActiveProfiles("test")
+// @DirtiesContext: close this context when the class ends instead of leaving it in Spring's
+// test-context cache for the rest of the JVM.
+//
+// This class and TaxpayerObservabilityIT are the only two that own a Kafka container, and the only two that
+// have ever flaked in the full suite - each green alone, then failing once among 263. Not a
+// coincidence: they are also the only two whose context keeps BACKGROUND WORK running after the
+// class ends - a @KafkaListener container, and OutboxPublisher's @Scheduled(fixedDelay = 1000L)
+// sweep. JUnit's Testcontainers extension stops the @Container fields at afterAll; the cached
+// context does not stop with them, so the listener and the sweep go on hammering a broker and a
+// database that no longer exist, once a second, for every class that follows. The logs name it:
+// consumers retrying localhost:9092 - the default - long after the class that configured them.
+//
+// Not the singleton-container pattern, which fixes the same root cause more generally: that
+// needs Ryuk to reap at JVM exit, and Ryuk cannot start on this Rancher Desktop host (hence
+// ryuk.container.disabled=true here). Tried, and it left the suite at 7 failures rather than 1.
+// This needs no Ryuk, changes no container's lifetime, and is scoped to the two classes that
+// demonstrably cause the problem. The cost is one context rebuild; a cached context that keeps a
+// consumer alive against a dead broker is not an optimisation worth keeping.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class TaxpayerEventFlowIT {
 
     /**
@@ -62,7 +82,7 @@ class TaxpayerEventFlowIT {
      * response to almost any async failure, and that is exactly what makes it dangerous: it turns
      * a reproducible failure into an intermittent one and buys silence instead of information.
      *
-     * <h2>The actual cause, still unfixed</h2>
+     * <h2>The actual cause, now fixed at the class level</h2>
      *
      * <p>A per-class {@code @Container} is stopped when its class finishes, but Spring's
      * test-context cache does <em>not</em> close the context. The context lives on for the rest of
@@ -81,13 +101,17 @@ class TaxpayerEventFlowIT {
      * {@code V5__create_taxpayer_embeddings.sql}, see {@link TestImages}) added enough startup cost
      * and memory pressure to make a latent problem reproducible; it did not create it.
      *
-     * <p><b>The fix is a JVM-lifetime container, and it was attempted and reverted.</b> The
-     * standard singleton-container pattern relies on Ryuk to reap the container at JVM exit, and
-     * Ryuk cannot start on a Rancher Desktop host - which is why this machine sets
+     * <p><b>A JVM-lifetime container was the first attempt, and it was reverted.</b> The standard
+     * singleton-container pattern relies on Ryuk to reap the container at JVM exit, and Ryuk
+     * cannot start on a Rancher Desktop host - which is why this machine sets
      * {@code ryuk.container.disabled=true}. With Ryuk off the singleton left the suite worse (7
-     * failures rather than 1); with Ryuk forced on nothing runs locally at all. It needs an
-     * environment where it can actually be verified, so it is left as a known issue rather than
-     * shipped unvalidated.
+     * failures rather than 1); with Ryuk forced on nothing runs locally at all.
+     *
+     * <p><b>What actually fixed it is the {@code @DirtiesContext} on this class</b> (see the
+     * comment above the annotation). It attacks the same root cause from the other end: rather
+     * than making the container outlive every context, it stops the context when the container
+     * stops. No Ryuk, no change to any container's lifetime, and scoped to the two classes that
+     * demonstrably produce the zombies.
      *
      * <p>The 30s stays, because the original 5s was independently too tight - the sweep runs on
      * {@code fixedDelay = 1000L}, so it allowed five attempts. It does not weaken anything: these
