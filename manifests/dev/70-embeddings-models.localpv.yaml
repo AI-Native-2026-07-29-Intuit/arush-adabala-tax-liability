@@ -1,0 +1,54 @@
+# manifests/dev/70-embeddings-models.localpv.yaml
+#
+# LOCAL DEVELOPMENT ONLY - the storage half of the embeddings Deployment, for a k3d cluster.
+#
+# manifests/70-embeddings.deployment.yaml declares a PersistentVolumeClaim named
+# `embeddings-models` and says nothing about how it is satisfied, which is correct: in a real
+# cluster that is an EBS volume, a CSI driver, or whatever the platform provides. On k3d there is
+# no such platform, so this file provides the volume by hand - pointing at a host directory the
+# cluster was created with:
+#
+#   k3d cluster create taxcalc --volume "$HOME/tei-models:/tei-models@all"
+#
+# so `/tei-models` inside the node container is `~/tei-models` on the developer's machine, and
+# `/models/bge-large-en-v1.5` inside the pod is `~/tei-models/bge-large-en-v1.5`.
+#
+# WHY THE DEFAULT STORAGE CLASS HAS TO BE TURNED OFF FIRST
+#
+# k3s ships `local-path` as the DEFAULT StorageClass. A PVC that names no class gets the default
+# one stamped onto it by the admission plugin, is then dynamically provisioned, and binds to a
+# fresh EMPTY directory - never to the PersistentVolume below. The pod starts, the mount is empty,
+# and TEI dies naming a missing model file, which reads like a download problem rather than a
+# binding one. So:
+#
+#   kubectl patch storageclass local-path \
+#     -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+#
+# With no default class, the PVC's class stays empty and matches `storageClassName: ""` here.
+#
+# `claimRef` pins this volume to that one claim in that one namespace. Without it the volume is
+# available to any matching claim in the cluster, and a second PVC asking for 3Gi could bind to
+# the model files first - which would present as the embeddings pod hanging in Pending with no
+# obvious cause.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: embeddings-models-local
+  labels:
+    app: embeddings
+spec:
+  capacity:
+    # Matches the claim's request. The model tree is ~1.4GB; a hostPath volume does not enforce
+    # this number anyway - it is what the binding logic compares against.
+    storage: 3Gi
+  accessModes: [ReadWriteOnce]
+  # Retain, not Delete: deleting the claim must never delete the developer's model files. They are
+  # a 1.3GB download that the pod itself cannot re-fetch (see the manifest's proxy note).
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /tei-models
+    type: Directory
+  claimRef:
+    namespace: taxcalc-dev
+    name: embeddings-models

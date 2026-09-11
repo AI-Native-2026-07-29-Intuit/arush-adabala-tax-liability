@@ -11,7 +11,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * {@link TaxpayerEmbeddingRepository}'s vector-literal conversion and argument validation, without
  * a database (W6 D4 Task 3).
  *
- * <p>{@link TaxpayerEmbeddingsRepoIT} covers the SQL against real Postgres. What it cannot cover
+ * <p>{@link TaxpayerEmbeddingsRepoTest} covers the SQL against real Postgres. What it cannot cover
  * cheaply is the guard clauses - each needs a deliberately-wrong call - and the text conversion
  * both directions, which is where a rounding or formatting mistake would silently corrupt a stored
  * vector rather than fail.

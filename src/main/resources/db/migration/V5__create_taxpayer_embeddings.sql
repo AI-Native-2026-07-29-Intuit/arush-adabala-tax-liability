@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS taxcalc.taxpayer_embeddings (
 -- (cosine). A query written with `<->` (L2) or `<#>` (inner product) against this index does not
 -- fail and does not warn - the planner simply cannot use the index and falls back to a
 -- sequential scan over every row. The symptom is "the search got slow as the table grew", which
--- reads like a capacity problem and is actually a one-character mismatch. TaxpayerEmbeddingsRepoIT
+-- reads like a capacity problem and is actually a one-character mismatch. TaxpayerEmbeddingsRepoTest
 -- asserts `EXPLAIN` reports an Index Scan for exactly this reason.
 --
 -- m = 16, ef_construction = 64 are pgvector's defaults, stated explicitly rather than inherited:
