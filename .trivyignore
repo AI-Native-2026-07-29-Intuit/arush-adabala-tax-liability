@@ -28,6 +28,28 @@ CVE-2026-41254 exp:2026-09-27
 # pin in the Dockerfile instead of renewing this line.
 CVE-2026-56408 exp:2026-09-27
 
+# OS package (libexpat1, base image) - the SECOND libexpat CVE to land on this
+# waiver, added 2026-09-11 during W6 D4. Same package, same base image, same
+# reason as CVE-2026-56408 directly above, and re-confirmed rather than assumed:
+#
+#   docker buildx imagetools inspect gcr.io/distroless/java-base-debian12:nonroot
+#     -> Digest: sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c
+#
+# That is the exact digest the Dockerfile already pins, so there is still no
+# rebuilt base to move to; a local trivy scan of that base confirms it continues
+# to ship 2.5.0-1+deb12u2 while Debian's fix is in 2.5.0-1+deb12u3.
+#
+# Not a W6 D4 regression: nothing in that deliverable touches the Dockerfile,
+# netty, expat or Trivy config. main was last green on this scan on 2026-09-04
+# and would fail identically if re-run today - the vulnerability database moved,
+# the image did not.
+#
+# The CRITICAL that accompanied this one (CVE-2026-75595, netty-handler) was
+# NOT waived - it was fixed properly by bumping ext['netty.version'] to
+# 4.1.137.Final in build.gradle. A waiver is for what cannot be fixed today,
+# not for what is merely inconvenient to fix.
+CVE-2026-76957 exp:2026-09-27
+
 # commons-fileupload, commons-io
 CVE-2025-48976 exp:2026-09-27
 CVE-2024-47554 exp:2026-09-27

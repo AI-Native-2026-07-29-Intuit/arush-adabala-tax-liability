@@ -1,0 +1,177 @@
+# manifests/70-embeddings.deployment.yaml
+#
+# W6 D4 Task 3 prep: the self-hosted Hugging Face Text Embeddings Inference service.
+# bge-large-en-v1.5 -> 1024-dim vectors, matching the vector(1024) column that
+# V5__create_taxpayer_embeddings.sql creates.
+#
+# NO API KEY, NO AWS, NO THIRD PARTY. This is the one part of the AI stack whose
+# marginal cost per call is zero - it is compute the cluster already pays for. Worth
+# holding next to the Anthropic path in COST.md: same "AI feature" label, completely
+# different cost shape, and only the LLM plane needs per-request cost accounting. This
+# one needs capacity planning instead, which is what the resource block below is.
+#
+# ---------------------------------------------------------------------------
+# WHY THE MODEL IS MOUNTED RATHER THAN DOWNLOADED
+# ---------------------------------------------------------------------------
+# The reference manifest for this task passes `--model-id BAAI/bge-large-en-v1.5` and
+# lets TEI download the weights on first start. That does not work behind a
+# TLS-intercepting corporate proxy, and the failure is neither obvious nor fixable in
+# configuration:
+#
+#   1. TEI's downloader (hf-hub 0.3.2, compiled into the image) disables reqwest's own
+#      redirect following and re-implements it by passing the raw `Location` header to
+#      `client.get(...)`, which parses it as an ABSOLUTE url.
+#   2. huggingface.co answers a weights request with a redirect to its CDN. A proxy that
+#      MITMs that response can rewrite `Location` to a RELATIVE path.
+#   3. hf-hub then fails with `builder error: relative URL without a base`, having never
+#      fetched a byte.
+#
+# Confirmed by reading the shipped crate source; hf-hub 0.4.3 carries the identical code,
+# so bumping the image does not fix it. `HF_ENDPOINT` is not an escape hatch either - 0.3.2
+# hardcodes `https://huggingface.co` with no env override.
+#
+# The escape hatch that DOES work is in TEI itself (router/src/lib.rs:72): if `--model-id`
+# names an existing DIRECTORY, TEI loads from disk and never contacts the Hub at all. So the
+# model is fetched once, out of band, by whoever has working egress, and mounted here.
+# Verified end to end locally: `Ready`, and /embed returning 1024 floats, with zero
+# outbound requests from the container.
+#
+# That is also the better cluster design independent of any proxy: a 1.3GB download on
+# every pod start is a slow rollout and a hard dependency on huggingface.co being up.
+#
+# Populate the volume once (see README, "Running TEI behind a TLS-intercepting proxy"):
+#   B=https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main
+#   for f in config.json tokenizer.json tokenizer_config.json special_tokens_map.json \
+#            sentence_bert_config.json config_sentence_transformers.json vocab.txt; do
+#     curl -sL -o "$DEST/$f" "$B/$f"; done
+#   curl -sL -o "$DEST/1_Pooling/config.json" "$B/1_Pooling/config.json"
+#   curl -sL -o "$DEST/onnx/model.onnx"       "$B/onnx/model.onnx"
+#
+# onnx/model.onnx and NOT model.safetensors: the CPU build uses the ONNX Runtime backend.
+# With only safetensors present, TEI reaches `Starting model backend` and dies on
+# `File "/models/.../onnx/model.onnx" does not exist` - which reads like a packaging fault
+# rather than a wrong-artefact one.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: embeddings-models
+  namespace: taxcalc-dev
+  labels:
+    app: embeddings
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # ~1.4GB of model files; 3Gi leaves room for a second model during a swap.
+      storage: 3Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embeddings
+  namespace: taxcalc-dev
+  labels:
+    app: embeddings
+    # The four-key cost taxonomy, matching the AWS-plane tags in
+    # cfn/taxcalc-cost-dev.yaml. These are Kubernetes labels, not AWS cost-allocation
+    # tags - they attribute nothing on an AWS bill - but they keep one vocabulary across
+    # both planes so a per-feature question is asked the same way in either place.
+    service: taxcalc
+    env: dev
+    tenant: shared
+    feature: embeddings
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embeddings}
+  template:
+    metadata:
+      labels:
+        app: embeddings
+        service: taxcalc
+        env: dev
+        tenant: shared
+        feature: embeddings
+    spec:
+      containers:
+        - name: tei
+          # NOTE: linux/amd64 only - there is no arm64 build of this image at any tag
+          # (checked cpu-1.5, 1.5, cpu-1.6, cpu-1.7, cpu-latest). On an arm64 node it runs
+          # under emulation, which is why the probe timings below are generous.
+          image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
+          # A DIRECTORY, not a repo id - see the long note above. This is what makes the
+          # pod independent of huggingface.co and of the proxy in front of it.
+          args: ["--model-id", "/models/bge-large-en-v1.5"]
+          ports:
+            - {containerPort: 80, name: http}
+          volumeMounts:
+            - {name: models, mountPath: /models, readOnly: true}
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits:   {cpu: "2", memory: 4Gi}
+          # startupProbe, not a long-delayed readinessProbe: loading a 1.3GB ONNX graph
+          # takes ~60s natively and several minutes under emulation. A startupProbe lets
+          # that be slow WITHOUT also making the steady-state liveness check slow to
+          # notice a genuine hang - 30 x 10s of grace to boot, then steady checks forever.
+          #
+          # EVERY PROBE SETS timeoutSeconds EXPLICITLY, and that is the correction this
+          # block exists to record. The first version of this file omitted it, so all three
+          # probes inherited the default `timeoutSeconds: 1` - and the pod then restarted
+          # three times in two hours against a model that was serving correctly the whole
+          # time. The events name the cause exactly:
+          #
+          #   Liveness probe failed: Get "http://10.42.0.6:80/health":
+          #   context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+          #
+          # They fired DURING an /embed request. This image is amd64-only (there is no
+          # arm64 TEI build at any tag), so on an arm64 node it runs under emulation, one
+          # inference saturates the emulated CPU, and /health cannot answer inside one
+          # second. kubelet then killed a container whose only fault was being busy.
+          #
+          # That is a liveness probe causing the outage it exists to detect, and the failure
+          # mode is the inverse of the "green but dead" shape the rest of this deliverable
+          # documents: not a check that passes when it should fail, but one that fails when
+          # it should pass. Both come from a probe that measures the wrong thing.
+          #
+          # So the three probes are deliberately tuned to answer three different questions:
+          #   startup    "has it finished loading yet?"     - generous, 5 min of grace
+          #   readiness  "should it get traffic right now?"  - strict-ish; failing here is
+          #              CORRECT under load, it just drains the Service, it never kills
+          #   liveness   "is the process wedged?"            - slowest and most forgiving,
+          #              because the only correct reason to restart is a hang, and 90s of
+          #              silence distinguishes a hang from a busy CPU where 1s cannot.
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: embeddings-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embeddings
+  namespace: taxcalc-dev
+  labels:
+    app: embeddings
+    service: taxcalc
+    env: dev
+    tenant: shared
+    feature: embeddings
+spec:
+  selector: {app: embeddings}
+  ports:
+    - {port: 80, targetPort: http, name: http}

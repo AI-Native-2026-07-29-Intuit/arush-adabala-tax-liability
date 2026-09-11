@@ -323,10 +323,53 @@ application does not provide.
 | CVE | Package | Installed | Fixed in | Why waived | Re-evaluate |
 |---|---|---|---|---|---|
 | CVE-2026-56408 | libexpat1 (base image) | 2.5.0-1+deb12u2 | 2.5.0-1+deb12u3 | No rebuilt distroless image exists yet — `:nonroot` still resolves to the pinned digest. No app code path reaches expat. | 2026-09-27 |
+| CVE-2026-76957 | libexpat1 (base image) | 2.5.0-1+deb12u2 | 2.5.0-1+deb12u3 | Same package, same pinned base, same unavailable rebuild — re-confirmed 2026-09-11, see addendum below. | 2026-09-27 |
 
 On the expiry date, re-scan first: if a newer distroless digest carries deb12u3,
 bump the pin in the `Dockerfile` and delete the `.trivyignore` line rather than
 renewing it.
+
+## Trivy waiver addendum — 2026-09-11 (libexpat1 again, and a netty CRITICAL that was *not* waived)
+
+W6 D4's `build-scan-smoke` went red on two findings. **They were handled
+differently on purpose, and the difference is the point of this entry.**
+
+**Fixed, not waived: `CVE-2026-75595` (CRITICAL, `io.netty:netty-handler`).**
+`ext['netty.version']` moved `4.1.136.Final → 4.1.137.Final` in `build.gradle`.
+A patch release inside the same 4.1.x line, so unlike most of the waived Spring
+CVEs below it needs no Spring Boot minor/major bump — there was no reason to
+waive it, so it was not waived. netty is transitive here (webflux plus the
+Kafka/Mongo reactive drivers); the version override is the only place a fix can
+be applied, since nothing in this application depends on netty directly.
+
+**Waived: `CVE-2026-76957` (HIGH, `libexpat1`).** The second libexpat CVE to
+land on this waiver in nine days, and the ceiling is the same one
+`CVE-2026-56408` documents. Re-checked rather than inherited:
+
+```
+$ docker buildx imagetools inspect gcr.io/distroless/java-base-debian12:nonroot
+  Digest: sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c
+
+$ trivy image --severity HIGH,CRITICAL gcr.io/distroless/java-base-debian12:nonroot
+  libexpat1  CVE-2026-76957  HIGH  fixed  2.5.0-1+deb12u2  →  2.5.0-1+deb12u3
+```
+
+The resolved digest is **byte-identical to the one the `Dockerfile` already
+pins**, so "bump the base image" is not an available action — Google has still
+not published a rebuilt distroless image. The fix exists in Debian and cannot
+reach us until it does.
+
+**Neither finding came from W6 D4.** That deliverable touches no Dockerfile, no
+netty, no expat and no Trivy configuration; the netty pin predates the branch.
+`main` was last green on this scan on 2026-09-04 and would fail identically if
+re-run today. The vulnerability database moved; the image did not.
+
+**Two libexpat CVEs on one pinned base in nine days is itself the signal.** A
+waiver renewed twice is a waiver turning into a standing exception, which is
+what the `exp:` dates exist to prevent. If 2026-09-27 arrives with still no
+rebuilt distroless image, the honest options are to move off
+`java-base-debian12` or to accept the exposure explicitly — not to renew a third
+time by reflex.
 
 ## Trivy scan waiver — 2026-08-27
 

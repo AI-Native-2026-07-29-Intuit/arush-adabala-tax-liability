@@ -7,6 +7,7 @@ import java.util.UUID;
 
 import com.uptimecrew.tax_liability.clients.IdentityProfile;
 import com.uptimecrew.tax_liability.clients.IdentityService;
+import com.uptimecrew.tax_liability.llm.LiabilityExplanationService;
 import com.uptimecrew.tax_liability.readmodel.TaxpayerReadModel;
 import com.uptimecrew.tax_liability.service.TaxLiabilityService;
 import com.uptimecrew.tax_liability.service.TaxpayerLookupService;
@@ -15,6 +16,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+
+import jakarta.servlet.http.HttpServletResponse;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,13 +61,17 @@ public class TaxpayerController {
     private final TaxpayerLookupService lookupService;
     private final IdentityService identityService;
     private final IdempotencyService idempotency;
+    private final LiabilityExplanationService explanationService;
 
     public TaxpayerController(TaxLiabilityService service, TaxpayerLookupService lookupService,
-            IdentityService identityService, IdempotencyService idempotency) {
+            IdentityService identityService, IdempotencyService idempotency,
+            LiabilityExplanationService explanationService) {
         this.service = Objects.requireNonNull(service, "service must not be null");
         this.lookupService = Objects.requireNonNull(lookupService, "lookupService must not be null");
         this.identityService = Objects.requireNonNull(identityService, "identityService must not be null");
         this.idempotency = Objects.requireNonNull(idempotency, "idempotency must not be null");
+        this.explanationService =
+                Objects.requireNonNull(explanationService, "explanationService must not be null");
     }
 
     @GetMapping("/{id}")
@@ -104,6 +111,60 @@ public class TaxpayerController {
         TaxpayerReadModel created = service.findById(request.id())
                 .orElseThrow(() -> new IllegalStateException("just-created taxpayer not found: " + request.id()));
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
+    }
+
+    /**
+     * The {@code explain-liability} feature (W6 D4 Task 2) - the first endpoint here that spends
+     * real money per request.
+     *
+     * <p>Two things about it are load-bearing beyond the response body:
+     *
+     * <ul>
+     *   <li>It returns an {@code X-Cost-Usd} header carrying what this specific call cost, set by
+     *       {@link com.uptimecrew.tax_liability.llm.cost.CostMiddleware} from the provider's own
+     *       token counts. That header is what the W6 D5 k6 cost threshold reads, which is what
+     *       turns that threshold into a real gate rather than a load-test decoration.
+     *   <li>It sits behind {@link com.uptimecrew.tax_liability.security.RateLimitFilter} along
+     *       with {@link #summary}. Rate limiting an LLM endpoint is a cost control, not just an
+     *       abuse control - it bounds the worst case of a retry storm, which is the failure mode
+     *       most likely to produce a surprising Anthropic invoice.
+     * </ul>
+     *
+     * <p>The tenant billed is taken from the JWT's {@code tenant} claim, falling back to
+     * {@code shared}. It is deliberately NOT a request parameter: a caller-supplied tenant on a
+     * cost-attribution key lets any caller bill their spend to somebody else's line.
+     */
+    @PostMapping("/{id}/explanation")
+    @PreAuthorize(READ_AUTHORITY)
+    @Operation(summary = "Explain a taxpayer's liability in plain language",
+            description = "Calls the LLM (claude-haiku-4-5) via the cost-tracked provider boundary. "
+                    + "The response carries an X-Cost-Usd header with this call's cost in USD.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Explanation generated; X-Cost-Usd header set"),
+        @ApiResponse(responseCode = "401", description = "Missing or invalid JWT"),
+        @ApiResponse(responseCode = "403", description = "JWT present but lacks required scope or role"),
+        @ApiResponse(responseCode = "404", description = "No taxpayer with that id"),
+        @ApiResponse(responseCode = "429", description = "Rate limit exceeded - the LLM cost control")
+    })
+    public ResponseEntity<Map<String, Object>> explanation(@PathVariable String id,
+            @AuthenticationPrincipal Jwt jwt, HttpServletResponse response) {
+        String tenant = tenantOf(jwt);
+        LOG.info("explanation id={} subject={} tenant={}", id, jwt.getSubject(), tenant);
+        String explanation = explanationService.explain(id, tenant, response);
+        return ResponseEntity.ok(Map.of("id", id, "explanation", explanation));
+    }
+
+    /**
+     * Resolve the tenant to bill an LLM call to, from the JWT's {@code tenant} claim.
+     *
+     * <p>Falls back to {@code shared} rather than throwing: a missing claim should degrade the
+     * granularity of cost attribution, not fail a taxpayer's request. It must never return blank
+     * - {@link com.uptimecrew.tax_liability.llm.cost.CallContext} rejects a blank dimension value,
+     * because a blank one silently splits the CloudWatch cost series in two rather than failing.
+     */
+    private static String tenantOf(Jwt jwt) {
+        String claim = jwt.getClaimAsString("tenant");
+        return claim == null || claim.isBlank() ? "shared" : claim;
     }
 
     @PostMapping("/{id}/summary")

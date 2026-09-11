@@ -42,7 +42,12 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16
+          # pgvector/pgvector:pg16, not postgres:16 - same PostgreSQL 16 plus the
+          # `vector` extension that W6 D4's V5__create_taxpayer_embeddings.sql
+          # requires. Flyway runs the full migration set on every application
+          # start, so a stock image fails the pod at startup with
+          # `extension "vector" is not available`, not merely in tests.
+          image: pgvector/pgvector:pg16
           ports: [{ name: postgres, containerPort: 5432 }]
           env:
             - { name: POSTGRES_DB,       value: taxcalc_dev }

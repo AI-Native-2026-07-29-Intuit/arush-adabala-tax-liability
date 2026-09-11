@@ -2,6 +2,7 @@ package com.uptimecrew.tax_liability.security;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -22,9 +23,21 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Caps every authenticated caller at 10 requests/minute against the LLM-facing {@code /summary}
- * route: LLM tokens cost money, so a single misbehaving client must not be able to torch the
- * monthly budget. Buckets are keyed by JWT {@code sub} so each caller has its own budget, and the
+ * Caps every authenticated caller at 10 requests/minute against the LLM-facing routes
+ * ({@code /summary} and, from W6 D4, {@code /explanation}): LLM tokens cost money, so a single
+ * misbehaving client must not be able to torch the monthly budget.
+ *
+ * <p>W6 D4 note - this filter is a genuine cost control and not merely an abuse control, and
+ * {@code /explanation} is the route that makes the difference concrete. It is the first endpoint
+ * here that spends real money on every call, and the spend is invisible to every AWS guardrail
+ * the W6 D3 substrate carries, because Anthropic bills the Anthropic workspace rather than AWS.
+ * Between the Anthropic Console workspace spend limit (the hard cap) and
+ * {@link com.uptimecrew.tax_liability.llm.cost.CostLogger} (the attribution), this filter is the
+ * part that bounds the worst case <em>before</em> the money is spent - a retry storm against an
+ * LLM endpoint is the failure mode most likely to produce a surprising invoice, and a platform
+ * cap only stops it after the fact.
+ *
+ * <p>Buckets are keyed by JWT {@code sub} so each caller has its own budget, and the
  * filter is registered after {@link
  * org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter}
  * (see {@link SecurityConfig}) so the JWT principal is already resolved when the bucket lookup
@@ -43,13 +56,42 @@ public final class RateLimitFilter extends OncePerRequestFilter {
     private static final int STATUS_TOO_MANY_REQUESTS = 429;
     private static final String RETRY_AFTER_SECONDS = "60";
 
+    /**
+     * The route suffixes that reach a paid model. A route added to the application without being
+     * added here spends money outside this cap silently, so the list is kept next to the check
+     * rather than inlined into it - and {@code RateLimitFilterTest} asserts every entry is
+     * covered, so adding one without a test is a failure rather than an omission.
+     */
+    private static final List<String> LLM_ROUTE_SUFFIXES = List.of("/summary", "/explanation");
+
     private final ConcurrentMap<String, Bucket> bucketsBySubject = new ConcurrentHashMap<>();
+
+    /** Whether this URI reaches a paid model and must therefore be rate limited. */
+    /**
+     * The LLM proxy route (W6 D4 Task 2). Matched exactly rather than by suffix: it sits outside
+     * the {@code /api/} tree, and it is the one route whose entire purpose is to spend money, so
+     * leaving it off this list would leave the cheapest path to a surprising invoice unmetered.
+     */
+    private static final String LLM_PROXY_ROUTE = "/v1/completions";
+
+    static boolean isLlmRoute(String uri) {
+        if (uri == null) {
+            return false;
+        }
+        if (LLM_PROXY_ROUTE.equals(uri)) {
+            return true;
+        }
+        if (!uri.startsWith("/api/")) {
+            return false;
+        }
+        return LLM_ROUTE_SUFFIXES.stream().anyMatch(uri::endsWith);
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String uri = request.getRequestURI();
-        if (!uri.startsWith("/api/") || !uri.endsWith("/summary")) {
+        if (!isLlmRoute(uri)) {
             chain.doFilter(request, response);
             return;
         }

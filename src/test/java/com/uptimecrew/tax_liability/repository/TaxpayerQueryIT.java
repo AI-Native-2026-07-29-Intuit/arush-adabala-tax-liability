@@ -15,6 +15,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import com.uptimecrew.tax_liability.TestImages;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -32,7 +33,7 @@ class TaxpayerQueryIT {
     private static final Path MIGRATION_DIR = Path.of("src/main/resources/db/migration");
 
     @Container
-    private static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
+    private static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(TestImages.POSTGRES);
 
     @BeforeAll
     void applySchemaAndSeed() throws Exception {

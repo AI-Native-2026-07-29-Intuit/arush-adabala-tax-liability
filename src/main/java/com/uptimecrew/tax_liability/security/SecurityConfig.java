@@ -64,6 +64,12 @@ public class SecurityConfig {
                         // introspection endpoint, unauthenticated like the tooling entry points above.
                         .requestMatchers("/graphql", "/graphql/**", "/graphiql/**").permitAll()
                         .requestMatchers("/api/**").authenticated()
+                        // (2) The LLM proxy (W6 D4 Task 2) answers on /v1/completions rather than
+                        // under /api/**, because that is the address a proxy is expected to serve.
+                        // It needs its own matcher precisely because the fallthrough below is
+                        // denyAll - a new prefix is unreachable until it is named here, which is
+                        // the safe direction for that default to fail in.
+                        .requestMatchers("/v1/**").authenticated()
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(oauth2 -> oauth2
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter())))
