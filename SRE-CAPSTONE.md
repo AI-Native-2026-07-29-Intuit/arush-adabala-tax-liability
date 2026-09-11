@@ -18,8 +18,8 @@ deployed. Each half is labelled, and nothing below is claimed as verified unless
 | `k8s/taxcalc-api/kafka-bootstrap.job.yaml` | Wave-0 sync hook that creates the topic and seeds the group's committed offset, so a **fresh** deploy rests at `0/0` instead of the 1-replica invalid-offset state | Job `succeeded=1`; re-run takes the guard path (`already has committed offsets … nothing to seed`) |
 | `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server, `replicas: 0` | `kubectl get deploy taxcalc-api-worker` → scaled `0 → 7 → 0` during the spike |
 | `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml` | KEDA on `taxpayers.events` consumer-group lag, `lagThreshold: "10"`, scale-to-zero | `kubectl get scaledobject` → `READY=True`, `ACTIVE=True` under lag |
-| `k8s/taxcalc-api/taxcalc-api.hpa.yaml` + `k8s/taxcalc-api/prometheus-adapter-values.yaml` | SLO-derived HPA on `taxcalc_inflight_requests`, not CPU | `kubectl get hpa` → `28375m/6`, `SuccessfulRescale … New size: 10` |
-| `k8s/taxcalc-api/taxcalc-api.pdb.yaml` | Voluntary-disruption floor, `minAvailable: 2` | `kubectl get pdb taxcalc-api-pdb` → `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 0` |
+| `k8s/taxcalc-api/hpa.yaml` + `k8s/taxcalc-api/prometheus-adapter-values.yaml` | SLO-derived HPA on `taxcalc_inflight_requests`, not CPU | `kubectl get hpa taxcalc-api-hpa` → `Pods`/`AverageValue`/`taxcalc_inflight_requests`, target `6`, `2`–`20`, scaleUp `0s` / scaleDown `600s`; scaled `2 → 4 → 5` under 50 VUs (timeline below) |
+| `k8s/taxcalc-api/pdb.yaml` | Voluntary-disruption floor, `minAvailable: 2` | `kubectl get pdb taxcalc-api-pdb` → `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 0` |
 | `loadtests/taxcalc-api-p99.js` + `.github/workflows/load.yml` | k6 gate pinned to the W5 D5 SLO; `X-Cost-Usd` read as a real number | 214,030 requests, all five thresholds green (below) |
 
 > **Where these files live.** Paths are the W6 D5 brief's own —
@@ -226,6 +226,86 @@ LimitRange's `default: {cpu: 500m}` being stamped on admission. So every pod sil
 reports `2/10` forever, and the only trace is a ReplicaSet event nobody is watching. **An
 autoscaler's maximum is a request, not a guarantee; the quota is the answer.**
 
+> **Re-measured, and the first version of this finding was half the story.** Two things were
+> missing. First, the quota is not the *design* ceiling — it is an accidental one. The namespace's
+> deliberate, node-sized budget is `requests.cpu: 4` on a 4-CPU node; `limits.cpu: 8` bound long
+> before it, and the 500m each pod spends against it is a LimitRange default nobody chose
+> multiplied by a container that declares no limit. Two defaults, multiplied, produced the real
+> ceiling. Second, **the quota is not only an autoscaling ceiling — it wedges ordinary rollouts.**
+> With `limits.cpu` at `8/8`, a routine Argo CD-driven rolling update of `taxcalc-api` stalled at
+> 3 pods (2 old, 1 new) because the ReplicaSet could not create the replacement. Raising
+> `limits.cpu` would not grant capacity — 20 pods at `requests.cpu: 250m` is 5000m against 4000m
+> of node allocatable, so the surplus would sit `Pending` instead of being refused — but it would
+> move the refusal to the constraint someone actually chose. **The fix was authored and is
+> unapplied**; see "What is still open" at the end of this document.
+>
+> **And the two autoscalers contend for that one quota, which no earlier run surfaced.** The k6
+> gate's workload is 55% writes, every write emits to `taxpayers.events`, and KEDA scales the
+> worker on that topic's lag. So the load test that exists to exercise the api's HPA *also* drives
+> the worker from 0 to 12 — and those worker pods claim the same `limits.cpu` the api's new
+> replicas need. Measured during the 50-VU run below: the api HPA asked for 5, KEDA asked for 12,
+> and the namespace could satisfy neither. Two correct autoscalers, one budget, no arbitration
+> between them. A per-workload quota, or a priority class, is the real answer; a bigger number is
+> not.
+
+**4b. The 50-VU scale-up check, run as written, and it takes ~42s rather than ~30s.** The Task 2
+Done-When asks for "sustained ~50-VU load → HPA scales above `minReplicas` within ~30s". Run as an
+in-cluster k6 Job at exactly 50 VUs with `SLEEP=0` (no think time, so in-flight concurrency equals
+the VU count), sampling the HPA every 2s from a common `t0`:
+
+```
+   t+s  metric     desired  current  ready
+     0  0          2        2        2
+    27  5500m      2        2        2        # below the target of 6
+    42  9250m      4        2        2        # SuccessfulRescale: New size: 4
+    58  11500m     4        4        2
+    71  13         4        4        2
+   192  13875m     5        4        2        # SuccessfulRescale: New size: 5
+   208  12875m     5        5        2
+```
+
+**42 seconds, and the number is structural rather than sloppy.** Three lags stack before the HPA
+can act: the ServiceMonitor scrapes every **15s**, the Prometheus Adapter rule smooths with
+`avg_over_time(...[1m])`, and the HPA control loop runs every **15s**. The smoothing alone means a
+pod sitting at 25 in-flight only drags a 1-minute average across the target of 6 after ~15s of
+load. Hitting "~30s" is possible — shorten the rule to `[30s]` — and it is the wrong trade: that
+window exists so a single unlucky scrape cannot scale the Deployment, and the whole reason the
+metric is credible is that it is a saturation measure rather than a coin flip. **The deliverable's
+~30s assumes a metric pipeline with less smoothing than this one deliberately has.** The number
+recorded here is the one the design produces; it was not tuned until it looked nice.
+
+Two things this run also settled. **`http_req_duration` p99 is not the reason the gate never scales
+anything** — at the gate's own 0.5s think time, 50 VUs produce roughly 1.8 in-flight per pod
+against a target of 6, so the HPA correctly holds at `minReplicas`. That is the autoscaler being
+right, and it is why `SLEEP=0` is a separate mode rather than a fudge. And **`desired` reached 5
+while `ready` never left 2**, for the quota reasons in finding 4 above: the check passes in
+desired-replica terms and does not yet pass in running-pod terms.
+
+**4c. A dead certificate chain, an expired token, and two images that were not what they claimed.**
+Four things had to be fixed before the run above measured anything, and each failed quietly:
+
+- **The Prometheus Adapter was `OOMKilled` every ~8 minutes** on the `limits.memory: 256Mi` this
+  deliverable set by eye. It uses 240Mi at idle — it runs informers over every Pod and Namespace in
+  the cluster, so it is sized by the cluster, not by its one rule. While it is down,
+  `custom.metrics.k8s.io` has no backend and every HPA reading a custom metric reports `<unknown>`
+  and **holds its replica count**. Autoscaling stops silently on a 5–8 minute cycle; a healthy
+  `0/6` is a sample taken between kills. Now 256Mi requests / 768Mi limits.
+- **The loadtest JWTs had expired.** `TTL_SECONDS` defaults to 7200 and the tokens were three hours
+  old, so k6 drove **6,128 req/s of 401** — and `taxcalc_inflight_requests` correctly read ~0,
+  because a 401 rejected in the security filter is not in flight for any measurable time. The
+  autoscaler looked broken; the load was not real.
+- **The image the overlays name does not contain the gauge.** `overlays/*/kustomization.yaml` pin
+  `ghcr.io/…/taxcalc-api:9d3c9e8b…`, published seven days ago from `main` — *before* W6 D5 added
+  `InflightRequestsGauge`. `curl /actuator/prometheus | grep -c inflight` returns `0` against it.
+  Every W6 D5 measurement, this one included, ran on `uptimecrew/taxcalc-api:w6d5`, a **local build
+  that was never published**. See "What is still open".
+- **k3d's containerd garbage-collects side-loaded images the moment nothing references them**, so
+  `k3d image import` is not a one-time step; an image imported before a rollout can be gone by the
+  time the next pod needs it. Three separate `ImagePullBackOff` rounds traced to this, not to a
+  manifest error — and the node cannot re-pull, because this network intercepts TLS and containerd
+  trusts no interception CA (`x509: certificate signed by unknown authority` against ghcr.io,
+  docker.io and quay.io alike).
+
 **5. `public-key-location` does not beat `issuer-uri`, despite the auto-configuration's shape.**
 The three `JwtDecoder` configurations are each `@ConditionalOnMissingBean(JwtDecoder)` and
 public-key is declared first, which reads like it wins. It does not — with both set, the
@@ -292,9 +372,42 @@ Every service shipped in W7 is expected to pass all three before it is called pr
   a duplicate of the config repo's `k8s/taxcalc-api/`, and GITOPS.md already records that the migration
   direction is to delete it and point `k8s-ci.yml` at the config repo. Adding today's objects to a
   copy that is on its way out would deepen a drift that is already documented.
-- **Argo CD was not running on this cluster**, so today's manifests were applied with `kubectl`
-  from the config repo's own overlay rather than synced. The GitOps loop itself was proved in W6
-  D2; what is unproven today is specifically that these new objects sync cleanly through it.
+- **Argo CD now runs on this cluster and these objects were synced through it — and the first real
+  sync failed, for a reason `kubectl` could never have surfaced.** The AppProject's
+  `namespaceResourceWhitelist` did not list `batch/Job` or `keda.sh/ScaledObject`, the two kinds
+  **Task 1 itself added** to `k8s/taxcalc-api/`:
+
+  ```
+  ScaledObject taxcalc-worker-scaledobject SyncFailed
+    resource keda.sh:ScaledObject is not permitted in project taxcalc
+  Job          kafka-bootstrap             SyncFailed
+    resource batch:Job is not permitted in project taxcalc
+  ```
+
+  That is exactly the mistake the whitelist's own Ingress comment warns about — *"an allow-list has
+  to match the manifests it governs or the first sync fails"* — made in the same week the comment
+  was written. It survived because every W6 D5 manifest had been applied with `kubectl`, **which
+  consults no AppProject**: nothing in the loop had an opinion about the whitelist until a
+  controller did.
+
+  **The blast radius is the part to remember.** A denied resource fails the sync *operation*, not
+  just its own task, so the Application sat at `OutOfSync / Progressing` with `one or more
+  synchronization tasks are not valid`, retrying on backoff. The Deployment, the HPA and the PDB
+  were all legal and unchanged, and **none of them converged** — one missing whitelist line stopped
+  every resource in the Application. With `batch/Job` and `keda.sh/ScaledObject` added,
+  `HorizontalPodAutoscaler/taxcalc-api-hpa` and `PodDisruptionBudget/taxcalc-api-pdb` both report
+  `Synced / Healthy`.
+
+  **What is still not proven is the GitHub half of the loop, and it is blocked by the network, not
+  by the manifests.** `argocd-repo-server` cannot reach github.com here (`server certificate
+  verification failed` — the same TLS interception that stops containerd pulling images), and this
+  environment's push guard refuses pushes to github.com, so the branch under test is not on the
+  remote to be synced from. The sync above was therefore driven from a **bare mirror of this
+  branch served by a `git daemon` pod inside the cluster**, with the mirror URL added to the
+  AppProject's `sourceRepos` at runtime only. Everything about the sync — the project guardrails,
+  the sync waves, the prune and selfHeal policy, the `ignoreDifferences` on `spec.replicas` — is
+  the committed configuration; only the transport is local. Re-running it against the real
+  `repoURL` is a one-command exercise once the branch is pushed.
 - **One NodePool spanning Spot and On-Demand does not keep the api off Spot.** A Spot reclaim is an
   involuntary disruption and the PDB does not apply to it. Doing this properly needs a second,
   on-demand-only NodePool plus a nodeSelector or taint on the api Deployment.
@@ -305,3 +418,44 @@ Every service shipped in W7 is expected to pass all three before it is called pr
   leaves ~40% headroom against the 10/min per-subject limit on average, but `Math.random()`
   clusters, and a VU that draws the LLM branch several times in quick succession exceeds it. The
   run still passed every threshold; a burst-tolerant weight would be ~0.03.
+
+---
+
+## What is still open
+
+Two fixes are authored and **not applied**, and one is a hard dependency on another repository.
+Both block Task 2's Done-When from passing end to end, and neither is a manifest defect.
+
+**1. The image tag the overlays pin predates the gauge the HPA scales on.** `overlays/*` pin
+`ghcr.io/…/taxcalc-api:9d3c9e8b…`, the last image CI published from `main`. W6 D5 added
+`InflightRequestsGauge` on the `w6d5-implementation` branch of the *application* repo, which has
+not merged, so no published image contains it — verified directly against the pinned tag:
+
+```
+$ curl -s localhost:8080/actuator/prometheus | grep -c inflight
+0
+```
+
+Every W6 D5 measurement ran on `uptimecrew/taxcalc-api:w6d5`, a local build that was never pushed.
+The consequence is specific and it is not cosmetic: **an Argo CD sync of Git as it stands today
+deploys an api with no gauge, and `taxcalc-api-hpa` reads `<unknown>` and freezes at its current
+replica count.** The manifest half and the application half of Task 2 have never been verified
+together *from Git*.
+
+The fix is sequencing, not code: merge the application branch, let `_build-and-push.yml` publish,
+let `_bump-config.yml` open the tag-bump PR against the config repo. Until then the lab runs on a
+side-loaded image and that is stated wherever a number is claimed. Rebuilding locally is **not** an
+available shortcut here — `./gradlew bootJar` inside the Docker build cannot reach Maven Central
+through the TLS interception (`PKIX path building failed`).
+
+**2. The ResourceQuota fix is written and unapplied.** `platform/00-namespaces.yaml` raises
+`limits.cpu` from 8 to 16 and `pods` from 20 to 40, with the reasoning in finding 4: it removes an
+*accidental* ceiling (a LimitRange default times a container that declares no limit) so that the
+*intentional*, node-sized one (`requests.cpu: 4`) is what binds. Writing it was blocked by this
+environment's permission policy on platform-owned files, so it is described here rather than
+committed. It is a platform-team change by design — the AppProject blacklists `ResourceQuota` and
+`LimitRange` precisely so an app team cannot raise its own ceiling — so it wants that team's review
+regardless.
+
+Neither fix changes a conclusion above. Both are required before the Task 2 Done-When passes in
+running-pod terms rather than desired-replica terms.
