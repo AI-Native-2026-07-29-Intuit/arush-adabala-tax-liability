@@ -1,0 +1,109 @@
+# .github/workflows/load.yml
+#
+# W6 D5 Task 3: the k6 SLO gate. The k6 exit code IS the gate - a breached threshold fails this
+# check and, once it is a REQUIRED status check, blocks the merge before Argo CD can ever pull
+# the change. That ordering is the point: an SLO-breaching change is stopped at the pull request
+# rather than detected by an alert after it is live.
+#
+# WHY setup-k6-action AND NOT A HAND-ROLLED curl
+#
+# The obvious alternative is `curl -L https://github.com/grafana/k6/releases/download/...`. It
+# works, and it rots: the version is pinned in a URL nobody re-reads, the release asset naming
+# changes between majors, and a 404 from a moved asset surfaces as "k6: command not found" three
+# steps later. The official action resolves a version, verifies the download and puts k6 on PATH,
+# and it is itself pinned to @v1.
+name: load
+
+on:
+  pull_request:
+    paths:
+      # Deliberately narrow. This job holds 200 VUs for six minutes; running it on every README
+      # edit would add ~15 minutes to unrelated pull requests and teach everyone to ignore it.
+      - "loadtests/**"
+      - ".github/workflows/load.yml"
+      # The application code the thresholds actually measure. A change to the cost path or the
+      # in-flight gauge can move a threshold without touching the k6 script.
+      - "src/main/java/com/uptimecrew/tax_liability/llm/**"
+      - "src/main/java/com/uptimecrew/tax_liability/llmproxy/**"
+      - "src/main/java/com/uptimecrew/tax_liability/metrics/**"
+
+permissions:
+  contents: read
+
+jobs:
+  k6:
+    name: k6 SLO threshold gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25   # the run is ~12 minutes; this bounds a hung target rather than the test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+        with:
+          # Pinned to the version these thresholds were actually validated against locally, not
+          # to the v0.55 environment floor.
+          #
+          # The floor says "at least this"; pinning CI TO the floor would mean the gate runs an
+          # older k6 than the one the numbers were measured with, and k6 has changed threshold
+          # and summary handling across majors. Drift between "the version that produced the
+          # numbers" and "the version that enforces them" is the thing worth eliminating, and it
+          # is not the same thing as matching the floor.
+          k6-version: '2.2.0'
+
+      - name: Check the load-test target is configured
+        # Fail loudly and early. Without a target k6 falls back to the in-cluster Service DNS
+        # name, which does not resolve on a GitHub runner - the run then fails 12 minutes later
+        # with a wall of connection errors and a threshold breach, which reads like the service
+        # is down rather than like the workflow is unconfigured.
+        run: |
+          if [ -z "${{ vars.TAXCALC_API_TARGET }}" ]; then
+            echo "::error::repository variable TAXCALC_API_TARGET is not set."
+            echo "::error::Set it to the reachable dev endpoint, e.g. https://taxcalc.dev.example.internal"
+            exit 1
+          fi
+
+      - name: Mint load-test tokens
+        # Every route under test is authenticated and there is no IdP to get a token from - see
+        # scripts/loadtest-token.sh. Without this step k6 gets 401 on every request, which does
+        # not fail the latency threshold (401s are fast) but pins http_req_failed at 1.0 and
+        # leaves the cost Trend empty. The cost_samples threshold is what turns that into an
+        # explicit failure rather than a confusing one.
+        env:
+          LOADTEST_JWT_PRIVATE_KEY: ${{ secrets.LOADTEST_JWT_PRIVATE_KEY }}
+        run: |
+          if [ -z "${LOADTEST_JWT_PRIVATE_KEY}" ]; then
+            echo "::error::secret LOADTEST_JWT_PRIVATE_KEY is not set - see scripts/loadtest-token.sh"
+            exit 1
+          fi
+          mkdir -p .loadtest && chmod 700 .loadtest
+          printf '%s' "${LOADTEST_JWT_PRIVATE_KEY}" > .loadtest/private.pem
+          chmod 600 .loadtest/private.pem
+          # MINT_ONLY skips the kubectl step: the runner has no cluster credentials and does not
+          # need any - the public half is already mounted in the cluster.
+          MINT_ONLY=1 ./scripts/loadtest-token.sh
+
+      - name: Run k6 with SLO thresholds
+        run: |
+          k6 run --summary-export=k6-summary.json loadtests/taxcalc-api-p99.js
+        env:
+          TARGET: ${{ vars.TAXCALC_API_TARGET }}
+          TOKENS: .loadtest/tokens.json
+
+      - name: Upload k6 summary
+        # `if: always()` because the summary of a FAILED run is the one worth reading. Uploading
+        # only on success would discard exactly the artefact someone needs to see which threshold
+        # broke and by how much.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summary
+          path: k6-summary.json
+          retention-days: 14
+
+      - name: Redact the minted key material
+        # The private key is written to the workspace above. Runners are ephemeral, but the
+        # workspace is also what actions/upload-artifact globs from, and a future step added
+        # below this one with a broader path could sweep it into an artifact.
+        if: always()
+        run: rm -rf .loadtest

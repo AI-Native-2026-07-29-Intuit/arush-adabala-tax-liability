@@ -423,12 +423,23 @@ spring:
 #     spring.security.oauth2.resourceserver.jwt.issuer-uri at
 #     https://idp.example.internal/realms/uptimecrew, which is a placeholder - there is no IdP
 #     behind it and never has been, so no real token can be minted and every /api/** and /v1/**
-#     request a load generator sends is a 401. Boot's JwtDecoder auto-configuration prefers
-#     public-key-location over issuer-uri (both are @ConditionalOnMissingBean(JwtDecoder) and
-#     public-key comes first), so setting the key below is enough - issuer-uri is left in place
-#     and is simply not consulted. scripts/loadtest-token.sh generates the keypair, publishes the
-#     PUBLIC half into the taxcalc-loadtest-jwt Secret, and mints the token k6 carries. The
-#     private half never leaves the machine that ran the script and is never committed.
+#     request a load generator sends is a 401.
+#
+#     SETTING public-key-location IS NOT ENOUGH ON ITS OWN. issuer-uri must be cleared as well,
+#     and that is the opposite of what the auto-configuration's structure suggests: the three
+#     JwtDecoder configurations (jwk-set-uri, public-key-location, issuer-uri) are each
+#     @ConditionalOnMissingBean(JwtDecoder) and public-key-location is declared FIRST, which
+#     reads like it wins. It does not. With both properties set, the decoder built is the
+#     issuer-uri one, and the mounted key is silently ignored.
+#
+#     The failure is a flat 401 with a bare `WWW-Authenticate: Bearer` and nothing in the log -
+#     the decoder is lazy, so there is no startup error about an unreachable IdP either. Every
+#     visible signal says the token is bad: the key is mounted, the profile is active, the pod is
+#     healthy. Measured by clearing issuer-uri and watching the same token go from 401 to 200.
+#
+#     scripts/loadtest-token.sh generates the keypair, publishes the PUBLIC half into the
+#     taxcalc-loadtest-jwt Secret, and mints the tokens k6 carries. The private half never leaves
+#     the machine that ran the script and is never committed.
 #
 #  2. SyntheticChatUpstream replaces AnthropicChatUpstream. See that class for why a k6 gate
 #     cannot run against the live provider - the short version is 200 VUs for six minutes is
@@ -443,6 +454,11 @@ spring:
     oauth2:
       resourceserver:
         jwt:
+          # Cleared, not merely overridden. See the note above: with issuer-uri set, Boot
+          # builds the issuer-uri decoder and public-key-location below is ignored, producing a
+          # 401 that looks like a bad token. An empty value fails IssuerUriCondition's
+          # StringUtils.hasText check, which is what takes that configuration out of the running.
+          issuer-uri: ""
           # Mounted from the taxcalc-loadtest-jwt Secret. `file:` and not `classpath:`, so
           # rotating the key is a Secret change and a pod restart rather than an image rebuild.
           public-key-location: ${TAXCALC_LOADTEST_JWT_PUBLIC_KEY:file:/etc/taxcalc/loadtest/public.pem}
