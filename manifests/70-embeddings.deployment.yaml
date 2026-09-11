@@ -112,17 +112,49 @@ spec:
           # startupProbe, not a long-delayed readinessProbe: loading a 1.3GB ONNX graph
           # takes ~60s natively and several minutes under emulation. A startupProbe lets
           # that be slow WITHOUT also making the steady-state liveness check slow to
-          # notice a genuine hang - 30 x 10s of grace to boot, then 5s checks forever.
+          # notice a genuine hang - 30 x 10s of grace to boot, then steady checks forever.
+          #
+          # EVERY PROBE SETS timeoutSeconds EXPLICITLY, and that is the correction this
+          # block exists to record. The first version of this file omitted it, so all three
+          # probes inherited the default `timeoutSeconds: 1` - and the pod then restarted
+          # three times in two hours against a model that was serving correctly the whole
+          # time. The events name the cause exactly:
+          #
+          #   Liveness probe failed: Get "http://10.42.0.6:80/health":
+          #   context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+          #
+          # They fired DURING an /embed request. This image is amd64-only (there is no
+          # arm64 TEI build at any tag), so on an arm64 node it runs under emulation, one
+          # inference saturates the emulated CPU, and /health cannot answer inside one
+          # second. kubelet then killed a container whose only fault was being busy.
+          #
+          # That is a liveness probe causing the outage it exists to detect, and the failure
+          # mode is the inverse of the "green but dead" shape the rest of this deliverable
+          # documents: not a check that passes when it should fail, but one that fails when
+          # it should pass. Both come from a probe that measures the wrong thing.
+          #
+          # So the three probes are deliberately tuned to answer three different questions:
+          #   startup    "has it finished loading yet?"     - generous, 5 min of grace
+          #   readiness  "should it get traffic right now?"  - strict-ish; failing here is
+          #              CORRECT under load, it just drains the Service, it never kills
+          #   liveness   "is the process wedged?"            - slowest and most forgiving,
+          #              because the only correct reason to restart is a hang, and 90s of
+          #              silence distinguishes a hang from a busy CPU where 1s cannot.
           startupProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 30
           readinessProbe:
             httpGet: {path: /health, port: http}
-            periodSeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet: {path: /health, port: http}
-            periodSeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
       volumes:
         - name: models
           persistentVolumeClaim:
