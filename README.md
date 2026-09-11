@@ -1651,6 +1651,184 @@ reaches `Starting model backend` then dies naming a missing file), and on macOS 
 is silently **empty**, because `/tmp` is a symlink to `/private/tmp` that Docker does not resolve —
 which invalidated three of this session's test runs before it was spotted.
 
+## Week 6 Day 5 — Observability, Cost Management & Auto-Scaling
+
+W6 D4 measured what a request costs. This day makes the system react to load — and gates a pull
+request on whether it still meets the SLO while doing so. Two autoscalers on the k3d cluster
+(KEDA on Kafka lag, an HPA on a custom Prometheus metric), a k6 threshold gate wired into CI, and
+an AWS-native pack that is authored and defended rather than deployed. Full write-up in
+[`SRE-CAPSTONE.md`](SRE-CAPSTONE.md); the manifests live in the
+[config repo](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config).
+
+**The load-bearing change is not the autoscaler, it is one environment variable.** Lag is a
+property of a *consumer group*, not of a Deployment. `taxcalc-api` runs the same image as the
+worker, so the moment Task 1 deployed a real broker the api pods began consuming
+`taxcalc-read-model-builder` — draining the very lag KEDA scales the worker on. Two or three api
+replicas keep a dev-rate topic at zero lag however much is produced, and the worker never leaves
+`minReplicaCount: 0`. Nothing about that looks like a failure: the ScaledObject is `READY=True`,
+the trigger is valid, the broker is reachable, and the read model *is* being updated — by the
+wrong pods. It reads as "KEDA isn't working" and sends you to operator logs that are clean. It was
+invisible until today only because W5 D3 deliberately deployed no broker at all, just a `kafka`
+Service whose selector matched nothing so the bootstrap hostname would resolve.
+
+### Two autoscalers, both measured
+
+`scripts/w6d5-spike.sh` produced 60,000 synthetic `taxpayers.events` records and KEDA drove the
+worker `0 → 7 → 0`:
+
+```
+18:24:22  worker=1   active=False      # backlog staged, KEDA released
+18:24:47  worker=4   active=True       # first poll after release
+18:25:12  worker=7   active=True       # peak
+18:29:50  worker=7   active=False      # topic drained; cooldownPeriod (300s) begins
+18:30:15  worker=0   active=False      # scale-to-zero
+```
+
+The first spike proved nothing, and that is worth keeping. One replica drains 6,000 records in
+under 20 seconds while KEDA polls every 15s and a JVM pod needs ~40s to start — so the backlog was
+gone before a second replica could be justified, KEDA correctly declined to add one, and the run
+peaked at 1. **The autoscaler was right and the measurement never happened.** The script now pauses
+KEDA at zero, produces, then releases, and 60,000 is sized from the measured drain rate rather
+than picked.
+
+A second surprise on the way there: **an empty topic is not "no lag" to KEDA, it is an *invalid
+offset*.** A group that has never committed has nothing to subtract from, and the kafka scaler's
+default `scaleToZeroOnInvalidOffset: false` holds the Deployment at one replica rather than zero —
+the reasoning being that scaling to zero would mean nothing ever commits and the group could never
+recover. A freshly deployed worker therefore sits at 1 replica against an empty topic, which reads
+exactly like "KEDA thinks there is work when there is none".
+
+The HPA moved off CPU, because CPU is the wrong signal here and wrong in the direction that never
+fires: `taxcalc-api`'s slowest path is an outbound Anthropic call, and a pod serving one is parked
+in a socket read holding a request, a thread and a connection while burning almost no CPU. Under
+LLM-bound load p99 goes through the 500 ms objective while utilisation sits in the teens. It now
+scales on `taxcalc_inflight_requests`, a Micrometer gauge published by `InflightRequestsGauge` and
+routed through the Prometheus Adapter into the custom-metrics API. `averageValue: 6` is measured,
+not chosen — a single-replica saturation ramp holds p99 under 500 ms to about six concurrent
+requests and breaks above it.
+
+**The actuator scrape must not count itself**, and the cost of getting that wrong is not a rounding
+error. `/actuator/prometheus` is in flight at the exact moment it collects the gauge, so counting
+it puts a permanent floor of 1 under a metric whose job is to sit at 0 on an idle pod. Against a
+target of 6 that is a sixth of the scaling target reported as real load on a completely idle
+Deployment — holding replicas up that should come down, most visibly overnight. Verified on a live
+pod: `taxcalc_inflight_requests{app="taxcalc-api"} 0.0`.
+
+### The real scaling ceiling was the ResourceQuota
+
+The HPA scaled correctly and the pods never arrived:
+
+```
+Normal  SuccessfulRescale  New size: 10; reason: pods metric taxcalc_inflight_requests above target
+Warning FailedCreate       forbidden: exceeded quota: taxcalc-dev-quota,
+                           requested: limits.cpu=500m, used: limits.cpu=8, limited: limits.cpu=8
+```
+
+The Deployment sat at `2/10` and stayed there. **No container in this repo declares `limits.cpu`** —
+W5 D3 omitted it deliberately to avoid CFS throttling — so that 500m is the namespace LimitRange's
+`default: {cpu: 500m}` applied at admission, exactly as that manifest's W5 D3 note warned. Every
+pod silently spends 500m of an 8-CPU quota, the namespace tops out near sixteen pods across *all*
+workloads, and `maxReplicas: 20` is unreachable by a factor of five. The HPA reports success, the
+Deployment reports `2/10` forever, and the only trace is a ReplicaSet event nobody is watching.
+An autoscaler's maximum is a request, not a guarantee.
+
+### The k6 gate, and the two things that had to exist before it meant anything
+
+214,030 requests over 12 minutes from an in-cluster k6 Job at 200 VUs — all five thresholds green:
+
+```
+checks                ✓ 'rate>0.99'      rate=99.90%
+cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062
+cost_samples          ✓ 'count>0'        count=10609
+http_req_duration     ✓ 'p(99)<500'      p(99)=39.48ms
+http_req_failed       ✓ 'rate<0.005'     rate=0.04%
+```
+
+`X-Cost-Usd` already existed and was already correct from W6 D4 — `BigDecimal.toPlainString()`,
+not the reference implementation's `Double.toString`, which renders a ~$0.0002 Haiku call as
+`2.0E-4`. What was missing was everything around it:
+
+1. **The load test could not authenticate.** Every route worth testing is behind a JWT, and
+   `issuer-uri` points at `https://idp.example.internal` — a placeholder with nothing behind it.
+   That does not merely invalidate the numbers, it *inverts* them: 401s are fast, so p99 looks
+   superb, `http_req_failed` pins at 1.0, and the cost Trend stays empty because an unauthorised
+   request never reaches the cost path. The prettiest latency graph this repo can produce is the
+   one where nothing worked. `scripts/loadtest-token.sh` mints real RS256 tokens against a keypair
+   whose private half is gitignored and never leaves the machine.
+
+   **Setting `public-key-location` is not enough — `issuer-uri` must be cleared**, which is the
+   opposite of what the auto-configuration's structure suggests. The three `JwtDecoder`
+   configurations are each `@ConditionalOnMissingBean` and public-key is declared *first*, so it
+   reads like it wins. It does not: with both set, the issuer-uri decoder is built and the mounted
+   key is silently ignored. The symptom is a flat 401 with a bare `WWW-Authenticate: Bearer`, no
+   log line, and no startup error — the decoder is lazy — while the key is mounted, the profile is
+   active and the pod is healthy.
+
+2. **The cost path could not be load-tested at all.** 200 VUs for six minutes is ~100k paid
+   Anthropic completions per pull request, and a real completion's 1–3s latency makes p99 ≤ 500 ms
+   unreachable for reasons that say nothing about how `taxcalc-api` scales. `SyntheticChatUpstream`
+   enters through the same `ChatUpstream` seam, so the price book, the `BigDecimal` arithmetic, the
+   EMF log and the header are all production code — only the token counts are synthetic. The cost
+   figure above comes from 10,609 real header reads.
+
+`cost_samples: ['count>0']` is the gate on the gate: without it, a deployment that stopped emitting
+the header makes every sample `parseFloat(undefined || '0')` = 0, and `0 < 0.003` passes forever
+while being reported as a cost control.
+
+The workload mix weights sum to 1.0 and are **asserted, not renormalised**. The LLM slice's 0.05 is
+a ceiling forced by `RateLimitFilter`'s 10 requests/minute per JWT subject, not a preference: each
+VU issues ~120 requests/minute, so 0.05 is ~6/min per subject. At the obvious-looking 0.2 every VU
+would collect 429s and `http_req_failed` would blow through 0.005 — reading as "the service fell
+over under load" when it is the cost control working exactly as designed.
+
+### One image, two run modes
+
+The worker crash-looped on `required a bean of type 'JwtDecoder' that could not be found`. Boot's
+`OAuth2ResourceServerAutoConfiguration` is `@ConditionalOnWebApplication(SERVLET)` and correctly
+supplies nothing to a `web-application-type=none` process; `@EnableWebSecurity` carries no such
+condition, imports `WebSecurityConfiguration` anyway, and that demands the filter chain which needs
+the decoder. The error names `JwtDecoder`, never the run mode, and the api pods running the
+*identical image* are healthy at the time — so the natural first conclusion is a missing
+environment value rather than that a worker should not be building an HTTP filter chain at all.
+
+`TaxcalcWorker` refuses to start if its read-model listener is disabled, because the inverse
+mistake — one copy-pasted env block — produces a pod that joins the group, gets partitions, reports
+`Ready` and never commits an offset. Lag never falls, KEDA scales to `maxReplicaCount` and holds
+there, and every surface looks correct: the ScaledObject is `READY=True` and `ACTIVE=True`, the
+pods are `Running`, the generated HPA is at its ceiling "because there is work". The only symptom
+is a stale read model and a bill for twenty idle pods.
+
+### Authored and defended, never applied
+
+Four AWS-native files under `aws-authored/` in the config repo, each opening with why it cannot run
+on k3d: a Karpenter `NodePool`, an `AWS::XRay::SamplingRule`, an ADOT collector dual-exporting to
+Tempo and X-Ray, and the SQS form of the KEDA trigger. The three decisions worth defending:
+
+- **Karpenter's `limits` exist because of KEDA and the HPA.** A runaway asks for forty pods and
+  Karpenter will launch whatever that needs, because unbounded provisioning is its job. `limits` is
+  the only thing in the chain that says no. Stated rather than hidden: one NodePool spanning Spot
+  and On-Demand does **not** keep the api off Spot — a Spot reclaim is an *involuntary* disruption
+  and no PDB applies to it.
+- **`FixedRate: 0` is the X-Ray trap and it fails only when it matters.** The reservoir is an
+  absolute floor of 10 traces/second; `FixedRate` samples 5% above it. Zeroing the rate looks
+  disciplined and holds up under load, then fails in the quiet window — which is exactly when an
+  error spike is most diagnosable.
+- **`identityOwner: operator`.** With `workload`, `sqs:GetQueueAttributes` lands on the *worker
+  pod's* IRSA role: a permission the application never uses, carried by every replica, inherited by
+  anyone who reaches any worker pod. A credential belongs to the thing that makes the call, not the
+  thing the call is about.
+
+### Honest gaps
+
+**Argo CD was not running on this cluster**, so today's manifests were applied with `kubectl` from
+the config repo's own overlay rather than synced — the GitOps loop itself was proved in W6 D2, but
+that these specific objects sync cleanly through it is unproven. `manifests/` in this repo was
+deliberately **not** extended: GITOPS.md already records that the migration direction is to delete
+it in favour of the config repo's `base/`, and adding today's objects to a copy on its way out
+would deepen a documented drift. And **107 of 10,716 LLM requests (1%) hit the rate limiter** during
+the 12-minute run — `Math.random()` clusters, so a VU that draws the LLM branch several times in
+quick succession exceeds 10/min; a burst-tolerant weight would be ~0.03.
+
 ## Build and Test
 
 ```bash
@@ -1679,6 +1857,39 @@ mvn -B -ntp test                          # JUnit 5 + Mockito + AssertJ, no AWS 
 sam validate --lint --region us-east-1    # cfn-lint over the transformed template
 sam build --use-container                 # build inside the AWS Lambda java21 parity image
 sam local invoke TaxpayerLookupFunction --event events/get-taxpayer.json
+```
+
+```bash
+# W6 D5 - the two autoscalers, the load-test gate, and the integration spike.
+# All local: k3d + KEDA + the Prometheus Adapter. No cloud account, no spend.
+
+# Prerequisites, once per cluster (KEDA is free and installs in seconds; you own the cluster,
+# so you install it - this is a real deliverable step, not an assumption):
+helm repo add kedacore https://kedacore.github.io/charts && helm repo update
+helm install keda kedacore/keda --namespace keda --create-namespace --set image.pullPolicy=IfNotPresent
+helm install prom-adapter prometheus-community/prometheus-adapter --namespace monitoring \
+  -f ../arush-adabala-tax-liability-config/base/prometheus-adapter-values.yaml
+
+# Mint the load-test JWTs and publish the public key into the cluster. The private half stays
+# in ./.loadtest (gitignored) and never leaves this machine.
+scripts/loadtest-token.sh
+
+# Drive KEDA 0 -> N -> 0 on real consumer-group lag. Stages the backlog first - see the script
+# for why producing without pausing measures nothing.
+scripts/w6d5-spike.sh
+kubectl -n taxcalc-dev get scaledobject taxcalc-worker-scaledobject -w
+kubectl -n taxcalc-dev get deploy taxcalc-api-worker -w
+
+# The SLO gate. Thresholds are pinned to the W5 D5 SLO; the k6 exit code is the gate.
+k6 run -e TARGET=http://localhost:8080 -e TOKENS="$PWD/.loadtest/tokens.json" \
+  loadtests/taxcalc-api-p99.js
+
+# Saturation probe: no think time, so in-flight concurrency equals the VU count. This is how
+# the HPA's averageValue: 6 was derived, and the only way to drive the metric on demand -
+# at the gate's own settings the service is too fast to saturate and the HPA correctly
+# holds at minReplicas.
+k6 run -e SLEEP=0 -s 30s:60 -s 150s:60 -e TARGET=... -e TOKENS=... loadtests/taxcalc-api-p99.js
+kubectl -n taxcalc-dev get hpa taxcalc-api -w
 ```
 
 ```bash
