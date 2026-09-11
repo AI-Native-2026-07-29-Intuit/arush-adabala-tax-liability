@@ -70,7 +70,15 @@ sourceSets {
 // 10.1.58 is a 404, so Gradle resolves it as FAILED). 10.1.59 supersedes it and carries the
 // same fixes. Do not "correct" this to 10.1.58 to match the advisory - it will not resolve.
 ext['tomcat.version'] = '10.1.59'
-ext['netty.version'] = '4.1.136.Final'
+// 4.1.137.Final, bumped from 4.1.136.Final on 2026-09-11 to close CVE-2026-75595
+// (CRITICAL, netty-handler). A patch release inside the same 4.1.x line, so it needs
+// no Spring Boot bump - unlike most of the waived CVEs in .trivyignore, which do.
+//
+// This override exists at all because Spring Boot 3.3's BOM pins an older netty, and
+// a transitive pin is the only place a fix like this can be applied: netty is not a
+// direct dependency of this application, and nothing here calls it. It arrives under
+// spring-boot-starter-webflux and the Kafka/Mongo reactive drivers.
+ext['netty.version'] = '4.1.137.Final'
 ext['jackson-bom.version'] = '2.18.8'
 
 // Pin the Spring Cloud release train (compatible with Spring Boot 3.3 / Java 21).
@@ -247,6 +255,36 @@ test {
         showStandardStreams = true
     }
     finalizedBy jacocoTestReport
+}
+
+// W6 D4 Task 3: `./gradlew integrationTest` runs only the container-backed tests - the ones
+// tagged `integration`, which today is TaxpayerEmbeddingsRepoTest.
+//
+// It is a FILTER over the same test source set, not a second source set with its own directory.
+// A separate sourceSet would need its own configurations, its own compile task and its own copy
+// of the shared helpers (TestImages, the builders), and would then hide those tests from every
+// IDE and CI job that runs `test` - which is how a suite quietly stops running. Here, `test`
+// still runs everything (so the JaCoCo floor still measures a full run, and CI needs no change),
+// and this task exists so the container tests can be run alone while working on them:
+//
+//   ./gradlew integrationTest --tests '*TaxpayerEmbeddingsRepoTest'
+//
+// Deliberately NOT wired into `check`: `check` already runs these through `test`, and adding it
+// would run every container test twice per build.
+tasks.register('integrationTest', Test) {
+    description = 'Runs the container-backed tests (JUnit tag: integration).'
+    group = 'verification'
+
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+
+    useJUnitPlatform {
+        includeTags 'integration'
+    }
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        showStandardStreams = true
+    }
 }
 
 jacocoTestReport {
