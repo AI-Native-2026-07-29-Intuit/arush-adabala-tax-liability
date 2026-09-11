@@ -1782,11 +1782,15 @@ one rule — and while it is down every custom-metric HPA reads `<unknown>` and 
 count, so autoscaling stops with no alert and a healthy `0/6` is just a sample taken between kills.
 **The loadtest JWTs had expired** (2h TTL, 3h old), so k6 drove 6,128 req/s of 401 while the gauge
 correctly read ~0 — the load was not real and the autoscaler looked broken. **And the image tag the
-overlays pin does not contain the gauge at all**: `ghcr.io/…:9d3c9e8b…` was published before W6 D5
-added `InflightRequestsGauge`, `grep -c inflight` against its `/actuator/prometheus` returns `0`,
-and every W6 D5 measurement has in fact run on a **local build that was never published**. Syncing
-Git as it stands deploys an api with no gauge and an HPA stuck at `<unknown>`; the fix is to merge
-this branch so CI publishes and `_bump-config.yml` bumps the tag. See `SRE-CAPSTONE.md`.
+overlays pinned did not contain the gauge at all**: `ghcr.io/…:9d3c9e8b…` was published before W6 D5
+added `InflightRequestsGauge`, and `grep -c inflight` against its `/actuator/prometheus` returns
+`0` — so every W6 D5 measurement had in fact run on a **local build that was never published**, and
+the first two Done-When checks were passing only because a quota-wedged rollout had left two of
+those pods alive. Resolved by building from HEAD, verifying `InflightRequestsGauge.class` is in the
+image, publishing it as `w6d5-local-acef557` (the `-local-` infix is deliberate: arm64 where CI
+publishes amd64, and built with the corporate TLS-interception CA injected into the Gradle stage),
+and pinning it. Argo CD now reports `Synced / Healthy` with both pods on the Git-specified image.
+`_bump-config.yml` overwrites the tag on merge. See `SRE-CAPSTONE.md`.
 
 ### The k6 gate, and the two things that had to exist before it meant anything
 

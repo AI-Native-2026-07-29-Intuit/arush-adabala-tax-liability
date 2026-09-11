@@ -294,11 +294,12 @@ Four things had to be fixed before the run above measured anything, and each fai
   old, so k6 drove **6,128 req/s of 401** — and `taxcalc_inflight_requests` correctly read ~0,
   because a 401 rejected in the security filter is not in flight for any measurable time. The
   autoscaler looked broken; the load was not real.
-- **The image the overlays name does not contain the gauge.** `overlays/*/kustomization.yaml` pin
-  `ghcr.io/…/taxcalc-api:9d3c9e8b…`, published seven days ago from `main` — *before* W6 D5 added
-  `InflightRequestsGauge`. `curl /actuator/prometheus | grep -c inflight` returns `0` against it.
-  Every W6 D5 measurement, this one included, ran on `uptimecrew/taxcalc-api:w6d5`, a **local build
-  that was never published**. See "What is still open".
+- **The image the overlays named did not contain the gauge.** `overlays/*/kustomization.yaml` pinned
+  `ghcr.io/…/taxcalc-api:9d3c9e8b…`, published from `main` *before* W6 D5 added
+  `InflightRequestsGauge`; `curl /actuator/prometheus | grep -c inflight` returns `0` against it.
+  Every measurement above ran on `uptimecrew/taxcalc-api:w6d5`, a **local build that was never
+  published**. Since resolved by building, publishing and pinning `w6d5-local-acef557` — see
+  "What is still open".
 - **k3d's containerd garbage-collects side-loaded images the moment nothing references them**, so
   `k3d image import` is not a one-time step; an image imported before a rollout can be gone by the
   time the next pod needs it. Three separate `ImagePullBackOff` rounds traced to this, not to a
@@ -426,27 +427,59 @@ Every service shipped in W7 is expected to pass all three before it is called pr
 Two fixes are authored and **not applied**, and one is a hard dependency on another repository.
 Both block Task 2's Done-When from passing end to end, and neither is a manifest defect.
 
-**1. The image tag the overlays pin predates the gauge the HPA scales on.** `overlays/*` pin
-`ghcr.io/…/taxcalc-api:9d3c9e8b…`, the last image CI published from `main`. W6 D5 added
-`InflightRequestsGauge` on the `w6d5-implementation` branch of the *application* repo, which has
-not merged, so no published image contains it — verified directly against the pinned tag:
+**1. ~~The image tag the overlays pin predates the gauge the HPA scales on.~~ RESOLVED — and the
+resolution is itself a deviation worth reading.** The overlays pinned
+`ghcr.io/…/taxcalc-api:9d3c9e8b…`, CI's last publish from `main`, which predates
+`InflightRequestsGauge` entirely — verified against the tag rather than assumed:
 
 ```
 $ curl -s localhost:8080/actuator/prometheus | grep -c inflight
 0
 ```
 
-Every W6 D5 measurement ran on `uptimecrew/taxcalc-api:w6d5`, a local build that was never pushed.
-The consequence is specific and it is not cosmetic: **an Argo CD sync of Git as it stands today
-deploys an api with no gauge, and `taxcalc-api-hpa` reads `<unknown>` and freezes at its current
-replica count.** The manifest half and the application half of Task 2 have never been verified
-together *from Git*.
+That made Task 2's first two Done-When checks pass **by accident**: the HPA read `0/6` only because
+two pods from a local, never-published build happened to still be running behind a rollout that the
+ResourceQuota had wedged. A clean sync deployed an api with no gauge, and an HPA whose metric is
+unreadable does not fail or alert — **it holds its replica count**. The manifest half and the
+application half of Task 2 had never been true at the same time *from Git*.
 
-The fix is sequencing, not code: merge the application branch, let `_build-and-push.yml` publish,
-let `_bump-config.yml` open the tag-bump PR against the config repo. Until then the lab runs on a
-side-loaded image and that is stated wherever a number is claimed. Rebuilding locally is **not** an
-available shortcut here — `./gradlew bootJar` inside the Docker build cannot reach Maven Central
-through the TLS interception (`PKIX path building failed`).
+No published image could fix it: the newest (`5806c4ec` / `main`) is the W6 D4 merge, and CI never
+published the W6 D5 branch. So `w6d5-local-acef557` was built from application-repo commit
+`acef557`, verified to contain `InflightRequestsGauge.class`, pushed to GHCR by hand, and pinned in
+`overlays/dev` and `overlays/loadtest`.
+
+**The `-local-` infix is deliberate and is the honest part.** This image is `linux/arm64` where CI
+publishes `amd64`, and its Gradle stage needed the corporate TLS-interception CA injected into the
+JVM truststore to reach Maven Central at all (`PKIX path building failed` without it — Java does
+not use the OS bundle). Tagging it with the bare commit SHA would have left an artefact in the
+registry that looks exactly like a CI build and is not one. The exit path needs nobody to remember
+this: merging the application branch makes `_build-and-push.yml` publish a real image and
+`_bump-config.yml` rewrite the tag, overwriting the exception.
+
+**Verified end to end through Argo CD afterwards**, on a completed rollout rather than a wedged one:
+
+```
+$ kubectl -n argocd get application taxcalc-api-dev -o jsonpath='{.status.sync.status}/{.status.health.status}'
+Synced/Healthy
+$ kubectl -n taxcalc-dev get hpa taxcalc-api-hpa
+NAME              REFERENCE                TARGETS   MINPODS   MAXPODS   REPLICAS
+taxcalc-api-hpa   Deployment/taxcalc-api   0/6       2         20        2
+$ kubectl get --raw ".../pods/*/taxcalc_inflight_requests"   # both pods, both on the Git image
+taxcalc-api-6cd988664-flj76 = 0
+taxcalc-api-6cd988664-mdbc2 = 0
+```
+
+**Two Argo CD blockers surfaced on the way, and the second is the more interesting.** The
+side-loaded image was garbage-collected by containerd four separate times — `k3d image import` is
+not a one-time step on a cluster whose nodes cannot re-pull. And **the Application was stuck
+retrying a three-commit-old revision forever**, because this cluster runs no ingress controller, so
+the Ingress never receives `.status.loadBalancer.ingress`, so Argo CD's built-in Ingress health
+check reported `Progressing` permanently. Health gates the sync wave: no operation ever reached
+`Succeeded`, `syncPolicy.automated` retried the same revision on backoff, and newer commits were
+never looked at. **An Application can be pinned to stale desired state by the health of a resource
+nobody changed, and `OutOfSync` is the only symptom.** Resolved with an existence-only Ingress
+health customisation in `argocd-cm` — correct for a cluster with no LB, and wrong on a real one,
+where an unassigned address is a genuine failure worth blocking on.
 
 **2. The ResourceQuota fix is written and unapplied.** `platform/00-namespaces.yaml` raises
 `limits.cpu` from 8 to 16 and `pods` from 20 to 40, with the reasoning in finding 4: it removes an
@@ -457,5 +490,21 @@ committed. It is a platform-team change by design — the AppProject blacklists 
 `LimitRange` precisely so an app team cannot raise its own ceiling — so it wants that team's review
 regardless.
 
-Neither fix changes a conclusion above. Both are required before the Task 2 Done-When passes in
-running-pod terms rather than desired-replica terms.
+### Where Task 2's four Done-When checks actually stand
+
+| # | Check | Status |
+|---|---|---|
+| 1 | `get hpa taxcalc-api-hpa` → `AverageValue` on `taxcalc_inflight_requests`, target 6, not `<unknown>` | **Met.** On the Git-pinned image, on a completed rollout, with the Application `Synced / Healthy` |
+| 2 | `get --raw .../pods/*/taxcalc_inflight_requests` returns a value | **Met.** Both pods report, and both are the pods Git specifies |
+| 3 | `get pdb taxcalc-api-pdb` → `minAvailable: 2`, `ALLOWED DISRUPTIONS ≥ 0` | **Met.** `2` / `0` |
+| 4 | ~50-VU sustained load → HPA scales above `minReplicas` within ~30s | **Partially met.** Scales, at **t+42s** not ~30s, and in desired-replica terms only |
+
+Checks 1 and 2 were previously passing *by accident* — see item 1 above — and now pass
+deliberately and reproducibly from Git.
+
+Check 4 has two independent gaps and neither is a manifest defect. The **timing** is structural:
+15s scrape + `avg_over_time[1m]` + 15s control loop, and buying the last 12 seconds means
+shortening the smoothing that stops one unlucky scrape from moving the Deployment — a worse trade
+than missing the number. The **running-pod** half needs the quota fix in item 2, because the api's
+HPA and KEDA's ScaledObject contend for one `limits.cpu` budget under exactly the workload the
+check prescribes.
