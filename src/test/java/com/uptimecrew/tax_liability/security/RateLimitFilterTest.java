@@ -21,6 +21,8 @@ class RateLimitFilterTest {
     @ValueSource(strings = {
         "/api/v1/taxpayers/txp-1/summary",
         "/api/v1/taxpayers/txp-1/explanation",
+        // W6 D4 Task 2: the LLM proxy, which lives outside /api/ and so is matched by its own rule.
+        "/v1/completions",
     })
     void everyPaidRouteIsRateLimited(String uri) {
         assertThat(RateLimitFilter.isLlmRoute(uri)).isTrue();

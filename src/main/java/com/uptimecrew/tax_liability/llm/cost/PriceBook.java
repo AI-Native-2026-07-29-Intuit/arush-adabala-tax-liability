@@ -8,8 +8,9 @@ import java.util.Set;
 /**
  * {@code modelId} to USD price per 1,000 tokens (W6 D4 Task 2).
  *
- * <p><b>Model ids here are BARE</b> - {@code claude-haiku-4-5}, not {@code anthropic.claude-...}
- * and not {@code ...-v1:0}. Those two decorations belong to Bedrock's model-id namespace; the
+ * <p><b>Model ids here are BARE</b> - {@code claude-haiku-4-5}, carrying neither a vendor-prefixed
+ * spelling nor a {@code ...-v1:0} suffix. Those two decorations belong to a managed inference
+ * gateway's model-id namespace (the CI grep gate for this package rejects either spelling); the
  * direct Anthropic API uses the bare form, and a lookup keyed on the decorated spelling misses
  * and throws rather than silently costing zero - which is the failure mode this class is arranged
  * to avoid.

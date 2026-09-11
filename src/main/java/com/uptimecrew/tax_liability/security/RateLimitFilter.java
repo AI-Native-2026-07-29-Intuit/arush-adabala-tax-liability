@@ -67,8 +67,21 @@ public final class RateLimitFilter extends OncePerRequestFilter {
     private final ConcurrentMap<String, Bucket> bucketsBySubject = new ConcurrentHashMap<>();
 
     /** Whether this URI reaches a paid model and must therefore be rate limited. */
+    /**
+     * The LLM proxy route (W6 D4 Task 2). Matched exactly rather than by suffix: it sits outside
+     * the {@code /api/} tree, and it is the one route whose entire purpose is to spend money, so
+     * leaving it off this list would leave the cheapest path to a surprising invoice unmetered.
+     */
+    private static final String LLM_PROXY_ROUTE = "/v1/completions";
+
     static boolean isLlmRoute(String uri) {
-        if (uri == null || !uri.startsWith("/api/")) {
+        if (uri == null) {
+            return false;
+        }
+        if (LLM_PROXY_ROUTE.equals(uri)) {
+            return true;
+        }
+        if (!uri.startsWith("/api/")) {
             return false;
         }
         return LLM_ROUTE_SUFFIXES.stream().anyMatch(uri::endsWith);
