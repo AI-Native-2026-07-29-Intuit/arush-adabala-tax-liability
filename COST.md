@@ -170,6 +170,24 @@ model=claude-haiku-4-5  resolved=claude-haiku-4-5-20251001
 in=12  out=4  X-Cost-Usd=0.00005
 ```
 
+### The two ways in
+
+Two routes spend Anthropic tokens, and both funnel through the same `CostMiddleware`:
+
+| Route | What it is |
+|---|---|
+| `POST /api/v1/taxpayers/{id}/explanation` | the product feature — builds its own prompt from the liability read model |
+| `POST /v1/completions` | the proxy boundary itself — any caller buys a completion and is accounted for identically |
+
+The proxy route takes `prompt`, optional `model` (defaults to `claude-haiku-4-5`) and `feature`
+in the body; `tenant` comes from the verified JWT claim and is deliberately **not** a body field,
+since a caller-supplied tenant on a cost key is a caller who can bill their spend to someone
+else's line. An unpriceable model id is rejected **before** the upstream call, so a bad request
+costs nothing rather than producing a 500 for tokens already bought.
+
+One middleware, not two, is the point: a second cost path is how a cost model ends up wrong — the
+newer one gets the fix, the older one quietly under-reports, and they only disagree on the invoice.
+
 ### How it is attributed
 
 `CostMiddleware` wraps every call and emits one CloudWatch **Embedded Metric Format** line per
@@ -207,7 +225,7 @@ against the live API, not inferred.
 | Control | Where | What it actually does |
 |---|---|---|
 | Anthropic Console **workspace spend limit** | the platform | the hard cap. Enforced by the party doing the billing; survives this app being scaled to N replicas |
-| `RateLimitFilter` (10 req/min/subject on `/summary`, `/explanation`) | the app | bounds the worst case **before** the money is spent — a retry storm is the failure most likely to produce a surprising invoice |
+| `RateLimitFilter` (10 req/min/subject on `/summary`, `/explanation`, `/v1/completions`) | the app | bounds the worst case **before** the money is spent — a retry storm is the failure most likely to produce a surprising invoice |
 | `CostLogger` + `X-Cost-Usd` | the app | attribution only. Records; does not prevent |
 
 There is deliberately **no in-app kill switch and no Redis counter.** That would be per-replica
@@ -355,16 +373,201 @@ check 5 asserts from the templates that every billable resource carries all four
 *input* to a tag-scoped report is verified even though the report itself is not.
 
 Likewise `aws resourcegroupstaggingapi get-resources --tag-filters Key=service,Values=taxcalc`
-returns an empty list here — partly the gap above, and partly because
-`cfn/taxcalc-network-dev.yaml` does not currently deploy on this floci at all: it rolls back with
+returned an empty list here — partly the gap above, and partly because
+`cfn/taxcalc-network-dev.yaml` did not deploy on this floci at all: it rolled back with
 `A security group rule must specify exactly one of CidrIp, CidrIpv6, a prefix list, or a security
 group` on `TaxcalcAppSecurityGroup`. **That is a pre-existing W6 D3 issue, not a W6 D4
 regression** — confirmed by an A/B: the template as it stood *before* this deliverable's tag edits
 fails identically, and the W6 D4 diff to that file is tag lines only.
 
-**Summary of what each Done-When is worth:** the alarm and the stack creation are genuinely
-verified; the Budget's existence, the topic policy and the tag-scoped Cost Explorer view are not,
-and are labelled that way rather than counted as passes.
+That rollback is now diagnosed and worked around; see the next section.
+
+---
+
+## Closing the Done-Whens on floci — four workarounds, and what each is worth
+
+All four acceptance commands now answer, and **two of the four answers are worth materially less
+than a pass.** `scripts/cost-done-when.sh` (config repo) runs all four and prints one of three
+verdicts per check — `PASS`, `SHIM`, `GAP` — rather than an exit status, because the raw commands
+produce **one false pass and one false failure** on this engine and reading their exit codes
+would launder both.
+
+```
+1  describe-stacks taxcalc-cost-dev            PASS  (qualified)
+2  budgets describe-budget                     SHIM  projected from the template
+3  describe-alarms                             PASS
+4  get-resources Key=service,Values=taxcalc    SHIM  real tags, stood-in index
+```
+
+### 1. `cfn-resolve-if.rb` — why the network stack rolled back
+
+The failure is **not** in the security group. floci does not evaluate `Fn::If` when it appears as
+an **element of a list** rather than as the value of a property. Isolated with a two-resource
+probe stack:
+
+| resource | `SecurityGroupEgress` | result |
+|---|---|---|
+| `SgPlain` | one literal rule | `CREATE_COMPLETE` |
+| `SgIf` | one literal rule + one `!If` | `CREATE_FAILED` |
+
+The rule floci rejects has neither a CIDR nor a group id because it is *still* the mapping
+`{"Fn::If": [...]}` — the intrinsic was never evaluated. Real CloudFormation evaluates it, which
+is why `cfn-lint` is clean and the template is correct as committed.
+
+The shim resolves **only** list-positioned `Fn::If`, from the template's own `Conditions` and
+parameters. `Ref`, `Fn::Sub`, `Fn::GetAtt` and resource-level `Condition:` keys are passed through
+untouched — floci handles those, and doing their work here would hide it if that stopped being
+true. Output is a throwaway JSON body, never a second source of truth. `taxcalc-network-dev`
+reaches **`CREATE_COMPLETE` for the first time** through it; `taxcalc-app-dev` needs it at all
+(exit 3: "no list-positioned `Fn::If` found") and deploys from the committed file directly.
+
+### 2. `cfn-guardrails.sh reconcile-tags` — the tags CloudFormation dropped
+
+floci applies **no declared tag to any resource type measured here**. The per-service APIs work,
+so this reads each resource's declared `Tags` from its template and applies them there, then
+**verifies by reading back** — which is not belt-and-braces: floci's `sns tag-resource` stores the
+tags correctly and returns a response botocore cannot parse (`'TagResourceResult'`), so the CLI
+exits non-zero on a write that succeeded. Trusting exit status reports a false failure.
+
+The four-key requirement is scoped to **billable** types. A VPC, subnet, route table or security
+group is free and can never appear in a cost report; demanding the taxonomy there produces a wall
+of findings that are not cost-governance problems and buries the one case that is.
+
+### 3. `TreatMissingData` — a *read* restored, and a behaviour that cannot be
+
+Unlike `reconcile-s3`, `reconcile-cloudwatch` cannot fix its target by any API call.
+`reconcile-s3` works because floci's S3 stores the properties when they arrive over the S3 API, so
+only the CFN wiring is broken. **`TreatMissingData` is dropped by floci's CloudWatch itself** — a
+direct `put-metric-alarm --treat-missing-data ignore` on a throwaway alarm also reads back `None`,
+and the property is *absent from the stored record entirely* rather than set to a default. The
+script runs that probe and classifies on the result: `PASS` if the endpoint can store it,
+**`GAP` — not `FAIL`** — if it cannot, because the template is correct and the engine cannot
+represent it. Reporting a template failure here would be the inverse error of reporting a pass.
+
+**The read is now recoverable; the behaviour is not, and the two must not be confused.** The shim
+serves `DescribeAlarms` by forwarding floci's real alarm and overlaying *only* properties floci
+accepted and discarded, so `describe-alarms` reports `TreatMissingData: ignore` through it:
+
+```
+via floci   AWS/Billing  EstimatedCharges  None
+via shim    AWS/Billing  EstimatedCharges  ignore
+            OverlaidFromTemplate: {"taxcalc/estimated-charges-dev": ["TreatMissingData"]}
+```
+
+Three rules keep that from becoming a lie:
+
+- **It only fills a hole.** A value floci *did* store is never overwritten, even where it
+  disagrees with the template — that disagreement is drift, and hiding it would defeat
+  `detect-drift`. `AlarmDescription` and `ActionsEnabled` are on the overlayable list and were
+  *not* overlaid here, because floci stored them.
+- **The overlay is named in the response**, per alarm, in `OverlaidFromTemplate`.
+- **The overlayable set is an explicit list**, not "anything missing", so it cannot silently grow
+  to cover a property floci starts dropping later without someone deciding that is acceptable.
+
+What this does **not** do: floci's alarm still evaluates a gappy metric as `missing`. Its firing
+behaviour cannot be tested on this engine by any means. And the Done-When itself — namespace and
+metric name — is live and correct without any of this, which is why check 3 stays a `PASS` rather
+than becoming a `SHIM`.
+
+### 4. `floci-cost-apis-shim.py` — two missing read APIs, **not equally trustworthy**
+
+| endpoint | floci | the shim serves | worth |
+|---|---|---|---|
+| `resourcegroupstaggingapi GetResources` | "running", indexes **nothing, ever** | live reads from `ec2 describe-tags`, `rds list-tags-for-resource`, `sns`/`s3api` at request time | a missing **index** reimplemented over real records — untag a resource and the answer changes |
+| `budgets DescribeBudget` | service **absent entirely** | a projection of the deployed stack's template, fetched via `get-template` | evidence of **what the template asked for**, and nothing else |
+
+The second is the one to be careful with. There is no budget on this endpoint to read, so the
+response cannot be evidence that a budget exists, that its `CostFilters` match anything, or that
+it would ever notify.
+
+An empty `GetResources` list, incidentally, is worse than an error: it is the same answer for
+every possible query, so it reads as a finding. Measured — an S3 bucket whose own
+`get-bucket-tagging` returns the tag is still invisible to `get-resources`.
+
+**A caveat cannot be delivered in the response body.** Each response carries a `ShimProvenance`
+key *and* an `x-floci-shim` header. Only the header survives: botocore validates responses against
+its own service model and silently drops any member the model does not declare, so
+`aws budgets describe-budget` never shows `ShimProvenance`. Same reason the two notifications must
+be read with `describe-notifications-for-budget` — a modelled call — rather than from
+`DescribeBudget`.
+
+All four workarounds **refuse to run against a real account** (`AWS_ENDPOINT_URL` unset). There,
+CloudFormation applies these properties itself and reaching around it is precisely the drift
+`detect-stack-drift` exists to catch.
+
+### 5. `guard-update` — the plan is right, the execution is wrong, so don't execute
+
+Task 1's "re-deploy with an UPDATE ChangeSet" was exercised properly — the pre-W6-D4 template
+(the committed file minus its four tag lines) deployed as the baseline, then an UPDATE ChangeSet
+to the committed template. **The ChangeSet is exactly right:**
+
+```
+Modify   DbInstance   AWS::RDS::DBInstance   Replacement: False
+```
+
+One resource, tags only, no replacement — the reviewable artefact the task is really asking for.
+**The execution then rolled back**, on a resource the ChangeSet did not list:
+
+```
+DbMasterSecret  UPDATE_IN_PROGRESS -> UPDATE_FAILED
+                "A secret with the name taxcalc/dev/db-master already exists."
+```
+
+**The diagnosis is worse than "Secrets Manager is special."** A four-resource probe stack whose
+update changes exactly one resource's tags isolates it: the event trace shows floci starting at
+`Sec`, failing, and aborting — so `Vpc`, *the only planned change*, is never reached. floci's
+update path **iterates every resource in the template rather than the plan's change list**, and
+implements several update handlers as create.
+
+The reason this usually looks like it works is the uncomfortable part. `CreateTopic` and
+`CreateBucket` on an existing name are idempotent and return the existing resource, so re-creating
+them is invisible. `CreateSecret` is not, and throws. **A template of purely idempotent types
+would update green while silently re-creating everything in it.** The secret is the canary, not
+the bug.
+
+`cfn-guardrails.sh guard-update <stack>` handles this:
+
+1. **Always** produces the plan — `create-change-set` + `describe-change-set` — because the plan
+   is correct on this endpoint and is what the review is about. It fails the run outright on any
+   `Replacement: True`.
+2. **Probes** whether this endpoint's execution honours the plan, with a disposable stack rather
+   than an assumption, so the same command is right against real AWS.
+3. Honoured → executes normally. Not honoured → **refuses to execute**, because executing leaves
+   the stack in `UPDATE_ROLLBACK_COMPLETE`, which is strictly worse than not trying. It then names
+   the deliberate follow-up: for a tag-only change, `reconcile-tags`.
+
+End to end on floci, the refused update leaves the stack healthy and the planned change still
+gets applied:
+
+```
+Plan:  Modify  DbInstance  AWS::RDS::DBInstance  False
+GAP:   this endpoint's execute-change-set does NOT honour the change set -> NOT EXECUTING
+stack after the refusal:  CREATE_COMPLETE        (not UPDATE_ROLLBACK_COMPLETE)
+reconcile-tags:           tags before []  ->  after [Project env feature Env service tenant]
+```
+
+It also handles a no-op update honestly: real CloudFormation *fails* a no-op change set
+("didn't contain changes"), while floci returns `CREATE_COMPLETE` with an empty `Changes` list —
+which would otherwise read as "nothing is replaced", true and completely uninformative.
+
+In the same family, and not worked around: floci's `delete-stack` leaves the RDS instance and the
+secret behind, so a rebuild fails with "already exists" until they are deleted by hand.
+
+**Summary of what each Done-When is worth, after the workarounds:** checks 1 and 3 are genuine —
+the stack reaches `CREATE_COMPLETE` through the real ChangeSet flow and the alarm is real and
+readable. Check 4's **tags are real** and only the index is stood in for. Check 2 is a template
+projection and establishes nothing about a budget.
+
+**Four things a real account is still the only way to establish**, and no local workaround
+touches any of them — every workaround above changes what can be *read*, never what the
+infrastructure *does*:
+
+| still unverifiable | why no shim helps |
+|---|---|
+| the Budget exists and would notify | there is no budget to read; the shim projects the template |
+| the SNS `TopicPolicy` takes effect | floci drops it and leaves the topic **wider** than the template asks |
+| the alarm's firing behaviour on a gappy metric | floci's alarm evaluates as `missing` whatever `describe-alarms` reports |
+| tag-scoped cost attribution | an emulator bills nobody, so no tag key is activated and Cost Explorer has nothing to group |
 
 ---
 
