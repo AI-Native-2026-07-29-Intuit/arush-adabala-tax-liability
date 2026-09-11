@@ -1691,12 +1691,34 @@ peaked at 1. **The autoscaler was right and the measurement never happened.** Th
 KEDA at zero, produces, then releases, and 60,000 is sized from the measured drain rate rather
 than picked.
 
+The deliverable's own smaller check — ~50 records, scale to ≥1 within one polling interval, drain
+back to zero — runs as written, and the reason it works is worth keeping:
+
+```
+12:40:50  worker=0   active=False    # 50 records land on a scaled-to-zero Deployment
+12:41:05  worker=4   active=True     # +15s: first poll after the produce
+12:41:21  worker=5   active=True     # ceil(50/10) = 5
+12:46:24  worker=0   active=False    # drained, then cooldownPeriod (300s)
+```
+
+Fifty records are invisible to a *running* replica — it drains them faster than KEDA polls — and
+unmissable to a *scaled-to-zero* one, because at zero nothing drains and every record stays as lag
+until KEDA starts a pod. The size of the produce was never the variable; whether anything was
+consuming when it landed was. The spike script now stages the backlog only when the worker is
+already running. Running that check also turned up a real bug: `BATCH` was fixed at 1000, so
+`COUNT=50` produced a thousand records and logged fifty.
+
 A second surprise on the way there: **an empty topic is not "no lag" to KEDA, it is an *invalid
 offset*.** A group that has never committed has nothing to subtract from, and the kafka scaler's
 default `scaleToZeroOnInvalidOffset: false` holds the Deployment at one replica rather than zero —
 the reasoning being that scaling to zero would mean nothing ever commits and the group could never
-recover. A freshly deployed worker therefore sits at 1 replica against an empty topic, which reads
-exactly like "KEDA thinks there is work when there is none".
+recover. A freshly deployed worker therefore sat at 1 replica against an empty topic, which reads
+exactly like "KEDA thinks there is work when there is none". `base/07-kafka-bootstrap.job.yaml`
+now seeds the group at the log-end offset during the sync that creates it, so a fresh deploy rests
+at `READY=True` / `ACTIVE=False` / `0/0` without anyone having to run a load generator first.
+Flipping `scaleToZeroOnInvalidOffset: "true"` instead would look like the same fix and deadlock
+the autoscaler: at zero replicas with an invalid offset, nothing ever joins the group to make the
+offset valid.
 
 The HPA moved off CPU, because CPU is the wrong signal here and wrong in the direction that never
 fires: `taxcalc-api`'s slowest path is an outbound Anthropic call, and a pod serving one is parked

@@ -395,7 +395,8 @@ management:
 
 ---
 # W6 D5 Task 1: the `worker` run mode. Activated in-cluster as SPRING_PROFILES_ACTIVE=k8s,worker
-# on the SAME image the api runs - see manifests/12-taxcalc-worker.deployment.yaml. Layered on
+# on the SAME image the api runs - see base/12-taxcalc-worker.deployment.yaml in the CONFIG repo
+# (arush-adabala-tax-liability-config; this repo's manifests/ is the pre-GitOps W5 D3 copy). Layered on
 # top of `k8s`, never instead of it: every broker/datastore hostname the worker needs lives in
 # that profile, and activating `worker` alone would leave it talking to localhost.
 spring:

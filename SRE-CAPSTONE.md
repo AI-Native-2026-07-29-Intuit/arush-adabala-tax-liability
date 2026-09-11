@@ -15,11 +15,31 @@ deployed. Each half is labelled, and nothing below is claimed as verified unless
 | Artefact | Purpose | Verified by |
 |---|---|---|
 | `base/06-kafka.yaml` | A real single-node KRaft broker. W5 D3 shipped only a DNS placeholder; KEDA cannot scale on a hostname. | `kubectl -n taxcalc-dev get deploy kafka` → `1/1`; `kafka-consumer-groups.sh --describe` returns 12 partitions |
-| `base/12-taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server | `kubectl get deploy taxcalc-api-worker` → scaled `0 → 7 → 0` during the spike |
+| `base/07-kafka-bootstrap.job.yaml` | Wave-0 sync hook that creates the topic and seeds the group's committed offset, so a **fresh** deploy rests at `0/0` instead of the 1-replica invalid-offset state | Job `succeeded=1`; re-run takes the guard path (`already has committed offsets … nothing to seed`) |
+| `base/12-taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server, `replicas: 0` | `kubectl get deploy taxcalc-api-worker` → scaled `0 → 7 → 0` during the spike |
 | `base/13-taxcalc-worker-scaledobject.yaml` | KEDA on `taxpayers.events` consumer-group lag, `lagThreshold: "10"`, scale-to-zero | `kubectl get scaledobject` → `READY=True`, `ACTIVE=True` under lag |
 | `base/50-taxcalc-api.hpa.yaml` + `base/prometheus-adapter-values.yaml` | SLO-derived HPA on `taxcalc_inflight_requests`, not CPU | `kubectl get hpa` → `28375m/6`, `SuccessfulRescale … New size: 10` |
 | `base/55-taxcalc-api.pdb.yaml` | Voluntary-disruption floor, `minAvailable: 2` | `kubectl get pdb taxcalc-api-pdb` → `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 0` |
 | `loadtests/taxcalc-api-p99.js` + `.github/workflows/load.yml` | k6 gate pinned to the W5 D5 SLO; `X-Cost-Usd` read as a real number | 214,030 requests, all five thresholds green (below) |
+
+> **Where these files live, against where the spec says they live.** The W6 D5 brief names
+> `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` and
+> `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml`. They are `base/12-…` and `base/13-…` in the
+> **config repo** instead, which is the same relocation [`GITOPS.md`](GITOPS.md) records for every
+> manifest at W6 D2 and the same "no `taxcalc-api/` subdirectory of a repo already called
+> `taxcalc-api`" rule that puts this file at the repository root. The mapping in full:
+>
+> | Spec path | Actual path |
+> |---|---|
+> | `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` | `base/12-taxcalc-worker.deployment.yaml` (config repo) |
+> | `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml` | `base/13-taxcalc-worker-scaledobject.yaml` (config repo) |
+>
+> The numeric prefixes are not decoration — they are the apply order Kustomize and the Argo CD
+> sync waves are both built around. Renaming the directory to match the brief would mean changing
+> `path:` on three Applications and invalidating every manifest path documented since W5 D3, to
+> move files that Argo CD already syncs correctly. This repository's `manifests/` directory is the
+> **pre-GitOps W5 D3 copy** and deliberately does not carry the W6 D5 files; the config repo is
+> the only source of truth Argo CD reads.
 
 ### The k6 gate, measured
 
@@ -55,6 +75,43 @@ that no longer exists.
 ```
 
 `0 → 7 → 0`, driven entirely by real consumer-group lag on a real broker.
+
+### Task 1's Done-When, run as written
+
+The spike above answers "does this scale under real load". It does not answer the deliverable's
+actual check, which is smaller and stricter: **~50 records**, scale to ≥1 **within one polling
+interval**, drain back to 0 after cooldown. Run on **2026-09-11** with `COUNT=50`:
+
+```
+at rest   READY=True  ACTIVE=False   worker 0/0   all 12 partitions LAG 0
+
+12:40:50  worker=0   active=False    # 50 records land on a scaled-to-zero Deployment
+12:41:05  worker=4   active=True     # +15s: the first poll after the produce
+12:41:21  worker=5   active=True     # ceil(50/10) = 5, the documented lagThreshold math
+12:41:36  worker=5   active=False    # drained; cooldownPeriod (300s) begins
+12:46:24  worker=0   active=False    # scale-to-zero, 288s later
+```
+
+Scale-up inside a single 15s interval, `ceil(50/10) = 5` exactly as `lagThreshold: "10"`
+predicts, and back to zero one cooldown later.
+
+**Why fifty records work here and could not work before.** The earlier finding — that a
+50-record produce is invisible because one replica drains it faster than KEDA polls — is true
+only *while something is already consuming*. At zero replicas nothing drains, so all fifty
+records persist as lag until KEDA itself starts a pod, which is precisely the `0 → ≥1` transition
+being asked for. What decides whether the measurement happens is not the size of the produce but
+whether the Deployment was at zero when it landed. `scripts/w6d5-spike.sh` now infers that: it
+stages the backlog (pause at zero, produce, release) only when the worker is already running, and
+skips staging when it is at zero.
+
+Two bugs surfaced from running the check as written rather than reasoning about it:
+
+- **`COUNT=50` produced 1,000 records and reported 50.** `BATCH` was hard-coded to 1000 and
+  `REPEATS = ceil(COUNT/BATCH)` is 1 for every count from 1 to 1000, so any small produce was
+  silently multiplied. A produce that misreports its own volume by 20× is worse than one that
+  rejects small counts, because the number in the run log is the number nobody re-derives.
+- **The at-rest row above needed the seed Job to be true on a fresh cluster.** It was only true
+  here because a previous spike had already forced the group to commit — see finding 2 below.
 
 ---
 
@@ -117,9 +174,26 @@ partitions, reports Ready and never commits — so lag never falls and KEDA scal
 committed has no offset to subtract, and the kafka scaler's default
 `scaleToZeroOnInvalidOffset: false` deliberately holds the Deployment at one replica rather than
 zero, on the reasoning that scaling to zero would mean nothing ever commits and the group could
-never recover. So a freshly deployed worker sits at 1 replica with an empty topic, which reads
-exactly like "KEDA thinks there is work when there is none". Produce once and it resolves
-permanently.
+never recover. So a freshly deployed worker sat at 1 replica with an empty topic, which reads
+exactly like "KEDA thinks there is work when there is none".
+
+Producing once resolves it permanently, and for a while that was the whole answer — which made
+the documented at-rest state of the system contingent on somebody having run a load generator by
+hand. `base/07-kafka-bootstrap.job.yaml` now seeds the group at the log-end offset during the
+sync that creates it, so a fresh deploy rests at `READY=True` / `ACTIVE=False` / `0/0` with
+nothing produced at all.
+
+**The one-line fix here is a trap, and it is worth saying why.** Setting
+`scaleToZeroOnInvalidOffset: "true"` on the trigger removes the symptom and creates a deadlock:
+with an invalid offset *and* permission to scale to zero, the Deployment goes to zero, no member
+ever joins, no offset is ever committed, and the offset stays invalid forever — the worker never
+starts no matter what is produced. That flag's default is guarding against exactly what flipping
+it would cause. Seeding a real committed offset is the fix that addresses the cause; the seeded
+value is `--to-latest`, which is the same position the application's own `auto-offset-reset:
+latest` would have chosen, so nothing is skipped or replayed. And because the hook re-runs on
+every sync for the rest of the service's life, the `--list` guard is load-bearing rather than
+tidy: `--reset-offsets --execute` *refuses* on a group with active members, so an unconditional
+reset would fail the sync every time the worker happened to be scaled up.
 
 **3. The consumer was faster than the control loop, so the first spike proved nothing.** One
 replica drained 6,000 records in under 20 seconds while KEDA polls every 15s and a JVM pod needs
