@@ -27,7 +27,7 @@
 # over that line, i.e. a scaling story whose at-rest state depended on someone having run a load
 # generator by hand.
 #
-# It no longer does. base/07-kafka-bootstrap.job.yaml in the config repo seeds the group's
+# It no longer does. k8s/taxcalc-api/kafka-bootstrap.job.yaml in the config repo seeds the group's
 # committed offset at the log-end offset during the Argo CD sync that creates it - the same
 # position `auto-offset-reset: latest` would have picked, just written down where the scaler can
 # subtract it. A fresh deploy now rests at READY=True / ACTIVE=False / 0-0 with nothing produced

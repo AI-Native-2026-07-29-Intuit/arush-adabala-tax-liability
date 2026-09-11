@@ -14,32 +14,36 @@ deployed. Each half is labelled, and nothing below is claimed as verified unless
 
 | Artefact | Purpose | Verified by |
 |---|---|---|
-| `base/06-kafka.yaml` | A real single-node KRaft broker. W5 D3 shipped only a DNS placeholder; KEDA cannot scale on a hostname. | `kubectl -n taxcalc-dev get deploy kafka` → `1/1`; `kafka-consumer-groups.sh --describe` returns 12 partitions |
-| `base/07-kafka-bootstrap.job.yaml` | Wave-0 sync hook that creates the topic and seeds the group's committed offset, so a **fresh** deploy rests at `0/0` instead of the 1-replica invalid-offset state | Job `succeeded=1`; re-run takes the guard path (`already has committed offsets … nothing to seed`) |
-| `base/12-taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server, `replicas: 0` | `kubectl get deploy taxcalc-api-worker` → scaled `0 → 7 → 0` during the spike |
-| `base/13-taxcalc-worker-scaledobject.yaml` | KEDA on `taxpayers.events` consumer-group lag, `lagThreshold: "10"`, scale-to-zero | `kubectl get scaledobject` → `READY=True`, `ACTIVE=True` under lag |
-| `base/50-taxcalc-api.hpa.yaml` + `base/prometheus-adapter-values.yaml` | SLO-derived HPA on `taxcalc_inflight_requests`, not CPU | `kubectl get hpa` → `28375m/6`, `SuccessfulRescale … New size: 10` |
-| `base/55-taxcalc-api.pdb.yaml` | Voluntary-disruption floor, `minAvailable: 2` | `kubectl get pdb taxcalc-api-pdb` → `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 0` |
+| `k8s/taxcalc-api/kafka.yaml` | A real single-node KRaft broker. W5 D3 shipped only a DNS placeholder; KEDA cannot scale on a hostname. | `kubectl -n taxcalc-dev get deploy kafka` → `1/1`; `kafka-consumer-groups.sh --describe` returns 12 partitions |
+| `k8s/taxcalc-api/kafka-bootstrap.job.yaml` | Wave-0 sync hook that creates the topic and seeds the group's committed offset, so a **fresh** deploy rests at `0/0` instead of the 1-replica invalid-offset state | Job `succeeded=1`; re-run takes the guard path (`already has committed offsets … nothing to seed`) |
+| `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server, `replicas: 0` | `kubectl get deploy taxcalc-api-worker` → scaled `0 → 7 → 0` during the spike |
+| `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml` | KEDA on `taxpayers.events` consumer-group lag, `lagThreshold: "10"`, scale-to-zero | `kubectl get scaledobject` → `READY=True`, `ACTIVE=True` under lag |
+| `k8s/taxcalc-api/taxcalc-api.hpa.yaml` + `k8s/taxcalc-api/prometheus-adapter-values.yaml` | SLO-derived HPA on `taxcalc_inflight_requests`, not CPU | `kubectl get hpa` → `28375m/6`, `SuccessfulRescale … New size: 10` |
+| `k8s/taxcalc-api/taxcalc-api.pdb.yaml` | Voluntary-disruption floor, `minAvailable: 2` | `kubectl get pdb taxcalc-api-pdb` → `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 0` |
 | `loadtests/taxcalc-api-p99.js` + `.github/workflows/load.yml` | k6 gate pinned to the W5 D5 SLO; `X-Cost-Usd` read as a real number | 214,030 requests, all five thresholds green (below) |
 
-> **Where these files live, against where the spec says they live.** The W6 D5 brief names
+> **Where these files live.** Paths are the W6 D5 brief's own —
 > `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` and
-> `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml`. They are `base/12-…` and `base/13-…` in the
-> **config repo** instead, which is the same relocation [`GITOPS.md`](GITOPS.md) records for every
-> manifest at W6 D2 and the same "no `taxcalc-api/` subdirectory of a repo already called
-> `taxcalc-api`" rule that puts this file at the repository root. The mapping in full:
+> `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml` — in the **config repo**, which is the
+> repository Argo CD reads. `base/` was renamed to `k8s/taxcalc-api/` and the `NN-` ordering
+> prefixes dropped, so every filename now matches the layout it is graded against.
 >
-> | Spec path | Actual path |
-> |---|---|
-> | `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` | `base/12-taxcalc-worker.deployment.yaml` (config repo) |
-> | `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml` | `base/13-taxcalc-worker-scaledobject.yaml` (config repo) |
+> **Two reasons not to do that turned out to be wrong, and both were mine.** The prefixes were
+> described here as "the apply order Kustomize and the Argo CD sync waves are built around". They
+> were not: ordering comes from the explicit `sync-wave` patches in `kustomization.yaml` and from
+> the `resources:` list, both of which name files rather than infer order from them, and nothing
+> in either repo ever ran `kubectl apply -f base/` where filename order would have mattered. The
+> rename was also said to require changing `path:` on three Applications; the Applications point
+> at `overlays/<env>`, not at the base, so the only path edits were the four overlays'
+> `../../base` → `../../k8s/taxcalc-api`.
 >
-> The numeric prefixes are not decoration — they are the apply order Kustomize and the Argo CD
-> sync waves are both built around. Renaming the directory to match the brief would mean changing
-> `path:` on three Applications and invalidating every manifest path documented since W5 D3, to
-> move files that Argo CD already syncs correctly. This repository's `manifests/` directory is the
-> **pre-GitOps W5 D3 copy** and deliberately does not carry the W6 D5 files; the config repo is
-> the only source of truth Argo CD reads.
+> What the rename genuinely cost was documentation: ~50 `base/NN-…` references across both repos'
+> READMEs, `GITOPS.md`, this file, the AppProject guardrail script and the `aws-authored/` pack.
+> That is a real cost and it is why the sweep is mechanical and verified (`kubectl kustomize`
+> renders clean for `base`'s replacement and all four overlays; no `base/…` path survives except
+> two deliberate quotations of an external reference layout). This repository's `manifests/`
+> directory is still the **pre-GitOps W5 D3 copy** and deliberately does not carry the W6 D5
+> files.
 
 ### The k6 gate, measured
 
@@ -151,7 +155,7 @@ inherited by anyone who reaches any worker pod, and still there long after the r
 forgotten. With `operator` it lives on the KEDA operator's role, in the `keda` namespace, where a
 reviewer asking "who can read this queue" finds the autoscaler. The principle generalises: a
 credential belongs to the thing that makes the call, not the thing the call is about.
-`base/13` needs no `TriggerAuthentication` because the dev broker is PLAINTEXT — that is the
+`taxcalc-worker-scaledobject.yaml` needs no `TriggerAuthentication` because the dev broker is PLAINTEXT — that is the
 discipline not applying, not the discipline being skipped.
 
 ---
@@ -179,7 +183,7 @@ exactly like "KEDA thinks there is work when there is none".
 
 Producing once resolves it permanently, and for a while that was the whole answer — which made
 the documented at-rest state of the system contingent on somebody having run a load generator by
-hand. `base/07-kafka-bootstrap.job.yaml` now seeds the group at the log-end offset during the
+hand. `k8s/taxcalc-api/kafka-bootstrap.job.yaml` now seeds the group at the log-end offset during the
 sync that creates it, so a fresh deploy rests at `READY=True` / `ACTIVE=False` / `0/0` with
 nothing produced at all.
 
@@ -285,7 +289,7 @@ Every service shipped in W7 is expected to pass all three before it is called pr
 ## Known gaps, stated rather than left to be found
 
 - **`manifests/` in the application repo was deliberately not extended.** The W5 D3 manifest set is
-  a duplicate of the config repo's `base/`, and GITOPS.md already records that the migration
+  a duplicate of the config repo's `k8s/taxcalc-api/`, and GITOPS.md already records that the migration
   direction is to delete it and point `k8s-ci.yml` at the config repo. Adding today's objects to a
   copy that is on its way out would deepen a drift that is already documented.
 - **Argo CD was not running on this cluster**, so today's manifests were applied with `kubectl`
