@@ -46,6 +46,17 @@ set -euo pipefail
 # and sourcing the preflight would exit 1 on a runner that correctly has no kubectl at all.
 if [ "${MINT_ONLY:-0}" != "1" ]; then
   . "$(dirname "${BASH_SOURCE[0]}")/lib/kube-preflight.sh"
+else
+  # The preflight is what sets KUBECTL, and skipping it leaves the variable unset - which under
+  # `set -u` makes the closing "Next:" message (an unquoted heredoc that interpolates ${KUBECTL})
+  # a fatal error. That killed the CI run AFTER minting had completely succeeded: keypair
+  # generated, 200 tokens written, exit 1. A script that does all of its work and then fails on
+  # its own help text is the worst kind of red, because every artefact it was supposed to produce
+  # is sitting right there on disk.
+  #
+  # Defaulted rather than blanked so the printed command stays copy-pasteable for the one reader
+  # who runs MINT_ONLY=1 by hand and then does go on to talk to a cluster.
+  KUBECTL="${KUBECTL:-kubectl}"
 fi
 
 NS="${NS:-taxcalc-dev}"
