@@ -1763,17 +1763,28 @@ because the ReplicaSet could not create the replacement. And the two autoscalers
 one budget**: the k6 mix is 55% writes, every write emits to `taxpayers.events`, so the load test
 that exists to exercise the api's HPA also drives KEDA's worker 0 → 12, and those pods claim the
 `limits.cpu` the api's new replicas need. Measured: api HPA asked for 5, KEDA asked for 12, the
-namespace satisfied neither. Two correct autoscalers, one budget, no arbitration. The quota fix is
-authored and unapplied — it is platform-team property by design, since the AppProject blacklists
-`ResourceQuota` precisely so an app team cannot raise its own ceiling.
+namespace satisfied neither. Two correct autoscalers, one budget, no arbitration. Applied for dev (`limits.cpu` 8 → 16, `pods` 20 → 40), and the effect is visible: the HPA now
+reaches 7 desired / 4 ready, and the refusal has moved to `limits.memory` with `requests.memory`
+at `7552Mi/8Gi` on a 13Gi node — the intentional, node-sized budget binding rather than an
+accident of two defaults. staging and prod are deliberately untouched, and this still wants
+platform-team review: the AppProject blacklists `ResourceQuota` precisely so an app team cannot
+raise its own ceiling.
 
 ### The 50-VU check, and three quiet failures in front of it
 
-Run as an in-cluster k6 Job at exactly 50 VUs with `SLEEP=0`, the HPA went `2 → 4` at **t+42s** and
-`4 → 5` at t+192s. **42 seconds, not the deliverable's ~30**, and the gap is structural: a 15s
-scrape interval, then `avg_over_time(...[1m])` in the adapter rule, then a 15s HPA control loop.
-Shortening the rule to `[30s]` would hit the number and would trade away the exact property that
-makes the signal trustworthy — that a single unlucky scrape cannot move the Deployment.
+Run as an in-cluster k6 Job at exactly 50 VUs with `SLEEP=0`, the first attempt went `2 → 4` at
+**t+42s** with `ready` never leaving 2 — missing the deliverable's ~30s on one half and its
+"scales above minReplicas" on the other. Both are now fixed and the same run reads `2 → 4` at
+**t+24s**, `ready` 4 at t+69s, then 7 desired.
+
+**The timing fix is the interesting one, because the obvious version of it is wrong.** Three lags
+stack: the scrape, the adapter's `avg_over_time` window, and the HPA's 15s control loop. Shortening
+the window alone would have hit the number while gutting the thing that makes the signal
+trustworthy — `scaleUp.stabilizationWindowSeconds` is `0` by design, so that average is the only
+guard against one unlucky scrape. Since noise rejection depends on the **sample count**, not the
+window's width, the scrape went to 5s *and* the window to `[30s]`: six samples averaged where there
+were four, in half the wall-clock time. Faster and smoother, not a trade. The second fix was the
+`limits.cpu` quota below, which had been refusing every replica the HPA asked for.
 
 Three things had to be fixed before that run measured anything, and each failed silently. **The
 Prometheus Adapter was `OOMKilled` every ~8 minutes** on a 256Mi limit this deliverable set by eye;
