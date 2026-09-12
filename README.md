@@ -1871,7 +1871,7 @@ is a stale read model and a bill for twenty idle pods.
 
 ### Authored and defended, never applied
 
-Four AWS-native files under `aws-authored/` in the config repo, each opening with why it cannot run
+Four AWS-native files under `k8s/aws-authored/` in the config repo, each opening with why it cannot run
 on k3d: a Karpenter `NodePool`, an `AWS::XRay::SamplingRule`, an ADOT collector dual-exporting to
 Tempo and X-Ray, and the SQS form of the KEDA trigger. The three decisions worth defending:
 

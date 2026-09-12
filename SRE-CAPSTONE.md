@@ -16,11 +16,11 @@ deployed. Each half is labelled, and nothing below is claimed as verified unless
 |---|---|---|
 | `k8s/taxcalc-api/kafka.yaml` | A real single-node KRaft broker. W5 D3 shipped only a DNS placeholder; KEDA cannot scale on a hostname. | `kubectl -n taxcalc-dev get deploy kafka` → `1/1`; `kafka-consumer-groups.sh --describe` returns 12 partitions |
 | `k8s/taxcalc-api/kafka-bootstrap.job.yaml` | Wave-0 sync hook that creates the topic and seeds the group's committed offset, so a **fresh** deploy rests at `0/0` instead of the 1-replica invalid-offset state | Job `succeeded=1`; re-run takes the guard path (`already has committed offsets … nothing to seed`) |
-| `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server, `replicas: 0` | `kubectl get deploy taxcalc-api-worker` → scaled `0 → 7 → 0` during the spike |
+| `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` | The KEDA scale target: same image, `SPRING_PROFILES_ACTIVE=k8s,worker`, no HTTP server, `replicas: 0`. Requests are **measured**, not guessed: 100m CPU / 448Mi | `kubectl get deploy taxcalc-api-worker` → `0 → 12 desired / 9 ready → 0` at the deliverable's 4,000 records (timeline below) |
 | `k8s/taxcalc-api/taxcalc-worker-scaledobject.yaml` | KEDA on `taxpayers.events` consumer-group lag, `lagThreshold: "10"`, scale-to-zero | `kubectl get scaledobject` → `READY=True`, `ACTIVE=True` under lag |
 | `k8s/taxcalc-api/hpa.yaml` + `k8s/taxcalc-api/prometheus-adapter-values.yaml` | SLO-derived HPA on `taxcalc_inflight_requests`, not CPU | `kubectl get hpa taxcalc-api-hpa` → `Pods`/`AverageValue`/`taxcalc_inflight_requests`, target `6`, `2`–`20`, scaleUp `0s` / scaleDown `600s`; scaled `2 → 4 → 7` under 50 VUs, first rescale at **t+24s** (timeline below) |
 | `k8s/taxcalc-api/pdb.yaml` | Voluntary-disruption floor, `minAvailable: 2` | `kubectl get pdb taxcalc-api-pdb` → `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 0` |
-| `loadtests/taxcalc-api-p99.js` + `.github/workflows/load.yml` | k6 gate pinned to the W5 D5 SLO; `X-Cost-Usd` read as a real number | 214,030 requests, all five thresholds green (below) |
+| `loadtests/taxcalc-api-p99.js` + `.github/workflows/load.yml` | k6 gate pinned to the W5 D5 SLO; `X-Cost-Usd` read as a real number | 214,030 requests, all five thresholds green (below); and a second 300-VU run with all five green **while both autoscalers were sampled in the same window** — p(99) 170ms, errors 0.43% |
 
 > **Where these files live.** Paths are the W6 D5 brief's own —
 > `k8s/taxcalc-api/taxcalc-worker.deployment.yaml` and
@@ -38,7 +38,7 @@ deployed. Each half is labelled, and nothing below is claimed as verified unless
 > `../../base` → `../../k8s/taxcalc-api`.
 >
 > What the rename genuinely cost was documentation: ~50 `base/NN-…` references across both repos'
-> READMEs, `GITOPS.md`, this file, the AppProject guardrail script and the `aws-authored/` pack.
+> READMEs, `GITOPS.md`, this file, the AppProject guardrail script and the `k8s/aws-authored/` pack.
 > That is a real cost and it is why the sweep is mechanical and verified (`kubectl kustomize`
 > renders clean for `base`'s replacement and all four overlays; no `base/…` path survives except
 > two deliberate quotations of an external reference layout). This repository's `manifests/`
@@ -66,9 +66,158 @@ deployment that stopped emitting the header would make every sample
 `parseFloat(undefined || '0')` = 0, and `0 < 0.003` would pass forever while reporting a control
 that no longer exists.
 
-### The integration spike
+### The SLO and the HPA in one window
 
-`scripts/w6d5-spike.sh` produced 60,000 synthetic `taxpayers.events` records:
+The run above proves the thresholds. It does not, on its own, show the autoscaler that kept the
+service inside them — and a threshold summary from one run beside an HPA timeline from another is
+two claims, not one piece of evidence. Task 4 asks for the HPA *holding `taxcalc-api` inside the
+SLO under concurrent k6 load*, so this is a single window: k6 evaluating all five thresholds while
+the api HPA and KEDA are sampled every 2s from the same `t0`.
+
+In-cluster k6 Job, **300 VUs**, 8 minutes, the script's own 0.5s think time, `loadtest` profile.
+Job exit code 0 — all five green:
+
+```
+█ THRESHOLDS
+  checks                ✓ 'rate>0.99'      rate=99.35%
+  cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062
+  cost_samples          ✓ 'count>0'        count=11396
+  http_req_duration     ✓ 'p(99)<500'      p(99)=170.27ms
+  http_req_failed       ✓ 'rate<0.005'     rate=0.43%
+
+http_reqs ....... 236602  492.88/s
+```
+
+The same window, from `kubectl`. `api-metric` is `taxcalc_inflight_requests` (milli-units, target
+`6`); `wdes`/`wrdy` are the KEDA-generated HPA and the worker, because the gate's workload is 55%
+writes and therefore drives `taxpayers.events` lag at the same time:
+
+```
+  t+s  api-metric    des   cur   rdy   wdes  wrdy
+    0        333m      2     2     2      4     4
+   12       1250m      2     2     2      8     8
+   27       6666m      3     2     2     12     8    # metric crosses the target of 6
+   42      24833m      4     3     2     12     8    # api HPA -> 4
+   58      22166m      4     4     2     12     8
+   73       3583m      4     4     2     12     8    # load spread; metric falls back under target
+  192       1083m      4     4     2     12     8
+  342        250m      4     4     2      8     8
+  372      14875m      5     4     2      8     8    # api HPA -> 5
+  432         83m      5     5     2      8     8
+```
+
+**What this shows, stated exactly.** `p(99)` was 170ms against a 500ms objective and the error
+budget held at 0.43% against 0.5%, *while* the api HPA responded to load (2 → 5 desired) and KEDA
+concurrently ran the worker at 8. The SLO was met under load, and it was met while both
+autoscalers were moving — which is the claim the deliverable asks for and the one two separate
+runs could not make.
+
+**And `ready` never left 2, which is the same finding as the spike.** The api HPA asked for 5 and
+got 2, for the reason the worker got 9 of 12:
+
+```
+Warning FailedCreate  Error creating: pods "taxcalc-api-575b9b9f8-…" is forbidden:
+                      exceeded quota: taxcalc-dev-quota, requested: requests.memory=512Mi,
+                      used: requests.memory=7872Mi, limited: requests.memory=8Gi
+Warning FailedCreate  Error creating: pods "taxcalc-api-worker-dc89d77dc-…" is forbidden:
+                      exceeded quota: taxcalc-dev-quota, requested: requests.memory=448Mi,
+                      used: requests.memory=7872Mi, limited: requests.memory=8Gi
+```
+
+Two autoscalers, two refusals, **one `requests.memory` line, inside one eight-minute window.**
+Every earlier version of this finding was inferred from two runs compared after the fact; this is
+it happening at once. The service stayed inside its SLO anyway — two replicas were enough at
+493 req/s — so the honest reading is that the quota was not hurting the SLO here, and would have
+been the first thing to hurt it had the load kept climbing. A per-workload quota or a PriorityClass
+is the real answer; a bigger number is not.
+
+**One thing this run cost, and it is a finding rather than a footnote: `SLEEP=0` and the LLM slice
+are incompatible, and the failure reads as the service falling over.** The first attempt used the
+saturation-probe mode (50 VUs, `SLEEP=0`) because it is the only way to drive
+`taxcalc_inflight_requests` to a chosen value. It failed two thresholds — `checks` 94.00%,
+`http_req_failed` 3.15% — with `http_req_duration` p(99) still green at 300ms. The entire error
+mass was the LLM slice at **37% 2xx**, and none of it was the service:
+
+```
+SLEEP=0.0, 50 VUs : 1316 req/s -> 78.9 LLM req/min per subject  -> 429 storm
+SLEEP=0.5, 300 VUs:  558 req/s ->  5.6 LLM req/min per subject  -> inside the limit
+```
+
+`RateLimitFilter` allows 10 requests/minute per JWT subject. Removing think time raises each VU's
+request rate ~20x, so the 0.05 LLM weight — calibrated against the gate's 0.5s pause — becomes
+~79 LLM requests/minute per subject and ~86% of them are correctly rejected. **A red
+`http_req_failed` produced by a working cost control is the most expensive kind of false
+positive**, because the obvious reading is "the service fell over under load". This is the same
+trap the `loadtest-author` audit rejected in the abstract (see the mix-renormalisation rejection
+below) — met here in practice, from the opposite direction. The lesson is that VU count and think
+time are not independent knobs once a per-subject rate limit exists: to raise in-flight
+concurrency, raise **VUs**, not the request rate per VU.
+
+### The integration spike, at the deliverable's own 4,000 records
+
+Run on **2026-09-11** with `COUNT=4000` — the figure Task 4 names — landing on a scaled-to-zero
+Deployment, sampled every 2s. `desired` is what KEDA asked the cluster for; `ready` is what the
+node granted, and the gap between those two columns is the whole result:
+
+```
+  t+s   desired  current   ready
+    0         0        1       1     # 4,000 records land on a worker at zero
+    5         4        1       1     # first poll after the produce
+    7         4        1       4
+   54         8        4       8
+   68        12        8       8
+   70        12        8       9     # <- READY PEAK
+   85        12       12       9     # KEDA asks for 12; three pods are refused
+  327        12       12       0     # drained; cooldownPeriod (300s) elapses
+  329         0        1       0     # scale-to-zero
+```
+
+**`0 → 12 desired / 9 ready → 0`.** The three pods KEDA could not have are not a mystery:
+
+```
+Warning FailedCreate  x7  Error creating: pods "taxcalc-api-worker-…" is forbidden:
+                          exceeded quota: taxcalc-dev-quota, requested: requests.memory=448Mi,
+                          used: requests.memory=8064Mi, limited: requests.memory=8Gi
+```
+
+**The Done-When names `0 → ~15 → 0`, and 15 does not fit this node. That is a measurement, not an
+excuse.** The worker's steady-state footprint is ~400Mi (three settled replicas: 400, 403, 408Mi).
+The node is a single 4-CPU k3d server on a 4-CPU Docker VM with 12,963Mi allocatable, of which
+7,768Mi is the baseline stack — 5,499Mi free, or **~13 workers before the kubelet starts
+evicting**. Fifteen needs ~6,000Mi. The quota refusal at 9 arrives *before* that physical wall,
+which is the quota doing its job: stopping the fleet at a number the node can actually serve
+rather than letting it discover the limit as an eviction.
+
+| Ceiling | Workers it permits |
+|---|---|
+| quota `requests.memory` (8Gi) | **9** ← binding |
+| quota `limits.memory` (16Gi) | 10 |
+| quota `requests.cpu` (4) | 21 |
+| node real memory, measured | ~13 (physical) |
+| Done-When's target | 15 |
+
+Raising the quota to force 15 was considered and rejected: the pods would schedule and then hit
+node MemoryPressure mid-drain, trading a ceiling that is *documented* for an outage that is not.
+On EKS this is precisely the gap the Task 4 Karpenter NodePool closes — pending pods become
+instances — which is why that file is the answer to this measurement rather than a separate topic.
+
+**The binding resource changed, and that is the interesting part.** It used to be
+`limits.memory` — a LimitRange default multiplied by containers declaring no limit, an accounting
+artefact. It is now `requests.memory`, because the worker's request was corrected from 320Mi to a
+measured 448Mi. The ceiling dropped from 10 workers to 9, and that is the fix working: the old
+number bought a higher replica count by under-declaring what each pod needs, which is not
+capacity. An under-set request does not fail loudly — it lets the scheduler overcommit the node by
+80Mi per replica and surfaces later as an eviction somewhere else in the namespace.
+
+**Why 4,000 records cannot hold 15 pods busy anyway.** At `lagThreshold: "10"` a 4,000-record
+backlog asks for `min(ceil(4000/10), 20)` = 20 pods, but the first few replicas drain it in
+seconds — `ACTIVE` had already flipped false by t+3 — so most of the fleet arrives after the work
+is gone. KEDA never got past 12 because lag was falling while it polled. The 60,000-record default
+in `scripts/w6d5-spike.sh` exists for exactly this reason (finding 3 below), and the two runs
+answer different questions: 4,000 is the deliverable's check, 60,000 is the one that keeps a fleet
+occupied long enough to watch it work. Both are real runs; neither is the other's substitute.
+
+For reference, the earlier 60,000-record run, before the memory request was corrected:
 
 ```
 18:24:22  worker=1   active=False      # backlog staged, KEDA released
@@ -77,8 +226,6 @@ that no longer exists.
 18:29:50  worker=7   active=False      # topic drained; cooldownPeriod (300s) begins
 18:30:15  worker=0   active=False      # scale-to-zero
 ```
-
-`0 → 7 → 0`, driven entirely by real consumer-group lag on a real broker.
 
 ### Task 1's Done-When, run as written
 
@@ -121,15 +268,37 @@ Two bugs surfaced from running the check as written rather than reasoning about 
 
 ## Layer 2 — authored and defended, never applied (AWS-native)
 
-Under `aws-authored/` in the config repo. Each file opens with a comment stating why it is
-author-only. None was ever `kubectl apply`'d or deployed.
+Under **`k8s/aws-authored/`** in the [config repo](https://github.com/AI-Native-2026-07-29-Intuit/arush-adabala-tax-liability-config/tree/main/k8s/aws-authored).
+Each file opens with a comment stating why it is author-only. None was ever `kubectl apply`'d or
+deployed.
 
 | Artefact | Why it cannot run here |
 |---|---|
-| `aws-authored/karpenter-nodepool.yaml` | Karpenter provisions EC2 instances. k3d's nodes are Docker containers; there is nothing to launch. |
-| `aws-authored/cfn/taxcalc-observability-dev.yaml` | `AWS::XRay::SamplingRule` is an AWS resource. |
-| `aws-authored/adot-collector.yaml` | Half-runnable: the Tempo exporter is the W5 D5 endpoint this cluster has; the `awsxray` exporter needs AWS. |
-| `aws-authored/taxcalc-worker-scaledobject.sqs.yaml` | No SQS queue, no IRSA role, no pod-identity webhook. |
+| `k8s/aws-authored/karpenter-nodepool.yaml` | Karpenter provisions EC2 instances. k3d's nodes are Docker containers; there is nothing to launch. |
+| `k8s/aws-authored/cfn/taxcalc-observability-dev.yaml` | `AWS::XRay::SamplingRule` is an AWS resource. |
+| `k8s/aws-authored/adot-collector.yaml` | Half-runnable: the Tempo exporter is the W5 D5 endpoint this cluster has; the `awsxray` exporter needs AWS. |
+| `k8s/aws-authored/taxcalc-worker-scaledobject.sqs.yaml` | No SQS queue, no IRSA role, no pod-identity webhook. |
+
+> **Why these live in the config repo, and why the path now matches the brief.** The deliverable
+> names `k8s/aws-authored/`. These four files were at `aws-authored/` — config-repo root — which
+> meant a reviewer opening this repository at the graded path found no `k8s/` directory at all.
+> The pack is now a **sibling of `k8s/taxcalc-api/`**, so the brief's path resolves literally.
+>
+> They belong in the config repo rather than here because that is the repository Argo CD reads,
+> and the point of the pack is what a *deployment* repository would hold. Being a sibling under
+> `k8s/` rather than a child of `k8s/taxcalc-api/` is what keeps "never applied" structural rather
+> than a promise: nothing under `k8s/` is applied by directory. The overlays name
+> `../../k8s/taxcalc-api` explicitly and `k8s/taxcalc-api/kustomization.yaml` lists its resources
+> by filename, so there is no glob that could sweep these in. Verified after the move —
+> `kubectl kustomize` renders all four overlays at 18 objects each, and no `NodePool`,
+> `SamplingRule`, `OpenTelemetryCollector` or `TriggerAuthentication` appears in any render.
+>
+> **One thing the move exposed.** `cfn-validate.yml` globbed `cfn/*.yaml`, so the X-Ray template
+> was never linted or scanned — while its own header claimed it went through "the same cfn-lint /
+> cfn-nag gate". The workflow now covers both roots (verified locally on the pinned versions:
+> cfn-lint 1.56.1 + serverless rules, and cfn-nag via the pinned image — 0 failures, 0 warnings).
+> An author-only file asserting a gate it does not have is worse than one claiming nothing, because
+> it reads as reviewed.
 
 The three decisions worth defending:
 
@@ -303,6 +472,13 @@ an accident of two defaults. `maxReplicas: 20` remains unreachable here and alwa
 `requests.cpu: 250m` is 5000m against 4000m of node allocatable. **An autoscaler's maximum is a
 request, not a guarantee** — the quota was only ever the first thing to say no.
 
+> **Superseded once the worker's memory request was measured.** `limits.memory` is no longer the
+> binding ceiling for the worker; `requests.memory` is, at 9 replicas. Correcting the request from
+> 320Mi to the measured 448Mi moved the refusal from an accounting artefact (a LimitRange default
+> times a container declaring no limit) onto a number that states what the pod actually needs.
+> Both refusals now quote `requests.memory`, and both autoscalers hit it inside a single window —
+> see "The SLO and the HPA in one window" and the 4,000-record spike above.
+
 One more thing this settles: **at the gate's own 0.5s think time, 50 VUs produce roughly 1.8
 in-flight per pod against a target of 6, so the HPA correctly holds at `minReplicas`.** That is the
 autoscaler being right, and it is why `SLEEP=0` is a separate mode rather than a fudge.
@@ -353,7 +529,20 @@ identical image are healthy at the time.
 
 ## AI-tool review — the `loadtest-author` audit
 
-Run on a scratch branch against `loadtests/taxcalc-api-p99.js`.
+Run against `loadtests/taxcalc-api-p99.js`.
+
+> **Provenance, stated plainly.** The brief asks for this to be run on a scratch branch. It was
+> run on one, and **the branch was not retained** — so the process evidence a reviewer would want
+> (a scaffold commit, then a diff) no longer exists, unlike the config repo's `scratch/cfn-author`
+> and `scratch/cost-author`, which do. Recreating that branch now would be manufacturing
+> provenance after the fact, which is worse than the gap.
+>
+> What *is* verifiable is the outcome, in the committed script: `assertMixSumsToOne()`
+> ([taxcalc-api-p99.js:130](loadtests/taxcalc-api-p99.js#L130)) is the rejection, and
+> `cost_samples: ['count>0']` ([taxcalc-api-p99.js:87](loadtests/taxcalc-api-p99.js#L87)) is the
+> acceptance. Both arrived in `2d5d880`. Next time the scratch branch gets pushed before the audit
+> is written up, for the same reason the k6 gate has a `cost_samples` threshold — a control whose
+> evidence is not durable is not a control.
 
 **Accepted — the `cost_samples` counter.** The scaffold had `cost_per_request_usd` reading
 `X-Cost-Usd` and a `p(95)<0.003` threshold, with no guard on whether any sample was ever recorded.
