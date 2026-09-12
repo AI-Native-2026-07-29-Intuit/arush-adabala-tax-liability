@@ -149,7 +149,13 @@ jobs:
           k6 run --summary-export=k6-summary.json loadtests/taxcalc-api-p99.js
         env:
           TARGET: http://localhost:8080
-          TOKENS: .loadtest/tokens.json
+          # ABSOLUTE, and that is not fussiness. k6's open() resolves a relative path against the
+          # SCRIPT'S directory, not the working directory - which is why the script's own default
+          # is '../.loadtest/tokens.json', written relative to loadtests/. Passing the
+          # repo-root-relative '.loadtest/tokens.json' that every other tool in this workflow
+          # would take therefore looked for loadtests/.loadtest/tokens.json and died at init with
+          # "no such file or directory", AFTER the stack was up and healthy.
+          TOKENS: ${{ github.workspace }}/.loadtest/tokens.json
 
       - name: Upload k6 summary
         # `if: always()` because the summary of a FAILED run is the one worth reading. Uploading
