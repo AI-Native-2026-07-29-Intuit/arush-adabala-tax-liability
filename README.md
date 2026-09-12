@@ -1639,6 +1639,43 @@ API-validated the moment it was committed. What the generic tools have no opinio
 `cfn-guardrails.sh` instead — tag coverage and `TreatMissingData`, both proved to fire by breaking
 a template on purpose.
 
+**Four things stand between a clean machine and `deploy/embeddings 1/1`, and each one fails by
+naming something other than its cause.** All four are handled, in order, by
+[`scripts/embeddings-up.sh`](scripts/embeddings-up.sh) (`--smoke` also POSTs `/embed` and asserts
+1024 floats come back). The point of the script is that the thing it finally applies is
+`manifests/70-embeddings.deployment.yaml` **unmodified** — everything below is provisioning a real
+cluster would already have done:
+
+1. **The weights TEI cannot fetch for itself** (the `hf-hub` redirect bug, below). `curl -L`
+   follows the redirect correctly, so fetching out of band works where the pod's own downloader
+   cannot — ~1.4GB into `~/tei-models`, mounted into the k3d node at create time.
+2. **k3s will not start on a cgroup v1 host.** `failed to validate kubelet configuration ...
+   kubelet is configured to not run on a host using cgroup v1` — and the symptom is not that line
+   but a node that never registers while `kubectl` says `connection refused` for ten minutes.
+   Pinning `rancher/k3s:v1.28.15-k3s1` clears it.
+3. **containerd does not trust the intercepting proxy's CA**, though the host's Docker daemon
+   does. In-cluster pulls die with `x509: certificate signed by unknown authority`, so images are
+   pulled on the host and `k3d image import`ed — the same trick
+   [`observability-preload-images.sh`](scripts/observability-preload-images.sh) uses. Three images,
+   and two of them are non-obvious: `rancher/mirrored-pause` (without it the error is
+   `FailedCreatePodSandBox ... failed to get sandbox image`, which points at the pod's image and
+   not the sandbox's) and `mirrored-metrics-server` (without it *every later kubectl command*
+   prints several `Couldn't get resource list ... metrics.k8s.io` lines, which look like an error
+   in whatever command printed them).
+4. **The default StorageClass steals the PVC.** `local-path` is k3s's default, so a claim naming
+   no class gets it stamped on by admission and binds to a fresh *empty* directory rather than to
+   the volume holding the models. The pod then starts and TEI dies naming a missing model file —
+   a binding problem wearing a download problem's clothes. Turning the default off lets the claim
+   match [`manifests/dev/70-embeddings-models.localpv.yaml`](manifests/dev/70-embeddings-models.localpv.yaml),
+   which is `Retain` so tearing the cluster down never deletes the 1.3GB download.
+
+Result: `kubectl -n taxcalc-dev get deploy embeddings` → `1/1  1  1`, `Available=True`, TEI logging
+`Ready` after loading the ONNX graph from disk, `/embed` returning a 1024-dimension vector, and
+`EmbeddingsClientLiveIT` green against it — the same test that skips itself when no service is
+reachable. The image is amd64-only and runs under emulation on Apple Silicon, which works and is
+why the manifest's `startupProbe` is generous; the one oddity observed is TEI exiting 0 and being
+restarted once under emulated load, after which it served every request normally.
+
 **The embeddings model is mounted, not downloaded.** TEI's `hf-hub` 0.3.2 disables reqwest's
 redirect following and re-implements it by parsing the raw `Location` header as an absolute URL, so
 a TLS-intercepting proxy that rewrites that redirect to a relative path fails with
@@ -1657,6 +1694,14 @@ which invalidated three of this session's test runs before it was spotted.
 ./gradlew build   # compile and run all checks (the Spring Boot service)
 ./gradlew test    # run the JUnit 5 test suite
 ./gradlew integrationTest --tests '*TaxpayerEmbeddingsRepoTest'   # container-backed tests only
+```
+
+```bash
+# The self-hosted embeddings service on a local k3d cluster, and the Task 3 Done-When check.
+# Idempotent; ~5 min cold, almost all of it the 1.3GB model download.
+scripts/embeddings-up.sh --smoke
+kubectl -n taxcalc-dev get deploy embeddings      # -> 1/1 Available
+./gradlew test --tests '*EmbeddingsClientLiveIT'  # green while the script's port-forward is up
 ```
 
 ```bash

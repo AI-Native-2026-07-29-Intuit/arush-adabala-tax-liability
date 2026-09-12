@@ -70,7 +70,8 @@ the IAM role GitHub Actions assumes via OIDC to deploy every later stack.
 - **Bucket** — PublicAccessBlock on all four toggles; `BucketEncryption` with
   `aws:kms` + `alias/aws/s3`; versioning on; lifecycle rule expiring
   noncurrent versions after `!Ref RetentionDays`; a bucket policy with an
-  explicit `Deny` on `aws:SecureTransport: false`.
+  explicit `Deny` on `aws:SecureTransport: false`, carrying `Action: "s3:*"`
+  and both the bucket ARN and its `/*` form (non-negotiable 2).
 - **Role** — `sts:AssumeRoleWithWebIdentity` against
   `arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com`.
   Inline policy enumerating the CloudFormation ChangeSet + describe + drift
@@ -116,8 +117,15 @@ to `STANDARD_IA` then `GLACIER_IR`, and a deny-non-TLS bucket policy.
    neither implies the other: the first covers `delete-stack`, the second
    covers an update that changes an immutable property and would replace the
    resource. S3 buckets, RDS instances, Secrets Manager secrets.
-2. **No `Action: '*'` and no `Resource: '*'`.** Every IAM policy enumerates
-   its actions and scopes to a specific ARN or ARN prefix.
+2. **No `Action: '*'` and no `Resource: '*'` — in an `Allow`.** Every `Allow`
+   enumerates its actions and scopes to a specific ARN or ARN prefix. A
+   condition-guarded `Deny` is the inverse case and must be written wide:
+   `Action: "s3:*"` on a `aws:SecureTransport: false` deny, not a
+   `GetObject`/`PutObject`/`ListBucket` triple. An enumerated Deny is only as
+   complete as its list, and the list never is — `DeleteObject` and
+   `PutBucketPolicy` over plain HTTP slip straight past that triple. Widening
+   a Deny that fires only on the request it exists to stop blocks nothing
+   legitimate.
 3. **`iam:PassRole` is never unscoped.** It is the classic escalation path.
 4. **No database password as a Parameter**, `NoEcho: true` or not. NoEcho
    masks console output; the value still crosses the API and sits in the

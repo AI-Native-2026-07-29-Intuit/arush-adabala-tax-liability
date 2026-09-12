@@ -19,7 +19,7 @@ import org.springframework.web.client.RestClient;
 /**
  * {@link EmbeddingsClient} against a real Hugging Face TEI service (W6 D4 Task 3 prep).
  *
- * <p>{@link TaxpayerEmbeddingsRepoIT} deliberately makes no embedding call - its vectors are
+ * <p>{@link TaxpayerEmbeddingsRepoTest} deliberately makes no embedding call - its vectors are
  * axis-aligned so the geometry is hand-derivable. That leaves exactly one thing untested: whether
  * this client can read what TEI actually returns. TEI's {@code /embed} answers with a JSON array
  * OF arrays (one vector per input), so a single-input request comes back nested one level deep -

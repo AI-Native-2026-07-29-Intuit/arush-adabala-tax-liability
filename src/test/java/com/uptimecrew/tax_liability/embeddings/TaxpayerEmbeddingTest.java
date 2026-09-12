@@ -14,7 +14,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * The {@link TaxpayerEmbedding} value contract (W6 D4 Task 3).
  *
- * <p>Pure unit tests - no container, no Spring. {@link TaxpayerEmbeddingsRepoIT} proves the
+ * <p>Pure unit tests - no container, no Spring. {@link TaxpayerEmbeddingsRepoTest} proves the
  * vector reaches Postgres and comes back; this proves the type refuses to be constructed wrong in
  * the first place, which is the cheaper place to catch a model swap.
  */

@@ -10,6 +10,7 @@ import com.uptimecrew.tax_liability.TestImages;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -45,25 +46,35 @@ import org.flywaydb.core.Flyway;
  * got slow", which reads like a capacity problem.
  */
 @Testcontainers
-class TaxpayerEmbeddingsRepoIT {
+@Tag("integration")
+class TaxpayerEmbeddingsRepoTest {
 
     /**
-     * No {@code withReuse(true)}, and that is a correction rather than an omission.
+     * {@code withReuse(true)}: this container runs Flyway's whole migration set on start, and the
+     * suite re-runs often enough for that to be worth keeping between runs.
      *
-     * <p>The first draft set it, reasoning that this container runs Flyway's whole migration set
-     * on start and the suite re-runs often. It passed 11/11 in isolation and then failed the very
-     * next full-suite run with {@code initializationError} - a {@link java.net.ConnectException}
-     * from Flyway in {@code @BeforeAll}, because the reused container from the isolated run had
-     * been reaped in between and left a stale reuse entry pointing at nothing.
+     * <p><b>It is opt-in, and that is what makes it safe.</b> Testcontainers honours reuse only
+     * when {@code testcontainers.reuse.enable=true} is set in {@code ~/.testcontainers.properties}
+     * (or {@code TESTCONTAINERS_REUSE_ENABLE=true} in the environment). Everywhere else - CI
+     * included - this call logs a notice and starts a fresh container, so the flag cannot make a
+     * pipeline depend on state left behind by a previous run.
      *
-     * <p>That is the worst failure shape available: it depends on what ran before it, so it is
-     * invisible when you run the class you are working on and appears only in the full suite. No
-     * other integration test in this repository uses reuse, and buying a few seconds at the cost
-     * of order-dependent flakiness is a bad trade anywhere - particularly in the one suite whose
-     * entire selling point is that its results are derivable rather than observed.
+     * <p>Measured on this repository's own setup, where {@code ryuk.container.disabled=true}: even
+     * with reuse switched on, two consecutive runs each created a NEW container, because with Ryuk
+     * disabled Testcontainers removes started containers from its own JVM shutdown hook. So here
+     * the flag currently buys nothing and costs nothing. Whether it ever pays off is an
+     * environment question, which is exactly the kind of thing a flag should be.
+     *
+     * <p>An earlier revision dropped this flag, blaming it for a full-suite
+     * {@code initializationError} - a {@link java.net.ConnectException} from Flyway in
+     * {@code @BeforeAll}. That was a misdiagnosis: the same failure reproduces with reuse disabled
+     * (Testcontainers says so in the log, then Flyway fails anyway), and its real cause is the
+     * container's published port not being reachable yet. {@link #migrate()} explains it and
+     * handles it.
      */
     @Container
-    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(TestImages.POSTGRES);
+    static final PostgreSQLContainer<?> PG =
+            new PostgreSQLContainer<>(TestImages.POSTGRES).withReuse(true);
 
     private static final String TENANT = "acme";
     private static final String OTHER_TENANT = "globex";
@@ -71,8 +82,63 @@ class TaxpayerEmbeddingsRepoIT {
     private static JdbcTemplate jdbc;
     private TaxpayerEmbeddingRepository repository;
 
+    /** Attempts and spacing for {@link #migrate()} - ~15s of patience, then a real failure. */
+    private static final int MIGRATE_ATTEMPTS = 10;
+    private static final long MIGRATE_BACKOFF_MS = 300L;
+
+    /**
+     * Runs the real migration set, retrying while the container's published port is still refusing
+     * connections.
+     *
+     * <h2>What the retry is actually for</h2>
+     *
+     * <p>An earlier revision of this class blamed a full-suite {@code initializationError} on
+     * {@code withReuse(true)} and removed the flag. That diagnosis was wrong, and the evidence is
+     * that the same failure reproduces with reuse switched OFF - Testcontainers logs
+     * "Reuse was requested but the environment does not support the reuse of containers" and then
+     * Flyway still fails here with {@code java.net.ConnectException: Connection refused}, against
+     * a container it has just reported as started.
+     *
+     * <p>The cause is that {@link PostgreSQLContainer}'s wait strategy watches the container's
+     * LOG for "database system is ready to accept connections". That says the server inside the
+     * container is up; it says nothing about whether the Docker host has finished publishing the
+     * mapped port. On a VM-backed daemon (Rancher Desktop here) that forward is set up
+     * asynchronously and, under the load of a full suite with several other containers running, it
+     * can lag the log line by a second or more.
+     *
+     * <p>Which is why this class was the only one affected. Every other Postgres test in this
+     * repository reaches the database through Spring Boot's {@code @ServiceConnection} and
+     * therefore HikariCP, whose pool retries for the length of its connection timeout and silently
+     * absorbs exactly this window. This one connects through a raw {@link DriverManagerDataSource}
+     * on purpose - it is testing migrations, not the application's data source - and a
+     * DriverManager connection either succeeds or throws on the first try.
+     *
+     * <p>So the fix is to wait, not to recreate: restarting the container was tried and produced a
+     * second container whose port was refused just as fast. Anything that is not a connection
+     * failure is a real schema fault and is rethrown on the spot, untouched.
+     */
     @BeforeAll
     static void migrate() {
+        RuntimeException lastFailure = null;
+        for (int attempt = 1; attempt <= MIGRATE_ATTEMPTS; attempt++) {
+            try {
+                jdbc = new JdbcTemplate(migrated());
+                return;
+            } catch (RuntimeException failure) {
+                if (!isConnectionFailure(failure)) {
+                    throw failure;
+                }
+                lastFailure = failure;
+                sleep(MIGRATE_BACKOFF_MS * attempt);
+            }
+        }
+        throw new IllegalStateException("Postgres at " + PG.getJdbcUrl() + " never accepted a "
+                + "connection across " + MIGRATE_ATTEMPTS + " attempts - this is no longer the "
+                + "port-publishing lag the retry exists for", lastFailure);
+    }
+
+    /** Migrate a data source pointed at whatever the container currently is, and hand it back. */
+    private static DriverManagerDataSource migrated() {
         DriverManagerDataSource ds = new DriverManagerDataSource(
                 PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
         ds.setDriverClassName("org.postgresql.Driver");
@@ -93,7 +159,36 @@ class TaxpayerEmbeddingsRepoIT {
                 .locations("classpath:db/migration")
                 .load()
                 .migrate();
-        jdbc = new JdbcTemplate(ds);
+        return ds;
+    }
+
+    /**
+     * Whether this failure is "nothing answered on that port", as opposed to a migration that ran
+     * and was rejected.
+     *
+     * <p>Matched on the cause chain rather than on message text: Flyway wraps the driver's
+     * {@link java.net.ConnectException} several layers deep, and the wrapper's message varies by
+     * version.
+     */
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting for Postgres", ie);
+        }
+    }
+
+    private static boolean isConnectionFailure(Throwable failure) {
+        for (Throwable t = failure; t != null; t = t.getCause()) {
+            if (t instanceof java.net.ConnectException || t instanceof java.sql.SQLTransientConnectionException) {
+                return true;
+            }
+            if (t == t.getCause()) {
+                break;
+            }
+        }
+        return false;
     }
 
     /**
@@ -164,6 +259,25 @@ class TaxpayerEmbeddingsRepoIT {
         assertThat(found.get(0).embedding()).isEqualTo(vector);
         assertThat(found.get(0).tenantId()).isEqualTo(TENANT);
         assertThat(found.get(0).insertedAt()).isNotNull();
+    }
+
+    /**
+     * Re-ingesting a taxpayer replaces its vector instead of adding a second row.
+     *
+     * <p>This is the behaviour {@link TaxpayerEmbeddingIngestService}'s derived row id depends on.
+     * Without the {@code ON CONFLICT} clause the second write fails on the primary key; with a
+     * random id per write it would succeed and leave the stale vector in the table, where a
+     * nearest-neighbour search would keep returning the same taxpayer once per generation.
+     */
+    @Test
+    void savingTheSameIdTwiceReplacesTheVectorRatherThanAddingARow() {
+        String id = UUID.randomUUID().toString();
+        repository.save(new TaxpayerEmbedding(id, TENANT, axis(1), null));
+
+        repository.save(new TaxpayerEmbedding(id, TENANT, axis(2), null));
+
+        assertThat(repository.count()).isEqualTo(1);
+        assertThat(repository.findById(id).get(0).embedding()).isEqualTo(axis(2));
     }
 
     /**

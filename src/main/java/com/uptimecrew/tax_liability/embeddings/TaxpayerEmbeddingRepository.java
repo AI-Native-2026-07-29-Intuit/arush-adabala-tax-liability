@@ -28,9 +28,27 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class TaxpayerEmbeddingRepository {
 
+    /**
+     * Upsert, not a plain INSERT.
+     *
+     * <p>{@link TaxpayerEmbeddingIngestService} derives the row id from
+     * {@code tenant|taxpayerId}, so re-embedding a taxpayer arrives here with the id it already
+     * has. Without {@code ON CONFLICT} that second ingest fails on the primary key, and the
+     * obvious fix - a random id per call - is worse: the table would then hold every vector a
+     * taxpayer ever had, and a nearest-neighbour search would return the same taxpayer several
+     * times over, once per stale generation.
+     *
+     * <p>{@code inserted_at} is refreshed on update because it dates the vector in the row, not
+     * the first time this taxpayer was ever seen - and the question that column has to answer is
+     * "how stale is this embedding", which only the former can.
+     */
     private static final String INSERT = """
             INSERT INTO taxcalc.taxpayer_embeddings (id, tenant_id, embedding)
             VALUES (?::uuid, ?, ?::vector)
+            ON CONFLICT (id) DO UPDATE
+                SET embedding   = EXCLUDED.embedding,
+                    tenant_id   = EXCLUDED.tenant_id,
+                    inserted_at = now()
             """;
 
     /**
@@ -71,7 +89,7 @@ public class TaxpayerEmbeddingRepository {
     }
 
     /**
-     * Insert one embedding.
+     * Write one embedding, replacing any vector already stored under the same id.
      *
      * @param embedding the row to write; never null
      * @throws NullPointerException if {@code embedding} is null
