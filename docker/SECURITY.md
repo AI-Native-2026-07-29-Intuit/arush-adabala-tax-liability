@@ -364,6 +364,33 @@ netty, no expat and no Trivy configuration; the netty pin predates the branch.
 `main` was last green on this scan on 2026-09-04 and would fail identically if
 re-run today. The vulnerability database moved; the image did not.
 
+**Waived: `CVE-2026-86145` and `CVE-2026-89161` (both HIGH, `libpcre2-8-0`).**
+Added 2026-09-13 during W6 D5. Two HIGHs on one package, same pinned base, same
+ceiling as the libexpat entries above — and this time the check went one step
+further than "the pinned digest has not moved":
+
+```
+$ docker buildx imagetools inspect gcr.io/distroless/java-base-debian12:nonroot
+  Digest: sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c   # unchanged
+
+$ trivy image --severity HIGH,CRITICAL gcr.io/distroless/java-base-debian12:latest
+  libpcre2-8-0  CVE-2026-86145  HIGH  fixed  10.42-1  →  10.42-1+deb12u1
+  libpcre2-8-0  CVE-2026-89161  HIGH  fixed  10.42-1  →  10.42-1+deb12u1
+```
+
+**The floating `:latest` tag was scanned as well as the pinned digest, and it is
+unpatched too.** That distinction is worth the extra command: "our pin is stale"
+and "upstream has not shipped a fix" look identical from the pinned digest
+alone, and only the second one justifies a waiver. Here it is the second —
+Google's newest published `java-base-debian12` still carries `10.42-1` while
+Debian's fix is in `10.42-1+deb12u1`, so bumping the base is not a deferred
+action, it is an unavailable one.
+
+**Not a W6 D5 regression.** That deliverable touches no Dockerfile, no base
+image and no Trivy configuration. The branch was green on this scan on
+2026-09-11 and red on 2026-09-12 with no image change in between: the
+vulnerability database moved.
+
 **Two libexpat CVEs on one pinned base in nine days is itself the signal.** A
 waiver renewed twice is a waiver turning into a standing exception, which is
 what the `exp:` dates exist to prevent. If 2026-09-27 arrives with still no
@@ -424,7 +451,10 @@ cleanly, 1.0.7 does not. Reverted rather than shipping a broken image to hit
 a lower CVE count.
 
 The remaining 23 are waived as of **2026-08-27**, re-evaluate by
-**2026-09-27** (or sooner, on the next scheduled digest/dependency refresh):
+**2026-09-27** (or sooner, on the next scheduled digest/dependency refresh).
+Note the base-image entries now span three packages — `liblcms2-2`, `libexpat1`
+and `libpcre2-8-0` — all blocked on the same unrebuilt distroless image, which
+strengthens rather than weakens the case for moving off `java-base-debian12`:
 
 | Package | Installed | Fix needs | Why not fixed now |
 |---|---|---|---|
