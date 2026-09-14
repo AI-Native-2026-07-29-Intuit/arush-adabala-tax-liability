@@ -90,10 +90,24 @@ jobs:
       # default, and every other workflow in this repo calls it bare too.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The migration-immutability gate below diffs against the base branch, which needs
-          # more than actions/checkout's default single commit. Only set on pull_request - a
-          # push build has no base ref to diff against and skips the gate entirely.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          # The migration-immutability gate below diffs against the base branch, which needs more
+          # than actions/checkout's default single commit.
+          #
+          # Unconditional 0, and the first attempt at being clever here is worth keeping as a
+          # warning. It was:
+          #
+          #   fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          #
+          # which is the standard "ternary" idiom for GitHub expressions and is BROKEN whenever
+          # the true-branch value is falsy. `true && 0` evaluates to `0`, `0` is falsy, so
+          # `0 || 1` yields 1 - the expression silently returns the FALSE branch on a pull
+          # request. The clone stayed shallow and the gate died with
+          # `fatal: origin/main...HEAD: no merge base`, which reads like a git problem rather
+          # than an expression-evaluation one.
+          #
+          # A full fetch on a push build costs a few seconds and buys the absence of that whole
+          # class of bug.
+          fetch-depth: 0
 
       # ---------------------------------------------------------------------------------------
       # An applied Flyway migration is immutable. Editing one - EVEN A COMMENT - is a breaking
@@ -133,7 +147,11 @@ jobs:
             echo "$changed" | sed 's/^/  /'
             echo "::error::Flyway checksums the whole file - a comment edit is a breaking change."
             echo "::error::Add a NEW migration instead. If this edit is genuinely required, every"
-            echo "::error::environment that ran the old file needs `flyway repair` before deploy."
+            # SINGLE quotes: backticks inside a double-quoted bash string are COMMAND
+            # SUBSTITUTION, so the double-quoted version of this line would try to execute
+            # `flyway repair` on the runner the moment the gate actually fired - i.e. the error
+            # path would itself misbehave, in the one situation nobody is watching it.
+            echo '::error::environment that ran the old file needs `flyway repair` before deploy.' 
             exit 1
           fi
           echo "no applied migration was modified."
