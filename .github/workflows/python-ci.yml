@@ -1,0 +1,99 @@
+# .github/workflows/python-ci.yml
+# The Python sidecar gate (W7 D1 Task 4): uv sync --frozen -> ruff check ->
+# ruff format --check -> mypy --strict -> pytest with a coverage floor.
+#
+# Each step is its own block, so a failure names the offending step in the
+# GitHub UI rather than hiding inside one long shell line. The gate fails on
+# the first non-zero step: a type error is not worth running tests past, and a
+# lockfile that does not match pyproject.toml is not worth linting.
+name: taxcalc-ai ci
+
+on:
+  # PATH-SCOPED ON BOTH TRIGGERS, unlike ci.yml next door, which is
+  # deliberately unfiltered on pull_request.
+  #
+  # That difference is not an oversight, and the reason matters for whoever
+  # touches branch protection next. ci.yml is a REQUIRED status check on main,
+  # and a required check that is path-filtered is a trap: GitHub waits forever
+  # for a context that will never report, so a PR touching none of the filtered
+  # paths can never merge. That already stranded four Dependabot PRs here
+  # (#39-#42) and is why ci.yml runs its full Testcontainers suite even on
+  # docs-only PRs.
+  #
+  # This workflow is NOT a required check, so the filter is safe and buys back
+  # the thing the Java gate had to give up: a Java-only PR does not pay the
+  # Python tax, and a Python-only PR does not wait on it either.
+  #
+  # If this ever becomes a required check, the filter must come off first.
+  push:
+    branches: [main]
+    paths:
+      - "taxcalc-ai/**"
+      - ".github/workflows/python-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "taxcalc-ai/**"
+      - ".github/workflows/python-ci.yml"
+
+concurrency:
+  group: python-ci-${{ github.ref }}
+  # A PR force-push cancels its own stale run; a push to main is left to finish,
+  # since a cancelled main run leaves the branch with no recorded verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege: this job reads the tree and publishes nothing.
+permissions:
+  contents: read
+
+jobs:
+  python-quality-gate:
+    name: uv sync + ruff + mypy + pytest
+    # Pinned, not ubuntu-latest: `latest` moves under you, and a gate whose
+    # runner image changes silently is a gate that can go red for reasons that
+    # have nothing to do with the diff.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: taxcalc-ai
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv (pinned)
+        # SHA-pinned, carrying forward the W6 D1 discipline: a mutable tag on a
+        # third-party action is an unreviewed code-execution path into CI.
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Pin Python 3.12 via uv
+        # uv downloads the interpreter; the runner's system Python is not used,
+        # so the version here is the version in .python-version, not whatever
+        # the runner image happens to ship.
+        run: uv python install 3.12
+
+      - name: uv sync --frozen (fail on lockfile drift)
+        # --frozen makes uv.lock the source of truth: if pyproject.toml asks for
+        # something the lockfile does not record, this fails rather than
+        # silently resolving a different dependency set than anyone tested.
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: ruff format --check
+        # --check reports formatting drift without rewriting the tree: CI
+        # reports, it does not edit.
+        run: uv run ruff format --check
+
+      - name: mypy --strict
+        # tests/ is type-checked too. Untyped tests are where `Any` creeps back
+        # in, and a test that does not type-check is a test that may not be
+        # exercising the signature it claims to.
+        run: uv run mypy --strict src/ tests/
+
+      - name: pytest with coverage
+        run: uv run pytest -v --cov=src --cov-fail-under=85
