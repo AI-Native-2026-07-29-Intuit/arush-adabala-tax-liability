@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25   # the run is ~12 minutes; this bounds a hung target rather than the test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The filter step diffs against the base branch, which needs more than the default
           # single commit. 0 rather than a guessed depth: a shallow clone whose merge-base is
@@ -229,7 +229,7 @@ jobs:
         # only on success would discard exactly the artefact someone needs to see which threshold
         # broke and by how much.
         if: always() && steps.filter.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: k6-summary
           path: k6-summary.json
@@ -245,7 +245,7 @@ jobs:
             > compose-logs.txt || true
           cat compose-logs.txt || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure() && steps.filter.outputs.run == 'true'
         with:
           name: compose-logs
