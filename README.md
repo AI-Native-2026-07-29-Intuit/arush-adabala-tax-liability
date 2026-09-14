@@ -1846,11 +1846,20 @@ and pinning it. Argo CD now reports `Synced / Healthy` with both pods on the Git
 
 ```
 checks                ✓ 'rate>0.99'      rate=99.90%
-cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062
+cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062   <- 1.74x high; see the note below
 cost_samples          ✓ 'count>0'        count=10609
 http_req_duration     ✓ 'p(99)<500'      p(99)=39.48ms
 http_req_failed       ✓ 'rate<0.005'     rate=0.04%
 ```
+
+**The cost figure above was later found to be 1.74x too high**, and the bug was in `PriceBook`
+rather than anywhere in the gate. The table held one *blended* rate per model and the
+`claude-haiku-4-5` entry was `0.003`/1K - exactly `(0.001 + 0.005) / 2`, a 50/50 input:output
+split, against a real workload of about 82/18. A blended rate cannot be wrong in a way the
+arithmetic notices: the multiplication is correct, the EMF line is well-formed, the header is
+present and exponent-free. Corrected to separate input and output rates and re-measured on the
+same shape: **`p(95)=0.00043` from 9,216 samples**, still far inside the `0.003` budget. The three
+SLO numbers never moved.
 
 `X-Cost-Usd` already existed and was already correct from W6 D4 — `BigDecimal.toPlainString()`,
 not the reference implementation's `Double.toString`, which renders a ~$0.0002 Haiku call as

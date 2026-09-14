@@ -52,7 +52,7 @@ In-cluster k6 Job, 200 VUs, 12 minutes, against the `loadtest` profile:
 ```
 █ THRESHOLDS
   checks                ✓ 'rate>0.99'      rate=99.90%
-  cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062
+  cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062     <- see the correction below
   cost_samples          ✓ 'count>0'        count=10609
   http_req_duration     ✓ 'p(99)<500'      p(99)=39.48ms
   http_req_failed       ✓ 'rate<0.005'     rate=0.04%
@@ -60,7 +60,14 @@ In-cluster k6 Job, 200 VUs, 12 minutes, against the `loadtest` profile:
 http_reqs ....... 214030  297.14/s
 ```
 
-The cost figure comes from 10,609 real `X-Cost-Usd` header reads, not from a default. That
+> **The cost figure above is 1.74x too high, and the error was in `PriceBook`, not in k6.** The
+> price table held one *blended* rate per model, and the `claude-haiku-4-5` entry was `0.003`/1K -
+> exactly `(0.001 + 0.005) / 2`, a 50/50 input:output split. Real calls run about 82/18. Corrected
+> to separate input and output rates and re-measured on the same 200-VU / 12-minute shape:
+> **`p(95)=0.00043` from 9,216 samples**, still far inside the `0.003` budget. The three SLO
+> numbers themselves never moved. Full write-up in the config repo's `taxcalc-api/COST.md`.
+
+The cost figure comes from real `X-Cost-Usd` header reads, not from a default. That
 distinction is the whole reason `cost_samples: ['count>0']` is a threshold: without it, a
 deployment that stopped emitting the header would make every sample
 `parseFloat(undefined || '0')` = 0, and `0 < 0.003` would pass forever while reporting a control
@@ -80,7 +87,7 @@ Job exit code 0 — all five green:
 ```
 █ THRESHOLDS
   checks                ✓ 'rate>0.99'      rate=99.35%
-  cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062
+  cost_per_request_usd  ✓ 'p(95)<0.003'    p(95)=0.00062     <- pre-PriceBook-fix figure
   cost_samples          ✓ 'count>0'        count=11396
   http_req_duration     ✓ 'p(99)<500'      p(99)=170.27ms
   http_req_failed       ✓ 'rate<0.005'     rate=0.43%
@@ -526,6 +533,49 @@ the decoder. The message names `JwtDecoder`, never the run mode, and the api pod
 identical image are healthy at the time.
 
 ---
+
+## The two autoscalers compete for one quota, and the wrong one wins
+
+Found while re-measuring the cost figure after the `PriceBook` fix, on a cluster that by then also
+ran Argo CD. Two 200-VU re-runs of the *unchanged* gate breached thresholds the original run had
+passed comfortably:
+
+```
+run A (embeddings up)    http_req_failed 0.87%   p(99) ~   (api ready 2, HPA desired 5)
+run B (embeddings down)  http_req_failed 5.62%   p(99) 3.25s  (api ready 1-2, HPA desired 12)
+cost_per_request_usd     p(95) 0.00043 / 0.00044   <- stable and correct in both
+```
+
+The cost threshold is stable across both, which is what the re-run was for. The latency and error
+breaches are not a pricing regression and not a code regression - they are the namespace
+`ResourceQuota`, reached by a path the original run never took.
+
+**The gate's own workload feeds the competitor.** 55% of the k6 mix is `POST /api/v1/taxpayers`,
+which writes to the outbox and produces `taxpayers.events`. KEDA sees that lag within one 15s poll
+and scales `taxcalc-api-worker`; each worker requests 448Mi. The api's HPA sees rising in-flight
+concurrency at the same moment and asks for more `taxcalc-api` pods at 512Mi each. Both draw on
+one `requests.memory: 8Gi` namespace quota, and the event-driven autoscaler gets there first -
+lag appears the instant a write lands, whereas in-flight concurrency has to climb through a 15s
+scrape and a 1-minute averaging window. The worker then holds its pods for a 300s `cooldownPeriod`.
+
+```
+Warning FailedCreate  Error creating: pods "taxcalc-api-..." is forbidden: exceeded quota:
+                      requested: requests.memory=512Mi, used: requests.memory=8128Mi, limited: 8Gi
+```
+
+So the api was refused the replicas its own HPA had calculated, served 200 VUs on one or two pods,
+and burned the error budget - while the worker, which has no SLO attached to it at all, ran
+comfortably. **The autoscaler with the SLO lost to the autoscaler without one**, and nothing in
+either object expresses that priority.
+
+Freeing 1 CPU / 2Gi by scaling the unrelated `embeddings` Deployment to zero did not fix it: KEDA
+simply absorbed the freed memory on its next poll, and run B was *worse* than run A.
+
+The fix is not a bigger quota, which only moves the number at which this happens. It is to make
+the priority explicit - a `ResourceQuota` scoped by `PriorityClass` with the api in the higher
+class, or separate quotas per workload so the two autoscalers cannot draw from one pool. Both are
+beyond W6 D5's scope and neither is speculative: this is a measured failure with a `kubectl` event
+attached to it.
 
 ## AI-tool review — the `loadtest-author` audit
 
