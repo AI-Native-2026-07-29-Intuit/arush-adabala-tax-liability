@@ -49,7 +49,7 @@ import org.springframework.web.bind.annotation.RestController;
  * {@link com.uptimecrew.tax_liability.security.RateLimitFilter}, both of which had to learn about
  * this prefix explicitly, since the filter chain's default is {@code denyAll}.
  *
- * <p><b>The model is priced before it is called.</b> {@link PriceBook#priceFor(String)} would throw
+ * <p><b>The model is priced before it is called.</b> {@link PriceBook#requirePriceable(String)} would throw
  * inside the middleware anyway, but by then the tokens are already bought and the caller gets a 500
  * for a call that succeeded upstream and cost real money nobody can attribute. Checking first turns
  * that into a 400 that costs nothing.
@@ -98,7 +98,7 @@ public class LlmProxyController {
         String model = request.model();
 
         // Fail before spending, not after - see the class javadoc.
-        PriceBook.priceFor(model);
+        PriceBook.requirePriceable(model);
 
         CallContext ctx = new CallContext(Instant.now(), service, tenant, request.feature(), response);
         UpstreamResponse resp = costMiddleware.observe(ctx, c -> upstream.complete(request.prompt(), model));
@@ -114,7 +114,7 @@ public class LlmProxyController {
     /**
      * Turns the validation failures this route can provoke into 400s.
      *
-     * <p>{@link CompletionRequest}'s compact constructor and {@link PriceBook#priceFor(String)}
+     * <p>{@link CompletionRequest}'s compact constructor and {@link PriceBook#requirePriceable(String)}
      * both throw {@link IllegalArgumentException} for a caller's mistake - a blank prompt, an
      * unpriceable model id. Without this they surface as 500s, which would say the server broke
      * when in fact it refused correctly.

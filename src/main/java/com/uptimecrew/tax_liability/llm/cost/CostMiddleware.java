@@ -107,9 +107,20 @@ public class CostMiddleware {
      */
     long costUsdE5(UpstreamResponse resp) {
         Objects.requireNonNull(resp, "resp must not be null");
-        BigDecimal pricePerK = PriceBook.priceFor(resp.modelId());
-        BigDecimal costUsd = pricePerK
-                .multiply(BigDecimal.valueOf(resp.totalTokens()))
+        PriceBook.Rates rates = PriceBook.ratesFor(resp.modelId());
+
+        // Priced per token CLASS, not on a blended rate over totalTokens(). Until W6 D5 this
+        // multiplied one blended number by the total, and that blend was struck at a 50/50
+        // input:output split while the real call is 82/18 - so every figure was 1.74x high. See
+        // PriceBook's javadoc: a blended rate cannot be wrong in a way the arithmetic notices,
+        // which is why the split is worth the extra lines.
+        //
+        // Both products are summed BEFORE the single divide, so there is still exactly one
+        // rounding step at the end. Dividing each side separately would round twice and the two
+        // errors would not cancel.
+        BigDecimal inputCost = rates.inputPer1K().multiply(BigDecimal.valueOf(resp.inputTokens()));
+        BigDecimal outputCost = rates.outputPer1K().multiply(BigDecimal.valueOf(resp.outputTokens()));
+        BigDecimal costUsd = inputCost.add(outputCost)
                 .divide(TOKENS_PER_PRICE_UNIT, WORKING_SCALE, RoundingMode.HALF_UP);
         return costUsd
                 .setScale(CostResponseHeader.COST_SCALE, RoundingMode.HALF_UP)

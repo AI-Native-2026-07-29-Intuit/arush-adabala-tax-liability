@@ -141,8 +141,9 @@ class LlmProxyWireContractIT {
      * The Done-when line, with the cost derived from a genuine {@code usage} block that travelled
      * over a real HTTP connection.
      *
-     * <p>Hand-computed: Haiku is $0.003 per 1,000 tokens, so 14 + 5 = 19 tokens costs
-     * 0.003 * 19 / 1000 = $0.000057, which rounds HALF_UP at scale 5 to {@code 0.00006}.
+     * <p>Hand-computed, priced per token class: 14 input at $0.001/1K and 5 output at
+     * $0.005/1K costs (14*0.001 + 5*0.005) / 1000 = $0.000039, which rounds HALF_UP at
+     * scale 5 to {@code 0.00004}.
      */
     @Test
     void costHeaderIsDerivedFromRealUsageBlock() throws Exception {
@@ -155,7 +156,7 @@ class LlmProxyWireContractIT {
                 .andExpect(status().isOk())
                 .andReturn();
 
-        assertThat(result.getResponse().getHeader(CostResponseHeader.HEADER)).isEqualTo("0.00006");
+        assertThat(result.getResponse().getHeader(CostResponseHeader.HEADER)).isEqualTo("0.00004");
 
         JsonNode body = MAPPER.readTree(result.getResponse().getContentAsString());
         assertThat(body.get("inputTokens").asLong()).isEqualTo(INPUT_TOKENS);
@@ -174,7 +175,7 @@ class LlmProxyWireContractIT {
         assertThat(line.at("/_aws/CloudWatchMetrics/0/Namespace").asText()).isEqualTo("uptimecrew/llmproxy");
         assertThat(line.get("tenant").asText()).isEqualTo("tally");
         assertThat(line.get("feature").asText()).isEqualTo("explain-liability");
-        assertThat(line.get("CostUsdE5").asLong()).isEqualTo(6L);
+        assertThat(line.get("CostUsdE5").asLong()).isEqualTo(4L);
         assertThat(line.get("inputTokens").asLong()).isEqualTo(INPUT_TOKENS);
         assertThat(line.get("outputTokens").asLong()).isEqualTo(OUTPUT_TOKENS);
     }

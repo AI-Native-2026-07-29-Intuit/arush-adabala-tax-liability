@@ -110,8 +110,10 @@ class LlmProxyCompletionsIT {
      * 200, a non-zero {@code X-Cost-Usd}, and exactly one EMF cost line in namespace
      * {@code uptimecrew/llmproxy}.
      *
-     * <p>Hand-computed: Haiku is $0.003 per 1,000 tokens, so 17 + 42 = 59 tokens costs
-     * 0.003 * 59 / 1000 = $0.000177, which rounds HALF_UP at scale 5 to {@code 0.00018}.
+     * <p>Hand-computed, priced per token class: 17 input at $0.001/1K and 42 output at
+     * $0.005/1K costs (17*0.001 + 42*0.005) / 1000 = $0.000227, which rounds HALF_UP at
+     * scale 5 to {@code 0.00023}. Note the output tokens dominate despite being fewer -
+     * the exact asymmetry a blended rate cannot express.
      */
     @Test
     void assertsCostHeader() throws Exception {
@@ -125,7 +127,7 @@ class LlmProxyCompletionsIT {
                 .andReturn();
 
         String header = result.getResponse().getHeader(CostResponseHeader.HEADER);
-        assertThat(header).isEqualTo("0.00018");
+        assertThat(header).isEqualTo("0.00023");
         assertThat(Double.parseDouble(header)).isGreaterThan(0.0);
 
         JsonNode body = MAPPER.readTree(result.getResponse().getContentAsString());
@@ -146,7 +148,7 @@ class LlmProxyCompletionsIT {
                 .isEqualTo("[\"service\",\"tenant\",\"feature\"]");
         assertThat(line.get("tenant").asText()).isEqualTo("tally");
         assertThat(line.get("feature").asText()).isEqualTo("explain-liability");
-        assertThat(line.get("CostUsd").asDouble()).isEqualTo(0.00018);
+        assertThat(line.get("CostUsd").asDouble()).isEqualTo(0.00023);
     }
 
     /** The route is authenticated, not accidentally public - it spends money per call. */
