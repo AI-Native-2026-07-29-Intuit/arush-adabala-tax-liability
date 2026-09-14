@@ -2,6 +2,7 @@ package com.uptimecrew.tax_liability.security;
 
 import java.util.Objects;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -18,8 +19,37 @@ import org.springframework.security.web.SecurityFilterChain;
  * com.uptimecrew.tax_liability.api.TaxpayerController}. {@link RateLimitFilter} (W3 D1 Task 3) is
  * registered after the bearer-token filter so it can key its Bucket4j bucket off the already
  * resolved JWT subject.
+ *
+ * <h2>W6 D5: why this is conditional on a servlet application</h2>
+ *
+ * <p>The {@code worker} run mode (W6 D5 Task 1) runs this same image with
+ * {@code spring.main.web-application-type=none}. Without the condition below, that context fails
+ * to start:
+ *
+ * <pre>
+ *   Parameter 0 of method setFilterChains in WebSecurityConfiguration required a bean of type
+ *   'org.springframework.security.oauth2.jwt.JwtDecoder' that could not be found.
+ * </pre>
+ *
+ * <p>The cause is a mismatch in how two things are conditioned. Boot's
+ * {@code OAuth2ResourceServerAutoConfiguration}, which supplies the {@link
+ * org.springframework.security.oauth2.jwt.JwtDecoder}, is
+ * {@code @ConditionalOnWebApplication(type = SERVLET)} and therefore correctly does nothing in a
+ * worker. {@code @EnableWebSecurity} carries no such condition, so it imports
+ * {@code WebSecurityConfiguration} anyway and that class demands the filter chain this class
+ * declares - which needs the decoder that was, correctly, never created.
+ *
+ * <p>The error names {@code JwtDecoder}, which sends you looking at issuer configuration and
+ * Secrets. Nothing in the message mentions the run mode, and the api pods running the identical
+ * image are perfectly healthy at the time - so the natural first conclusion is that the worker's
+ * environment is missing a value, rather than that a worker should not be building an HTTP filter
+ * chain in the first place.
+ *
+ * <p>Edge security is a property of the HTTP edge. A process with no HTTP edge has nothing to
+ * secure here, and its actual authorisation boundary is the Kafka broker's.
  */
 @Configuration
+@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @EnableWebSecurity
 @EnableMethodSecurity(prePostEnabled = true) // (1) turns @PreAuthorize on for TaxpayerController
 public class SecurityConfig {

@@ -151,7 +151,7 @@ jobs:
   # same convention W6 D1 adopted for the AWS key names). That job
   # stays as a manifest-validation gate; taxcalc-api/GITOPS.md records the one
   # real consequence, which is that manifests/ now has a second copy in the
-  # config repo's base/ and the two can drift.
+  # config repo's k8s/taxcalc-api/ and the two can drift.
   call-bump-config:
     name: Bump gitops config (dev overlay)
     needs: call-build-and-push

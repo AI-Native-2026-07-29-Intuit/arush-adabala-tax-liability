@@ -80,3 +80,29 @@ CVE-2026-41731 exp:2026-09-27
 CVE-2026-41699 exp:2026-09-27
 CVE-2026-41700 exp:2026-09-27
 CVE-2026-41856 exp:2026-09-27
+
+# OS package (libpcre2-8-0, base image) - two HIGHs on the SAME package, added
+# 2026-09-13 during W6 D5. Same base image and same ceiling as the libexpat and
+# liblcms2 entries above, and re-confirmed rather than inherited:
+#
+#   docker buildx imagetools inspect gcr.io/distroless/java-base-debian12:nonroot
+#     -> Digest: sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c
+#
+# That is the exact digest the Dockerfile already pins, so there is no rebuilt
+# base to move to. This waiver checked one thing the earlier ones did not, and
+# it is the check that matters most here: the FLOATING tag was scanned too.
+#
+#   trivy image gcr.io/distroless/java-base-debian12:latest
+#     -> libpcre2-8-0  CVE-2026-86145  HIGH  fixed  10.42-1 -> 10.42-1+deb12u1
+#     -> libpcre2-8-0  CVE-2026-89161  HIGH  fixed  10.42-1 -> 10.42-1+deb12u1
+#
+# So :latest is ALSO unpatched - Google's newest published build still ships
+# 10.42-1 while Debian's fix is in 10.42-1+deb12u1. "Bump the digest" is not a
+# deferred action here, it is an unavailable one, and scanning :latest is what
+# turns that from an assumption into a fact.
+#
+# Not a W6 D5 regression: that deliverable touches no Dockerfile and no base
+# image. The scan went red on 2026-09-12 against a branch whose last green run
+# was 2026-09-11; the vulnerability database moved, the image did not.
+CVE-2026-86145 exp:2026-09-27
+CVE-2026-89161 exp:2026-09-27

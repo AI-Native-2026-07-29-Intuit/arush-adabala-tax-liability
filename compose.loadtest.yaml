@@ -1,0 +1,42 @@
+# compose.loadtest.yaml - run the local stack in the `loadtest` run mode, for the W6 D5 k6 gate.
+#
+# Merge EXPLICITLY, and note what the explicit -f flags buy:
+#   docker compose -f compose.yaml -f compose.loadtest.yaml up -d --wait
+#
+# Passing any -f disables Compose's automatic pickup of compose.override.yaml. That is load-
+# bearing here, not incidental: the override sets SPRING_PROFILES_ACTIVE to `dev`, and because
+# `environment:` values are replaced rather than merged across files, an auto-loaded override
+# would silently win over the profile list below. The api would come up in `dev`, JWT validation
+# would still point at the placeholder issuer, and every k6 request would 401 - which reads as a
+# broken token rather than as the wrong profile.
+#
+# WHY THE PUBLIC KEY IS A BIND MOUNT AND NOT A SECRET
+#
+# In-cluster, scripts/loadtest-token.sh publishes the public half into the taxcalc-loadtest-jwt
+# Secret and the Deployment mounts it at /etc/taxcalc/loadtest/public.pem. There is no Secret
+# here, so the same file arrives as a bind mount at the same path, and the app cannot tell the
+# difference - application.yml's `file:` location is what makes both work without an image
+# rebuild.
+#
+# The mount is the reason the generator and the target must be brought up in that ORDER: the
+# keypair has to exist on disk before this file is merged, or Compose bind-mounts a directory
+# where the app expects a PEM and startup fails with an unreadable key. Run
+# scripts/loadtest-token.sh first - .github/workflows/load.yml does exactly that.
+
+services:
+  taxcalc-api:
+    environment:
+      # `local` carries the datasource/Redis/Kafka/Mongo wiring compose.yaml already sets up;
+      # `loadtest` layers on top of it exactly as `k8s,loadtest` does in the cluster, swapping
+      # the JWT decoder to the mounted public key and AnthropicChatUpstream for
+      # SyntheticChatUpstream. Order matters - the later profile wins on conflicts.
+      SPRING_PROFILES_ACTIVE: local,loadtest
+      # Redundant with application.yml's default for this property, and stated anyway: the
+      # default is only a default, and a reader of this file should not have to open
+      # application.yml to learn which path the mount below has to land on.
+      TAXCALC_LOADTEST_JWT_PUBLIC_KEY: file:/etc/taxcalc/loadtest/public.pem
+    volumes:
+      - type: bind
+        source: ./.loadtest/public.pem
+        target: /etc/taxcalc/loadtest/public.pem
+        read_only: true

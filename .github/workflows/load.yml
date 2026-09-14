@@ -1,0 +1,233 @@
+# .github/workflows/load.yml
+#
+# W6 D5 Task 3: the k6 SLO gate. The k6 exit code IS the gate - a breached threshold fails this
+# check and, once it is a REQUIRED status check, blocks the merge before Argo CD can ever pull
+# the change. That ordering is the point: an SLO-breaching change is stopped at the pull request
+# rather than detected by an alert after it is live.
+#
+# WHY setup-k6-action AND NOT A HAND-ROLLED curl
+#
+# The obvious alternative is `curl -L https://github.com/grafana/k6/releases/download/...`. It
+# works, and it rots: the version is pinned in a URL nobody re-reads, the release asset naming
+# changes between majors, and a 404 from a moved asset surfaces as "k6: command not found" three
+# steps later. The official action resolves a version, verifies the download and puts k6 on PATH,
+# and it is itself pinned to @v1.
+#
+# WHY THE TARGET IS A COMPOSE STACK IN THIS RUNNER, AND NOT "THE DEV ENDPOINT"
+#
+# The obvious reading of this task is `TARGET=https://taxcalc.dev.example.internal`. That cannot
+# work here and the failure mode is expensive: taxcalc-api is deployed to a LOCAL k3s cluster, so
+# every candidate target - the in-cluster Service DNS name the k6 script defaults to, a
+# port-forward, localhost - is unreachable from a GitHub-hosted runner. Pointing the gate at one
+# anyway does not fail fast; it fails twelve minutes later as a wall of connection errors and a
+# breached threshold, which reads exactly like the service fell over under load.
+#
+# So the runner stands up the real stack (the same compose.yaml an engineer runs, the same image
+# Dockerfile builds) in the `loadtest` run mode and points k6 at it over localhost. What this
+# gate measures is therefore REAL on every axis that the thresholds are about - the serving path,
+# the cost arithmetic, the X-Cost-Usd header, the authorization filter chain - and NOT comparable
+# to the cluster run on absolute latency, because here the load generator and the target share
+# one small runner. See SRE-CAPSTONE.md for the in-cluster numbers; p(99) there was 39ms against
+# a 500ms threshold, and that ~13x of headroom is what makes this viable on a 4-vCPU box.
+#
+# WHY THERE IS NO LONGER A LOADTEST_JWT_PRIVATE_KEY SECRET
+#
+# There was one, because in-cluster the public half is mounted from a Secret published by an
+# earlier local run, so CI had to sign with the MATCHING private half. Nothing is pre-published
+# here: the runner generates a keypair, mounts the public half into the container it is about to
+# start, and signs with the private half it just made. The key is ephemeral, scoped to one run,
+# and never leaves the runner - which also means this gate works on fork and Dependabot pull
+# requests, where no repository secret is available at all.
+name: load
+
+# WHY THE PATH FILTER IS A STEP AND NOT `on.pull_request.paths`
+#
+# This check is REQUIRED on main, and that is exactly what makes a workflow-level `paths:` filter
+# unusable. GitHub does not run a workflow that its path filter excludes, so it never reports a
+# conclusion for it - and a required check with no conclusion sits at "Expected - Waiting for
+# status to be reported" forever. Every pull request that does NOT touch these paths would be
+# permanently unmergeable, which is the opposite of what a paths-filtered gate is for.
+#
+# So the workflow triggers on every pull request and the filter moved into the job below. The job
+# always runs, always reports, and does ~15s of work deciding it has nothing to measure. The
+# narrowing is unchanged in intent - a 200-VU six-minute run must not be added to a README edit -
+# it is just enforced somewhere that can still produce a green check.
+#
+# The alternative, a `changes` job plus `if:` on this one, relies on GitHub counting a SKIPPED job
+# as a passing required check. It does, today. This does not depend on it.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  k6:
+    name: k6 SLO threshold gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25   # the run is ~12 minutes; this bounds a hung target rather than the test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The filter step diffs against the base branch, which needs more than the default
+          # single commit. 0 rather than a guessed depth: a shallow clone whose merge-base is
+          # just past the cut-off makes `git diff` report the whole tree as changed, so the gate
+          # would silently run on every pull request and nobody would notice it was the fetch.
+          fetch-depth: 0
+
+      - name: Decide whether this pull request can move a threshold
+        id: filter
+        # The same list the workflow-level `paths:` filter used to carry. Kept as one regex so
+        # the list is readable next to the reason each entry is on it:
+        #
+        #   loadtests/**                  the script and its thresholds
+        #   .github/workflows/load.yml    this gate itself
+        #   .../llm/**, llmproxy/**       the cost path the cost threshold reads
+        #   .../metrics/**                the in-flight gauge the HPA and this run both observe
+        #   compose*.yaml, Dockerfile     the target this gate builds and runs
+        #   scripts/loadtest-token.sh     the tokens without which every request is a 401
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "changed files:"; echo "$changed" | sed 's/^/  /'
+          if echo "$changed" | grep -qE '^(loadtests/|\.github/workflows/load\.yml$|src/main/java/com/uptimecrew/tax_liability/(llm|llmproxy|metrics)/|compose\.yaml$|compose\.loadtest\.yaml$|Dockerfile$|scripts/loadtest-token\.sh$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Load-test relevant paths changed - running the full k6 SLO gate."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No load-test relevant paths changed - reporting green without running k6."
+          fi
+
+      - name: Install k6
+        if: steps.filter.outputs.run == 'true'
+        uses: grafana/setup-k6-action@v1
+        with:
+          # Pinned to the version these thresholds were actually validated against locally, not
+          # to the v0.55 environment floor.
+          #
+          # The floor says "at least this"; pinning CI TO the floor would mean the gate runs an
+          # older k6 than the one the numbers were measured with, and k6 has changed threshold
+          # and summary handling across majors. Drift between "the version that produced the
+          # numbers" and "the version that enforces them" is the thing worth eliminating, and it
+          # is not the same thing as matching the floor.
+          k6-version: '2.2.0'
+
+      - name: Build the taxcalc-api image
+        if: steps.filter.outputs.run == 'true'
+        # uptimecrew/taxcalc-api:0.1.0 is never pushed to a registry - it exists only as a local
+        # image on an engineer's laptop (see compose-ci.yml, which does the same). Build it here
+        # under the exact tag compose.yaml's ${APP_VERSION} resolves to, or `compose up` 404s
+        # trying to pull it.
+        run: |
+          docker build -t uptimecrew/taxcalc-api:0.1.0 \
+            --build-arg APP_VERSION=0.1.0 \
+            --build-arg GIT_SHA=${{ github.sha }} .
+
+      - name: Seed envs + secrets for CI
+        if: steps.filter.outputs.run == 'true'
+        # The runner does not have the engineer's envs/ or secrets/ on disk. The Postgres
+        # password guards a throwaway container on a job-scoped network destroyed with the
+        # runner, so it is generated rather than read from a repository secret - which is also
+        # what lets this job run on fork and Dependabot pull requests.
+        run: |
+          mkdir -p envs secrets
+          cp envs/taxcalc.env.example envs/taxcalc.env
+          openssl rand -hex 24 > secrets/pg_password.txt
+
+      - name: Mint load-test tokens
+        if: steps.filter.outputs.run == 'true'
+        # MUST run BEFORE `compose up`: this generates the keypair, and compose.loadtest.yaml
+        # bind-mounts .loadtest/public.pem into the container. Bind-mounting a path that does not
+        # exist yet creates a DIRECTORY there, and the app then fails startup on an unreadable
+        # key - so the ordering is a correctness constraint, not a preference.
+        #
+        # Every route under test is authenticated and there is no IdP to get a token from. Without
+        # this step k6 gets 401 on every request, which does not fail the latency threshold (401s
+        # are fast) but pins http_req_failed at 1.0 and leaves the cost Trend empty. The
+        # cost_samples threshold is what turns that into an explicit failure rather than a
+        # confusing one.
+        #
+        # MINT_ONLY skips the kubectl publish step: there is no cluster here, and the public half
+        # reaches the app as a bind mount instead.
+        run: MINT_ONLY=1 ./scripts/loadtest-token.sh
+
+      - name: Bring up the stack in loadtest mode
+        if: steps.filter.outputs.run == 'true'
+        # Explicit -f flags, which deliberately suppress compose.override.yaml - it would force
+        # SPRING_PROFILES_ACTIVE=dev and every request would 401. See compose.loadtest.yaml.
+        run: |
+          docker compose -f compose.yaml -f compose.loadtest.yaml up -d --wait --wait-timeout 180
+
+      - name: Wait for readiness
+        if: steps.filter.outputs.run == 'true'
+        # `--wait` on a service with no healthcheck waits for RUNNING, not for ready, and this
+        # image is distroless (no shell, no curl) so it cannot carry a container healthcheck that
+        # probes itself. Spring needs a further ~20-40s after the container is running to finish
+        # Flyway and open the port. Without this poll, k6's ramp would open against a port that
+        # is not listening yet and bank connection errors against http_req_failed - a threshold
+        # breach caused purely by starting too early.
+        run: |
+          for i in $(seq 1 60); do
+            if curl --silent --fail http://localhost:8080/actuator/health/readiness > /dev/null; then
+              echo "ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::taxcalc-api did not become ready within 60s"
+          docker compose -f compose.yaml -f compose.loadtest.yaml logs --no-color --tail=200
+          exit 1
+
+      - name: Run k6 with SLO thresholds
+        if: steps.filter.outputs.run == 'true'
+        run: |
+          k6 run --summary-export=k6-summary.json loadtests/taxcalc-api-p99.js
+        env:
+          TARGET: http://localhost:8080
+          # ABSOLUTE, and that is not fussiness. k6's open() resolves a relative path against the
+          # SCRIPT'S directory, not the working directory - which is why the script's own default
+          # is '../.loadtest/tokens.json', written relative to loadtests/. Passing the
+          # repo-root-relative '.loadtest/tokens.json' that every other tool in this workflow
+          # would take therefore looked for loadtests/.loadtest/tokens.json and died at init with
+          # "no such file or directory", AFTER the stack was up and healthy.
+          TOKENS: ${{ github.workspace }}/.loadtest/tokens.json
+
+      - name: Upload k6 summary
+        # `if: always()` because the summary of a FAILED run is the one worth reading. Uploading
+        # only on success would discard exactly the artefact someone needs to see which threshold
+        # broke and by how much.
+        if: always() && steps.filter.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summary
+          path: k6-summary.json
+          retention-days: 14
+
+      - name: Capture stack logs on failure
+        # A threshold breach and a sick dependency look identical in the k6 summary - both are
+        # just slow or failing requests. These logs are how you tell "the change regressed p99"
+        # apart from "Kafka never came up".
+        if: failure() && steps.filter.outputs.run == 'true'
+        run: |
+          docker compose -f compose.yaml -f compose.loadtest.yaml logs --no-color --tail=500 \
+            > compose-logs.txt || true
+          cat compose-logs.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.filter.outputs.run == 'true'
+        with:
+          name: compose-logs
+          path: compose-logs.txt
+          retention-days: 14
+
+      - name: Tear down the stack
+        if: always() && steps.filter.outputs.run == 'true'
+        run: |
+          docker compose -f compose.yaml -f compose.loadtest.yaml down --volumes --remove-orphans || true
+
+      - name: Redact the minted key material
+        # The private key is written to the workspace above. Runners are ephemeral, but the
+        # workspace is also what actions/upload-artifact globs from, and a future step added
+        # below this one with a broader path could sweep it into an artifact.
+        if: always() && steps.filter.outputs.run == 'true'
+        run: rm -rf .loadtest

@@ -62,7 +62,7 @@ public class LiabilityExplanationService {
     private static final Logger LOG = LoggerFactory.getLogger(LiabilityExplanationService.class);
 
     private final TaxpayerReadModelRepository readModelRepository;
-    private final AnthropicChatUpstream upstream;
+    private final ChatUpstream upstream;
     private final CostMiddleware costMiddleware;
     private final String service;
 
@@ -75,7 +75,7 @@ public class LiabilityExplanationService {
      * @throws NullPointerException if any argument is null
      */
     public LiabilityExplanationService(TaxpayerReadModelRepository readModelRepository,
-            AnthropicChatUpstream upstream, CostMiddleware costMiddleware,
+            ChatUpstream upstream, CostMiddleware costMiddleware,
             @Value("${taxcalc.cost.service:taxcalc}") String service) {
         this.readModelRepository =
                 Objects.requireNonNull(readModelRepository, "readModelRepository must not be null");

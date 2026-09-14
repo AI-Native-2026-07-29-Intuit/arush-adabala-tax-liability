@@ -392,3 +392,83 @@ management:
     web:
       exposure:
         include: health
+
+---
+# W6 D5 Task 1: the `worker` run mode. Activated in-cluster as SPRING_PROFILES_ACTIVE=k8s,worker
+# on the SAME image the api runs - see k8s/taxcalc-api/taxcalc-worker.deployment.yaml in the CONFIG repo
+# (arush-adabala-tax-liability-config; this repo's manifests/ is the pre-GitOps W5 D3 copy). Layered on
+# top of `k8s`, never instead of it: every broker/datastore hostname the worker needs lives in
+# that profile, and activating `worker` alone would leave it talking to localhost.
+spring:
+  config:
+    activate:
+      on-profile: worker
+  main:
+    # No servlet container, no port bound, no probes to answer. Stated here rather than by
+    # removing spring-boot-starter-web from a second build: one image, two run modes, and a
+    # worker that is provably the same bytes as the api is a worker that cannot skew from it.
+    #
+    # Consequence worth knowing when reading the worker Deployment: with no HTTP server there is
+    # no /actuator/health to probe, so that Deployment carries NO readinessProbe or livenessProbe.
+    # A probe there would fail closed and CrashLoopBackOff a perfectly healthy consumer.
+    web-application-type: none
+
+---
+# W6 D5 Task 3: the `loadtest` run mode. Layered on `k8s` (SPRING_PROFILES_ACTIVE=k8s,loadtest)
+# for the duration of a k6 run and at no other time.
+#
+# It changes exactly two things, and both exist so the load test can reach the cost-bearing code
+# path at all:
+#
+#  1. JWT validation moves from the dummy issuer to a local public key. The base profile points
+#     spring.security.oauth2.resourceserver.jwt.issuer-uri at
+#     https://idp.example.internal/realms/uptimecrew, which is a placeholder - there is no IdP
+#     behind it and never has been, so no real token can be minted and every /api/** and /v1/**
+#     request a load generator sends is a 401.
+#
+#     SETTING public-key-location IS NOT ENOUGH ON ITS OWN. issuer-uri must be cleared as well,
+#     and that is the opposite of what the auto-configuration's structure suggests: the three
+#     JwtDecoder configurations (jwk-set-uri, public-key-location, issuer-uri) are each
+#     @ConditionalOnMissingBean(JwtDecoder) and public-key-location is declared FIRST, which
+#     reads like it wins. It does not. With both properties set, the decoder built is the
+#     issuer-uri one, and the mounted key is silently ignored.
+#
+#     The failure is a flat 401 with a bare `WWW-Authenticate: Bearer` and nothing in the log -
+#     the decoder is lazy, so there is no startup error about an unreachable IdP either. Every
+#     visible signal says the token is bad: the key is mounted, the profile is active, the pod is
+#     healthy. Measured by clearing issuer-uri and watching the same token go from 401 to 200.
+#
+#     scripts/loadtest-token.sh generates the keypair, publishes the PUBLIC half into the
+#     taxcalc-loadtest-jwt Secret, and mints the tokens k6 carries. The private half never leaves
+#     the machine that ran the script and is never committed.
+#
+#  2. SyntheticChatUpstream replaces AnthropicChatUpstream. See that class for why a k6 gate
+#     cannot run against the live provider - the short version is 200 VUs for six minutes is
+#     ~100k paid completions per pull request, and a real completion's 1-3s latency would make
+#     the W5 D5 p99 <= 500ms objective unreachable for reasons that have nothing to do with how
+#     well taxcalc-api scales.
+spring:
+  config:
+    activate:
+      on-profile: loadtest
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Cleared, not merely overridden. See the note above: with issuer-uri set, Boot
+          # builds the issuer-uri decoder and public-key-location below is ignored, producing a
+          # 401 that looks like a bad token. An empty value fails IssuerUriCondition's
+          # StringUtils.hasText check, which is what takes that configuration out of the running.
+          issuer-uri: ""
+          # Mounted from the taxcalc-loadtest-jwt Secret. `file:` and not `classpath:`, so
+          # rotating the key is a Secret change and a pod restart rather than an image rebuild.
+          public-key-location: ${TAXCALC_LOADTEST_JWT_PUBLIC_KEY:file:/etc/taxcalc/loadtest/public.pem}
+
+taxcalc:
+  loadtest:
+    tokens:
+      # Bands bracketing what W6 D4's cost logs show a real explain-liability call billing.
+      # Raise these to push the k6 cost threshold over 0.003 on purpose and watch the gate go
+      # red - a threshold nobody has ever seen fail is a threshold nobody knows is wired up.
+      input:  { min: 110, max: 160 }
+      output: { min: 30,  max: 60 }

@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 
-import com.uptimecrew.tax_liability.llm.AnthropicChatUpstream;
+import com.uptimecrew.tax_liability.llm.ChatUpstream;
 import com.uptimecrew.tax_liability.llm.cost.CallContext;
 import com.uptimecrew.tax_liability.llm.cost.CostMiddleware;
 import com.uptimecrew.tax_liability.llm.cost.PriceBook;
@@ -68,11 +68,11 @@ public class LlmProxyController {
 
     private static final Logger LOG = LoggerFactory.getLogger(LlmProxyController.class);
 
-    private final AnthropicChatUpstream upstream;
+    private final ChatUpstream upstream;
     private final CostMiddleware costMiddleware;
     private final String service;
 
-    public LlmProxyController(AnthropicChatUpstream upstream, CostMiddleware costMiddleware,
+    public LlmProxyController(ChatUpstream upstream, CostMiddleware costMiddleware,
             @Value("${taxcalc.cost.service:taxcalc}") String service) {
         this.upstream = Objects.requireNonNull(upstream, "upstream must not be null");
         this.costMiddleware = Objects.requireNonNull(costMiddleware, "costMiddleware must not be null");
