@@ -89,6 +89,54 @@ jobs:
       # that proved it. No `fetch-depth:` - 1 is already actions/checkout's
       # default, and every other workflow in this repo calls it bare too.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The migration-immutability gate below diffs against the base branch, which needs
+          # more than actions/checkout's default single commit. Only set on pull_request - a
+          # push build has no base ref to diff against and skips the gate entirely.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+
+      # ---------------------------------------------------------------------------------------
+      # An applied Flyway migration is immutable. Editing one - EVEN A COMMENT - is a breaking
+      # change to every environment that already ran it.
+      #
+      # This is not hypothetical here. W6 D4's follow-up corrected a stale class name in a COMMENT
+      # inside V5__create_taxpayer_embeddings.sql. Flyway checksums the whole file, so the next
+      # image built from main refused to start against the dev database:
+      #
+      #   Migration checksum mismatch for migration version 5
+      #   -> Applied to database : -203354176
+      #   -> Resolved locally    : -1479066801
+      #
+      # Every pod crash-looped on it. The failure is invisible until a deploy reaches a database
+      # that ran the old file, which is why it sat latent: the running image predated the edit,
+      # so CI was green and the cluster was healthy right up until the next rollout.
+      #
+      # `spring.flyway.validate-on-migrate: false` would silence this and is the wrong answer -
+      # it disables the check that tells you the schema you have is not the schema you think you
+      # have. A repair step in the deploy path is also wrong as a default: repair rewrites history
+      # to match whatever the code now says, which is fine for a comment and catastrophic for a
+      # changed DDL statement, and nothing at deploy time can tell those two apart.
+      #
+      # So the rule is the simple one - never edit an applied migration - and this makes it a
+      # merge blocker rather than a convention. Adding NEW migration files is untouched.
+      # ---------------------------------------------------------------------------------------
+      - name: Applied Flyway migrations are immutable
+        if: github.event_name == 'pull_request'
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          # --diff-filter=M: modified only. Added (A) is the whole point of migrations; deleted
+          # (D) is caught too, since removing an applied migration breaks validation identically.
+          changed=$(git diff --name-only --diff-filter=MD "$base...HEAD" -- src/main/resources/db/migration/)
+          if [ -n "$changed" ]; then
+            echo "::error::an already-applied Flyway migration was modified or deleted:"
+            echo "$changed" | sed 's/^/  /'
+            echo "::error::Flyway checksums the whole file - a comment edit is a breaking change."
+            echo "::error::Add a NEW migration instead. If this edit is genuinely required, every"
+            echo "::error::environment that ran the old file needs `flyway repair` before deploy."
+            exit 1
+          fi
+          echo "no applied migration was modified."
 
       - name: Set up build env (composite)
         uses: ./.github/actions/setup-build
