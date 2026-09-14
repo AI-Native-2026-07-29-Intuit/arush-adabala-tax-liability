@@ -62,9 +62,9 @@ class SyntheticChatUpstreamTest {
         // Exactly 1000 tokens, so the cost is the price-per-1k itself. This is the property that
         // makes the k6 cost_per_request_usd threshold meaningful: change the price book and this
         // number - and the gate - moves with it.
-        BigDecimal pricePerK = com.uptimecrew.tax_liability.llm.cost.PriceBook.priceFor(MODEL);
+        BigDecimal inputPer1K = com.uptimecrew.tax_liability.llm.cost.PriceBook.ratesFor(MODEL).inputPer1K();
         assertThat(resp.totalTokens()).isEqualTo(1000L);
-        assertThat(pricePerK).isGreaterThan(BigDecimal.ZERO);
+        assertThat(inputPer1K).isGreaterThan(BigDecimal.ZERO);
     }
 
     @Test

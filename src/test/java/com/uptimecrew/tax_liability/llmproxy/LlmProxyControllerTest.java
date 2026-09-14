@@ -74,8 +74,9 @@ class LlmProxyControllerTest {
      * The Done-when case: tenant {@code tally}, feature {@code explain-liability}, 200 with a
      * non-zero cost header and exactly one EMF line in the right namespace.
      *
-     * <p>Hand-computed: Haiku is $0.003 per 1,000 tokens, so 1,000 + 500 tokens costs
-     * 0.003 * 1500 / 1000 = $0.0045 - {@code 0.00450} as the header renders it.
+     * <p>Hand-computed, priced per token class: Haiku 4.5 is $0.001 per 1,000 input tokens
+     * and $0.005 per 1,000 output, so 1,000 input + 500 output costs
+     * (1000*0.001 + 500*0.005) / 1000 = $0.0035 - {@code 0.00350} as the header renders it.
      */
     @Test
     void returnsCompletionWithNonZeroCostHeaderAndOneEmfLine() throws Exception {
@@ -93,7 +94,7 @@ class LlmProxyControllerTest {
         assertThat(result.getBody().feature()).isEqualTo("explain-liability");
 
         String header = response.getHeader(CostResponseHeader.HEADER);
-        assertThat(header).isEqualTo("0.00450");
+        assertThat(header).isEqualTo("0.00350");
         assertThat(Double.parseDouble(header)).isGreaterThan(0.0);
 
         assertThat(emittedLines()).hasSize(1);
@@ -103,7 +104,7 @@ class LlmProxyControllerTest {
         assertThat(line.get("tenant").asText()).isEqualTo("tally");
         assertThat(line.get("feature").asText()).isEqualTo("explain-liability");
         assertThat(line.get("service").asText()).isEqualTo("taxcalc");
-        assertThat(line.get("CostUsd").asDouble()).isEqualTo(0.0045);
+        assertThat(line.get("CostUsd").asDouble()).isEqualTo(0.0035);
     }
 
     /** A request that names no model is billed against the default, not against nothing. */

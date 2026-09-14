@@ -89,7 +89,11 @@ spring:
       api-key: ${ANTHROPIC_API_KEY:dummy}   # (9a) dummy default for local smoke-testing; the test profile below stubs ChatClient entirely so it never reads this
       chat:
         options:
-          model: claude-sonnet-4-5
+          # claude-sonnet-5, not the superseded claude-sonnet-4-5. Sonnet 5 is both more
+          # capable and cheaper per token, and PriceBook only prices models that should be
+          # chosen. Note this default is almost always overridden: AnthropicChatUpstream sets
+          # the model per call, so this applies only to a ChatClient call that names none.
+          model: claude-sonnet-5
           max-tokens: 1024
   graphql:
     path: /graphql

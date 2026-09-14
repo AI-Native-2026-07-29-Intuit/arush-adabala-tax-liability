@@ -51,27 +51,69 @@ class CostMiddlewareTest {
     // ---------------------------------------------------------------- costing
 
     /**
-     * Hand-computed: Haiku is $0.003 per 1,000 tokens, so 1,000 + 500 = 1,500 tokens costs
-     * 0.003 * 1500 / 1000 = $0.0045, which is 450 units of 1e-5 USD.
+     * Hand-computed, and the two token classes are priced SEPARATELY - which is the whole point
+     * of the W6 D5 split. Haiku 4.5 is $0.001 per 1,000 input tokens and $0.005 per 1,000 output:
+     *
+     *   1000 input  * 0.001 / 1000 = $0.0010
+     *    500 output * 0.005 / 1000 = $0.0025
+     *                                -------
+     *                                $0.0035  = 350 units of 1e-5 USD
+     *
+     * The old blended rate charged 450 for this same call. That gap is not a rounding difference,
+     * it is the blend having been struck at a 50/50 input:output split that no real call matches.
      */
     @Test
     void computesCostFromTokensInIntegerMinorUnits() {
         UpstreamResponse resp = UpstreamResponse.of("claude-haiku-4-5", 1_000, 500, 42, true, "text");
 
-        assertThat(middleware.costUsdE5(resp)).isEqualTo(450L);
-        assertThat(CostLogger.toUsd(450L)).isEqualByComparingTo(new BigDecimal("0.00450"));
+        assertThat(middleware.costUsdE5(resp)).isEqualTo(350L);
+        assertThat(CostLogger.toUsd(350L)).isEqualByComparingTo(new BigDecimal("0.00350"));
     }
 
     /**
-     * The 3x price gap between the two models is the entire argument for explain-liability using
-     * Haiku, so it is asserted rather than assumed: identical token counts, triple the cost.
+     * Output tokens cost 5x input on Haiku, and pricing them as if they were interchangeable is
+     * exactly the bug the blended rate hid. Same total token count, different split, different
+     * cost - a blended rate returns the same number for both of these and cannot tell them apart.
      */
-    @ParameterizedTest(name = "{0} x {1} tokens costs {2}e-5 USD")
+    @Test
+    void pricesOutputTokensHigherThanInput() {
+        UpstreamResponse mostlyInput = UpstreamResponse.of("claude-haiku-4-5", 900, 100, 1, true, "t");
+        UpstreamResponse mostlyOutput = UpstreamResponse.of("claude-haiku-4-5", 100, 900, 1, true, "t");
+
+        assertThat(middleware.costUsdE5(mostlyInput)).isEqualTo(140L);   // 0.0009 + 0.0005
+        assertThat(middleware.costUsdE5(mostlyOutput)).isEqualTo(460L);  // 0.0001 + 0.0045
+        assertThat(mostlyInput.totalTokens()).isEqualTo(mostlyOutput.totalTokens());
+    }
+
+    /**
+     * The shape of a real explain-liability call, measured against the live API: 144 input, 32
+     * output. Pinned because it is the number every downstream artefact quotes - the X-Cost-Usd
+     * header, the k6 cost threshold, the cost log - and a silent change to it should break a test
+     * rather than a dashboard.
+     */
+    @Test
+    void pricesARealExplainLiabilityCall() {
+        UpstreamResponse resp = UpstreamResponse.of("claude-haiku-4-5", 144, 32, 1, true, "text");
+
+        // 144*0.001/1000 + 32*0.005/1000 = 0.000144 + 0.000160 = $0.000304 -> 30e-5 (HALF_UP)
+        assertThat(middleware.costUsdE5(resp)).isEqualTo(30L);
+    }
+
+    /**
+     * The price gap between the two models is the argument for explain-liability using Haiku, so
+     * it is asserted rather than assumed: identical token counts, Sonnet 5 costs twice as much.
+     * (It was 3x against the superseded claude-sonnet-4-5; Sonnet 5 is both newer and cheaper,
+     * which narrows the gap without changing which model this feature should use.)
+     *
+     * Input-only rows - the second column is input tokens, output is 0 - so these assert the
+     * input rate in isolation.
+     */
+    @ParameterizedTest(name = "{0} x {1} input tokens costs {2}e-5 USD")
     @CsvSource({
-        "claude-haiku-4-5,  1000, 300",
-        "claude-sonnet-4-5, 1000, 900",
-        "claude-haiku-4-5,     0,   0",
-        "claude-haiku-4-5,     1,   0",
+        "claude-haiku-4-5, 1000, 100",
+        "claude-sonnet-5,  1000, 200",
+        "claude-haiku-4-5,    0,   0",
+        "claude-haiku-4-5,    1,   0",
     })
     void pricesEachModelFromThePriceBook(String modelId, long tokens, long expectedE5) {
         UpstreamResponse resp = UpstreamResponse.of(modelId, tokens, 0, 1, true, "t");
@@ -79,17 +121,18 @@ class CostMiddlewareTest {
     }
 
     /**
-     * A single token of Haiku costs $0.000003, which is below the 1e-5 unit and rounds to 0. That
-     * is a real and acceptable quantisation - but it must round, not truncate to a wrong bucket,
-     * so the boundary either side of half a unit is pinned. 2 tokens = $0.000006, which is more
-     * than half of 1e-5 and rounds UP to 1.
+     * A single input token of Haiku costs $0.000001, well below the 1e-5 unit, and rounds to 0.
+     * That is a real and acceptable quantisation - but it must ROUND, not truncate into a wrong
+     * bucket, so the boundary either side of half a unit is pinned. 5 input tokens = $0.000005,
+     * exactly half a unit, which HALF_UP takes to 1.
      */
     @Test
     void roundsHalfUpAtTheMinorUnitBoundary() {
         assertThat(middleware.costUsdE5(haiku(1))).isZero();
-        assertThat(middleware.costUsdE5(haiku(2))).isEqualTo(1L);
-        // 0.003 * 1667 / 1000 = 0.005001 -> 500.1e-5 -> 500
-        assertThat(middleware.costUsdE5(haiku(1_667))).isEqualTo(500L);
+        assertThat(middleware.costUsdE5(haiku(4))).isZero();        // 0.000004 -> 0.4 units
+        assertThat(middleware.costUsdE5(haiku(5))).isEqualTo(1L);   // 0.000005 -> exactly 0.5, up
+        // 0.001 * 1667 / 1000 = 0.001667 -> 166.7e-5 -> 167
+        assertThat(middleware.costUsdE5(haiku(1_667))).isEqualTo(167L);
     }
 
     /**
@@ -124,7 +167,8 @@ class CostMiddlewareTest {
         UpstreamResponse resp = new UpstreamResponse(
                 "claude-haiku-4-5", "claude-haiku-4-5-20251001", 1_000, 0, 1, true, "t");
 
-        assertThat(middleware.costUsdE5(resp)).isEqualTo(300L);
+        // 1000 input, 0 output: 1000 * 0.001 / 1000 = $0.001 -> 100e-5
+        assertThat(middleware.costUsdE5(resp)).isEqualTo(100L);
         assertThat(resp.servedByDifferentSnapshot()).isTrue();
     }
 
@@ -163,7 +207,8 @@ class CostMiddlewareTest {
         UpstreamResponse out = middleware.observe(ctx, c -> haiku(1_500));
 
         assertThat(out.totalTokens()).isEqualTo(1_500);
-        assertThat(response.headers).containsEntry("X-Cost-Usd", "0.00450");
+        // 1500 input tokens, 0 output: 1500 * 0.001 / 1000 = $0.0015
+        assertThat(response.headers).containsEntry("X-Cost-Usd", "0.00150");
         assertThat(logger.lines).hasSize(1);
     }
 
@@ -199,8 +244,8 @@ class CostMiddlewareTest {
         assertThat(line.get("tenant").asText()).isEqualTo("acme");
         assertThat(line.get("feature").asText()).isEqualTo("explain-liability");
         assertThat(line.get("modelId").asText()).isEqualTo("claude-haiku-4-5");
-        assertThat(line.get("CostUsdE5").asLong()).isEqualTo(450L);
-        assertThat(line.get("CostUsd").asDouble()).isEqualTo(0.0045);
+        assertThat(line.get("CostUsdE5").asLong()).isEqualTo(150L);
+        assertThat(line.get("CostUsd").asDouble()).isEqualTo(0.0015);
         assertThat(line.get("LatencyMs").asLong()).isEqualTo(42L);
         assertThat(line.get("success").asBoolean()).isTrue();
     }
@@ -262,7 +307,8 @@ class CostMiddlewareTest {
         middleware.observe(ctx, c -> haiku(1_000));
 
         assertThat(logger.lines).hasSize(1);
-        assertThat(logger.lines.get(0)).contains("\"CostUsdE5\":300");
+        // 1000 input tokens, 0 output: $0.001 -> 100e-5
+        assertThat(logger.lines.get(0)).contains("\"CostUsdE5\":100");
     }
 
     // ------------------------------------------------------------- contracts
@@ -291,8 +337,9 @@ class CostMiddlewareTest {
                 .hasMessageContaining("null response");
     }
 
-    private static UpstreamResponse haiku(long totalTokens) {
-        return UpstreamResponse.of("claude-haiku-4-5", totalTokens, 0, 42, true, "explanation text");
+    /** Input-only Haiku response - the argument is INPUT tokens, output is 0. */
+    private static UpstreamResponse haiku(long inputTokens) {
+        return UpstreamResponse.of("claude-haiku-4-5", inputTokens, 0, 42, true, "explanation text");
     }
 
     /** Captures rendered cost lines instead of writing them to a log appender. */
