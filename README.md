@@ -2032,6 +2032,149 @@ apart between merges.
 **Result:** 40 tests green, 98.71% coverage, zero `mypy --strict` errors, zero `ruff` findings.
 
 
+## Week 7 Day 2 — Data Tooling & AI Observability: pandas, pgvector, LangSmith, RAGAS & Great Expectations
+
+The W7 D1 sidecar gains the data spine the rest of Week 7 reads from. Five artefacts land
+together — a pandas corpus loader, an extended pgvector schema with an HNSW index, an idempotent
+psycopg v3 loader, `@traceable` retrieval streaming to LangSmith, and a RAGAS + Great
+Expectations gate over a real Testcontainers Postgres. Full write-up in
+[`taxcalc-ai/PYTHON.md`](taxcalc-ai/PYTHON.md); the three authoring transcripts are in
+[`taxcalc-ai/PROMPT_JOURNAL.md`](taxcalc-ai/PROMPT_JOURNAL.md).
+
+**Five checkboxes, one contract.** The embedding dtype, the schema column set, the trace
+decorator, the eval baseline and the data validation are a single composite thing. Any one of
+them missing turns a green build into a silent retrieval-quality regression or a leaked key —
+which is why they shipped in one PR rather than as five independent ticks.
+
+- **Pandas corpus loader + `float32` discipline** —
+  [`taxcalc-ai/src/taxcalc_ai/corpus.py`](taxcalc-ai/src/taxcalc_ai/corpus.py). De-duplicates on
+  `(doc_id, chunk_idx)` *before* embedding — that is the key the table's `UNIQUE` constraint and
+  the loader's `ON CONFLICT` both resolve on, so letting a duplicate through means paying to
+  embed a chunk twice to reach the same final state. Length bounds (1–8000 chars) filter rather
+  than raise, because a corpus is a bulk input and one malformed row must not fail a 100k-row
+  load; the ceiling is a deliberate over-estimate of MiniLM's 256-token window, past which
+  `encode` truncates *silently* and the vector describes only the first paragraph. Encoding is
+  one batched call over the whole column, not `df.apply` per row.
+
+  `.astype(np.float32)` is applied once, at the boundary, and `CorpusRow` declares
+  `NDArray[np.float32]`. pgvector stores 4-byte `real` components: a `float64` array is either
+  rejected or **silently narrowed** on write, and the silent case is the one that hurts — the
+  insert reports success and retrieval quality degrades with nothing in the logs. The real model
+  already returns `float32` on this hardware, so the test that proves the narrowing uses a stub
+  that returns `float64` on purpose.
+
+- **Extended pgvector schema** —
+  [`taxcalc-ai/sql/V001__doc_chunks.sql`](taxcalc-ai/sql/V001__doc_chunks.sql). `doc_chunks` with
+  `vector(384)`, a `model_version` column, `UNIQUE (doc_id, chunk_idx, model_version)`, a
+  compound `(tenant_id, model_version)` b-tree, and an HNSW index using `vector_cosine_ops`
+  (`m = 16`, `ef_construction = 64`). The op-class must match the `<=>` query operator: a
+  mismatch does not fail and does not warn, the planner simply stops using the index and scans
+  every row, and the symptom surfaces months later as "search got slow as the corpus grew".
+
+  **Not a Flyway migration, and deliberately not under `src/main/resources/db/migration/`.**
+  Flyway keys applied migrations by version and validates checksums across its whole history, so
+  a sidecar-owned file in the Java service's migration path would let this Python project's
+  schema changes fail the *Java* service's context startup. `V001` is the sidecar's own ordering
+  from its own beginning — the same reasoning that made the W6 D4 embeddings migration `V5` and
+  not the `V3` its task text named.
+
+- **Idempotent psycopg v3 loader** —
+  [`taxcalc-ai/src/taxcalc_ai/pgvector_loader.py`](taxcalc-ai/src/taxcalc_ai/pgvector_loader.py).
+  `register_vector(conn)` is the first statement inside every connection — psycopg does not know
+  what a `vector` is, and without the adapter the array arrives as bytes the column either
+  rejects or **accepts as malformed**, producing rows that exist, look ordinary in `SELECT`, and
+  rank meaninglessly. `cur.executemany` over a list of tuples pipelines the batch;
+  `ON CONFLICT (doc_id, chunk_idx, model_version) DO UPDATE` makes the recovery procedure for a
+  half-finished bulk load "run it again" rather than "truncate and lose the work that
+  succeeded". `DO UPDATE` refreshes text and embedding but deliberately not `created_at`: a
+  retry is not a new arrival.
+
+- **`@traceable` retrieval** —
+  [`taxcalc-ai/src/taxcalc_ai/rag.py`](taxcalc-ai/src/taxcalc_ai/rag.py).
+  `@traceable(run_type="retriever", name="taxcalc_ai.retrieve_chunks")` wraps the whole function
+  including the embedding step, so "was it the encode or the index" is answerable from one span.
+  Both `WHERE` filters are applied before ranking and they are different kinds of filter:
+  `tenant_id` is the security boundary (an HNSW index is an ANN structure over the vector column
+  alone and cannot enforce it) and `model_version` is the correctness boundary (two models'
+  vectors share a 384-dimensional space without meaning the same thing). Two tests pin each,
+  with the other tenant's rows placed deliberately *nearer* the query so a dropped filter fails
+  rather than passing by luck. The credential check runs at import, not on first call.
+
+- **A SaaS-side check that tracing actually works** —
+  [`taxcalc-ai/src/taxcalc_ai/scripts/assert_langsmith_run_visible.py`](taxcalc-ai/src/taxcalc_ai/scripts/assert_langsmith_run_visible.py).
+  A grep for `@traceable` proves the decorator is written in the file. It does not prove a single
+  trace ever left the process — and every realistic failure leaves the decorator exactly where it
+  was: `LANGSMITH_TRACING` unset makes `@traceable` a documented no-op, a key scoped to the wrong
+  workspace uploads to a project nobody reads, a misspelt project name is created on demand and
+  swallows the runs, and a process that exits before the background uploader flushes traces
+  nothing at all while long-running services trace fine. Each is a green build and a silent
+  observability gap. The script fires a real retrieval through the real decorated function,
+  flushes, then polls LangSmith over a bounded lookback so a leftover run from a previous job
+  cannot make a broken build pass.
+
+- **RAGAS 50-row golden baseline** —
+  [`taxcalc-ai/tests/golden/taxcalc_golden_50.jsonl`](taxcalc-ai/tests/golden/taxcalc_golden_50.jsonl)
+  and [`taxcalc-ai/tests/test_ragas_thresholds.py`](taxcalc-ai/tests/test_ragas_thresholds.py).
+  30 clean rows plus 20 reproducing three failure modes — missing context, junk context,
+  near-duplicate context. That ratio is the point: a golden set scoring 1.0 everywhere has no
+  headroom to fall and therefore cannot detect a regression. A credential-free test asserts the
+  mix is still present, so a regenerated all-clean set fails loudly instead of quietly raising
+  every metric and making the build *greener* than before.
+
+  The evaluator LLM and embeddings are passed **explicitly**. `evaluate(dataset, metrics=[...])`
+  with nothing else lets RAGAS build its own defaults, and those defaults are OpenAI — so a CI
+  job supplying only `ANTHROPIC_API_KEY` does not evaluate against Claude, it fails on OpenAI
+  auth, or silently bills a different provider if an `OPENAI_API_KEY` happens to be present.
+
+- **Great Expectations over a real Postgres** —
+  [`taxcalc-ai/tests/test_great_expectations_suite.py`](taxcalc-ai/tests/test_great_expectations_suite.py).
+  The `doc_chunks_v1` suite runs against a Testcontainers `pgvector/pgvector:pg16`, not a Pandas
+  frame. A validation against the frame the loader was handed proves the loader *received* good
+  data; it says nothing about what arrived — and the failures worth catching (a `vector` column
+  that took malformed bytes, a relaxed `NOT NULL`, an `ON CONFLICT` that quietly halved the row
+  count) all live on the far side of the insert. A negative-control test asserts an impossible
+  row count and requires `success is False`, because `assert result.success is True` alone is
+  indistinguishable from a checkpoint that reports success wherever it is pointed.
+
+- **CI gate: three new steps** —
+  [`.github/workflows/python-ci.yml`](.github/workflows/python-ci.yml). GX checkpoint, RAGAS
+  thresholds, LangSmith run-visibility. All three run in the existing job, reusing the uv
+  environment rather than re-resolving and re-downloading the ~80 MB model in a fresh one. Every
+  credential arrives from `secrets.TAXCALC_AI_*`; none appears in the tree. The CI LangSmith
+  project is `taxcalc-ai-dev-ci`, **not** the dev project, so gate-run traces do not pollute the
+  view an engineer reads while debugging. The coverage step deselects both the slow RAGAS test
+  and the GX suite so a failure names one of three distinct problems rather than a vague one.
+
+**Two findings worth carrying forward.**
+
+The Great Expectations suite failed on perfectly valid data until pgvector's SQLAlchemy type was
+registered. GX resolves a `table.column_types` metric before evaluating *any* column-level
+expectation, by reflecting the table and compiling each column's type to a string. SQLAlchemy
+core has never heard of `vector`, so `embedding` reflects as `NullType()` and compiling it raises
+`CompileError`. GX catches that per-expectation and reports `"success": false` with an **empty**
+result dict — so the symptom is four column expectations failing while the row-count expectation
+passes with `observed_value: 100`, which reads unmistakably like a data problem. The fix is one
+import for its side effect (`import pgvector.sqlalchemy`, which registers `VECTOR` in the
+dialect's `ischema_names`). Nothing in the GX report mentions a type.
+
+`UNIQUE (doc_id, chunk_idx, model_version)` does **not** include `tenant_id`, so `tenant_id` is
+not part of the `ON CONFLICT` arbiter either. Two tenants ingesting the same `doc_id` do not get
+a row each: the second load's `DO UPDATE` rewrites `chunk_text` and `embedding` and leaves
+`tenant_id` alone, so one tenant's content ends up stored under another's label — and the
+tenant-scoped read path then serves it to the wrong tenant. Latent today (the corpus is
+single-source), found the hard way when three loader tests failed against a loader behaving
+exactly as designed, and now pinned by a test that names the blast radius so widening the key is
+a decision someone makes rather than a bug someone finds.
+
+**Result:** 69 tests green (1 skipped — RAGAS, pending the evaluator secret), 90% coverage
+against an 85% floor, zero `mypy --strict` errors, zero `ruff` findings.
+
+**Not yet verified end to end:** the RAGAS thresholds and the LangSmith run-visibility step need
+repository secrets `TAXCALC_AI_LANGSMITH_API_KEY` and `TAXCALC_AI_ANTHROPIC_API_KEY`. The floors
+are the brief's, carried as written; the first CI run with the secrets in place is what turns
+them from declared floors into recorded ones.
+
+
 ## Build and Test
 
 ```bash
@@ -2118,6 +2261,19 @@ uv run ruff check && uv run ruff format --check
 uv run mypy --strict src/ tests/        # strict + disallow_any_explicit
 uv run pytest -v --cov=src --cov-fail-under=85
 uv run python -m taxcalc_ai.cli request.json   # validate a payload at the boundary
+
+# W7 D2 - the data + AI-observability stack. The container-backed tests need a running
+# Docker daemon; the first run also downloads the ~80MB sentence-transformers model.
+uv run pytest -v tests/test_corpus.py
+uv run pytest -v tests/test_pgvector_loader.py          # Testcontainers + EXPLAIN-HNSW
+uv run pytest -v tests/test_rag_traceable.py
+uv run pytest -v tests/test_great_expectations_suite.py # Testcontainers + GX doc_chunks_v1
+uv run pytest -v -m slow tests/test_ragas_thresholds.py # needs ANTHROPIC_API_KEY
+uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LangSmith creds
+
+# The two secret-scan greps the gate runs. Both must return nothing.
+grep -RIn 'lsv2_pt_' .
+grep -RIn 'except:' src/ tests/
 
 # Behind a TLS-inspecting corporate proxy, uv needs the system trust store. Deliberately not
 # baked into pyproject.toml or CI: GitHub runners do not need it, and a config that always

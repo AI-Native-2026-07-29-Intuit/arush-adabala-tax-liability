@@ -390,3 +390,274 @@ uv run mypy --strict src/ tests/ → Success: no issues found in 13 source files
 uv run pytest -v --cov=src --cov-fail-under=85
                                  → 43 passed, total coverage 98.78%
 ```
+
+---
+
+# PROMPT_JOURNAL.md — W7 D2
+
+Three authoring sessions, in the order they ran: the corpus loader, the pgvector loader, and the
+Great Expectations suite. Same convention as W7 D1 — what is kept is the decision trail rather
+than a turn-by-turn paste, with every command output copied from the run that produced it.
+
+The three transcripts below are the three the deliverable asks for. Each records the prompt as
+given, what Claude produced, and the one-line verdict: **Used as is**, **Modified**, or
+**Rejected**.
+
+---
+
+## T1 — `corpus.py` (Pandas loader + embedding pass)
+
+**Prompt given.**
+
+> Write `taxcalc-ai/src/taxcalc_ai/corpus.py` for a Python 3.12 project that is checked with
+> `mypy --strict` and `disallow_any_explicit = true`, and linted with ruff (`E,F,UP,B,SIM,I,RUF,T20`,
+> line length 100). It needs: a frozen `slots=True` dataclass `CorpusRow` carrying `doc_id`,
+> `chunk_idx`, `chunk_text`, `embedding`, `model_version`, `tenant_id`; a
+> `load_corpus(path: Path) -> pd.DataFrame` that reads parquet or jsonl, de-duplicates on
+> `(doc_id, chunk_idx)` and keeps only chunks of 1–8000 characters; and an
+> `embed_dataframe(df, model=None, batch_size=64)` that loads `all-MiniLM-L6-v2` once and
+> encodes in batches. The embeddings land in a pgvector `vector(384)` column.
+
+**What Claude produced (the shape of it).** Structurally correct on the first pass: the right
+three symbols, `drop_duplicates(subset=[...], keep="first")`, a `df.query(...)` length filter
+with `engine="python"`, and a single batched `model.encode(...)` rather than a per-row
+`df.apply` — which was the thing most worth getting right and it got it right unprompted.
+
+Two problems, both in the type surface:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CorpusRow:
+    ...
+    embedding: np.ndarray          # <- bare ndarray; no dtype in the type
+
+def embed_dataframe(df, model=None, batch_size=64) -> list[CorpusRow]:
+    vectors = m.encode(texts, batch_size=batch_size,
+                       normalize_embeddings=True, convert_to_numpy=True)
+    # <- no .astype(); whatever encode() returned goes to Postgres
+```
+
+**Verdict: Modified.**
+
+`np.ndarray` carries no dtype, and nothing narrowed the array. `vector(384)` stores 4-byte
+`real` components, so a `float64` array is either rejected or silently narrowed on write — and
+the silent case is the dangerous one, because the insert succeeds and retrieval quality degrades
+with nothing in the logs. Committed code declares `NDArray[np.float32]` on the dataclass and
+applies `.astype(np.float32)` once, at the boundary.
+
+Worth recording: the real model already returns `float32` on this machine —
+
+```
+OK shape (1, 384) dtype float32
+```
+
+— so a test written against the real model cannot detect a missing `.astype()` at all. The
+committed suite has a `_StubModel` that returns `float64` on purpose, which is the only way that
+assertion means anything.
+
+The gate also rejected the import outright before any of this could be checked:
+
+```
+src/taxcalc_ai/_probe.py:4: error: Library stubs not installed for "pandas"  [import-untyped]
+Found 1 error in 1 file (checked 1 source file)
+```
+
+`pandas-stubs` became a dev dependency. Without it the most type-sensitive module of the day was
+being checked by nothing.
+
+---
+
+## T2 — `pgvector_loader.py` (psycopg v3 + idempotent insert)
+
+**Prompt given.**
+
+> Write `taxcalc-ai/src/taxcalc_ai/pgvector_loader.py`: a `load_rows(dsn: str, rows:
+> Iterable[CorpusRow]) -> int` that bulk-inserts into a `doc_chunks` table with an `embedding
+> vector(384)` column, using psycopg 3. It must be safe to retry after a partial failure. Also a
+> `dsn_from_env()` that reads the DSN from the environment. No secrets in source.
+
+**What Claude produced.**
+
+```python
+def load_rows(dsn: str, rows: Iterable[CorpusRow]) -> int:
+    payload = [(r.doc_id, r.chunk_idx, r.chunk_text, r.embedding,
+                r.model_version, r.tenant_id) for r in rows]
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(_INSERT_SQL, payload)
+        conn.commit()
+    return len(payload)
+```
+
+with `_INSERT_SQL` correctly carrying `ON CONFLICT (doc_id, chunk_idx, model_version) DO UPDATE`.
+
+**Verdict: Modified.**
+
+The idempotency was right. `register_vector(conn)` was absent — the single most consequential
+omission of the day, and the one the brief predicts. psycopg does not know what a `vector` is;
+it is an extension type, not a built-in. Without the adapter the NumPy array goes through generic
+object handling and arrives as bytes the column either rejects or takes as malformed. The
+accepting case produces rows that exist, look ordinary in `SELECT`, and rank meaninglessly.
+`register_vector(conn)` is now the first statement inside every connection in the package.
+
+Two smaller changes: an empty payload now short-circuits before opening a connection (an
+all-filtered corpus is an outcome, not an error), and `DO UPDATE` deliberately omits `created_at`
+from its set-list, so a retry of a partial load does not relabel a chunk's first-arrival time as
+"the last time anything was retried".
+
+**What the tests found that neither the prompt nor the review did.** Three loader tests failed
+against this loader while it was behaving exactly as designed:
+
+```
+FAILED tests/test_pgvector_loader.py::test_loading_the_same_rows_again_is_idempotent
+FAILED tests/test_pgvector_loader.py::test_do_update_refreshes_text_and_embedding_but_not_created_at
+FAILED tests/test_pgvector_loader.py::test_a_new_model_version_lands_beside_the_old_rows
+E       AssertionError: assert 3 == 6
+```
+
+Running the same sequence standalone produced the correct answer:
+
+```
+load1 -> 3
+  count: 3
+load2 -> 3
+  count: 6
+```
+
+The difference was the test fixtures, not the code. `UNIQUE (doc_id, chunk_idx, model_version)`
+does not include `tenant_id`, so two tenants sharing a `doc_id` collide on the `ON CONFLICT`
+arbiter — and `DO UPDATE` rewrites the text and the embedding while leaving `tenant_id` alone.
+Each test was silently overwriting the previous test's rows. The fixtures now namespace `doc_id`
+per tenant, and
+`test_two_tenants_sharing_a_doc_id_collide_on_the_conflict_key` pins the behaviour so the blast
+radius is recorded rather than rediscovered. See PYTHON.md for why the key was left as the brief
+specifies.
+
+Separately, the container fixture was intermittently unreachable:
+
+```
+psycopg.OperationalError: connection failed: connection to server at "127.0.0.1",
+port 34763 failed: could not receive data from server: Connection refused
+```
+
+The Postgres entrypoint runs `initdb` against a temporary server, stops it, then starts the real
+one, so "ready to accept connections" appears in the logs twice and a port that was open a moment
+ago refuses the next connection. The fixture now waits on a successful `SELECT 1`.
+
+---
+
+## T3 — the Great Expectations suite
+
+**Prompt given.**
+
+> Write `taxcalc-ai/tests/test_great_expectations_suite.py`. It should spin
+> `pgvector/pgvector:pg16` via `testcontainers[postgres]`, apply `sql/V001__doc_chunks.sql`, seed
+> 100+ chunks through `load_corpus` + `embed_dataframe` + `load_rows`, build a `doc_chunks_v1`
+> expectation suite with at least five expectations (column non-null on `doc_id`, `embedding`,
+> `model_version`; table row count between 100 and 10M; `chunk_text` length between 1 and 8000),
+> and assert `result.success is True`.
+
+**What Claude produced.**
+
+```python
+context = gx.get_context()
+suite = context.add_or_update_expectation_suite(expectation_suite_name=SUITE_NAME)
+```
+
+**Verdict: Rejected** (for the API), then rewritten.
+
+`add_or_update_expectation_suite` is Great Expectations 0.18. The resolved version here is
+**1.23.0**, where that method does not exist:
+
+```
+gx 1.23.0
+has add_or_update_expectation_suite: False
+has .suites: True
+```
+
+The committed suite uses the 1.x surface throughout: `context.suites.add(ExpectationSuite(...))`,
+`context.data_sources.add_postgres(...)`, `add_table_asset` → `add_batch_definition_whole_table`
+→ `gx.ValidationDefinition(...).run()`.
+
+**The failure that cost the most time.** With the API corrected, the suite ran and reported this:
+
+```
+"statistics": {
+    "evaluated_expectations": 5,
+    "successful_expectations": 1,
+    "unsuccessful_expectations": 4,
+    "success_percent": 20.0
+}
+```
+
+Four column expectations failing; the row-count expectation passing with `observed_value: 100`.
+That reads unmistakably like a data problem — the table has the right number of rows and the
+wrong contents. The per-expectation results were empty (`"result": {}`), which is the tell, and
+`exception_info` had the real cause:
+
+```
+sqlalchemy.exc.CompileError: Can't generate DDL for NullType();
+did you forget to specify a type on this Column?
+  ... in _build_column_metadata_result
+      type_str = str(col["type"].compile(dialect=execution_engine.dialect))
+  ... great_expectations/expectations/metrics/table_metrics/table_column_types.py
+```
+
+GX resolves `table.column_types` before evaluating any column-level expectation, by reflecting
+the table through SQLAlchemy and compiling every column's type to a string. SQLAlchemy core has
+never heard of pgvector's `vector`, so `embedding` reflects as `NullType()` and compiling it
+raises. Nothing in the GX report mentions a type problem.
+
+The fix is one import, for its side effect:
+
+```
+vector registered before import? False
+vector registered after import?  True <class 'pgvector.sqlalchemy.vector.VECTOR'>
+```
+
+Claude did not produce this and could not have been expected to — it is an interaction between
+three libraries that only appears at run time, against a real database, with a real vector column.
+
+**Two further modifications.** A negative-control test was added, because
+`assert result.success is True` alone is indistinguishable from a checkpoint that reports success
+no matter where it is pointed; the control asserts an impossible row count and requires a `False`.
+And the GX Postgres data source's pooled SQLAlchemy engine is now disposed in a `finally`, because
+its connections were otherwise collected by the GC and surfaced as `ResourceWarning` at teardown
+— failing the run under `filterwarnings = ["error"]` long after the assertions had passed.
+
+---
+
+## W7 D2 — what could not be verified here
+
+Two gate steps are written to spec and have **not** been executed end to end, because this
+machine has neither credential:
+
+* **The RAGAS threshold test.** It is `@pytest.mark.slow` and skips on a missing
+  `ANTHROPIC_API_KEY`. It is gated on the credential rather than `xfail`ed on purpose, so an
+  absent secret in CI shows up as a skip in the report instead of as a green test:
+
+  ```
+  SKIPPED [1] tests/test_ragas_thresholds.py:143: ANTHROPIC_API_KEY is not set.
+  ```
+
+  The floors (`faithfulness` ≥ 0.80, `answer_relevancy` ≥ 0.80, `context_precision` ≥ 0.65,
+  `context_recall` ≥ 0.70) are the brief's, carried as written. They have not been observed
+  against this golden set, so the first CI run with the secret in place is what turns them from
+  declared floors into recorded ones. If a metric lands below its floor there, the honest move is
+  to record the observed baseline and say so — not to quietly lower the number.
+
+* **`assert_langsmith_run_visible`.** Needs a real LangSmith workspace. Its logic is exercised
+  only by the CI step.
+
+Both require repository secrets `TAXCALC_AI_LANGSMITH_API_KEY` and `TAXCALC_AI_ANTHROPIC_API_KEY`
+to be set before the gate can go green.
+
+## W7 D2 — final gate
+
+```
+All checks passed!                                  # ruff check src/ tests/
+23 files already formatted                          # ruff format --check
+Success: no issues found in 23 source files         # mypy --strict src/ tests/
+69 passed, 1 skipped                                # pytest
+TOTAL   392   41   90%                              # coverage, floor 85%
+```

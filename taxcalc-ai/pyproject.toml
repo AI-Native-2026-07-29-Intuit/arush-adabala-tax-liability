@@ -105,4 +105,19 @@ filterwarnings = [
     # without a live evaluator credential. Scoped to this exact message so every other
     # DeprecationWarning in the tree stays an error.
     'ignore:Importing .* from .ragas.metrics. is deprecated:DeprecationWarning',
+    # great-expectations 1.x imports the stdlib `sre_constants`, deprecated since 3.11. It is
+    # raised inside GX's own import chain, so no amount of care in this project's code avoids
+    # it; the only alternatives are turning the whole filterwarnings=error policy off or not
+    # importing GX. Scoped to the message so the policy holds everywhere else.
+    # `sre_constants` and `sre_parse` are both pulled in by that same import chain.
+    "ignore:module 'sre_.*' is deprecated:DeprecationWarning",
+    # great-expectations' ephemeral context creates a TemporaryDirectory for a docs site and
+    # never disposes of it; the GC cleans it up and the warning fires at teardown. It is GX's
+    # own object, created inside get_context(), with no handle exposed to close it.
+    #
+    # Note what is NOT exempted here: the pooled SQLAlchemy connections behind GX's Postgres
+    # data source leaked the same way, and that one the tests fix rather than silence - see the
+    # `data_source.get_engine().dispose()` in tests/test_great_expectations_suite.py. A leak
+    # this project can close gets closed; only the one it cannot reach is ignored.
+    "ignore:Implicitly cleaning up <TemporaryDirectory:ResourceWarning",
 ]
