@@ -19,10 +19,12 @@ Marked ``slow`` so a developer can opt out locally (``-m "not slow"``). CI does 
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Final
 
+import anthropic
 import pytest
 from datasets import Dataset
 from ragas import evaluate
@@ -32,6 +34,7 @@ from ragas.metrics import (
     context_recall,
     faithfulness,
 )
+from ragas.run_config import RunConfig
 
 from taxcalc_ai.corpus import MODEL_NAME
 
@@ -56,6 +59,45 @@ FLOORS: Final[dict[str, float]] = {
 
 #: RAGAS names its metrics with these keys in the result mapping.
 MINIMUM_GOLDEN_ROWS: Final[int] = 50
+
+#: Substrings that identify an Anthropic 400 as a provisioning problem rather than a bad request
+#: this code built. A spend-capped workspace returns 400 `invalid_request_error`, NOT a 401, so
+#: catching only AuthenticationError misses the most likely way a real deployment loses its
+#: evaluator.
+_SPEND_CAP_MARKERS: Final[tuple[str, ...]] = ("usage limit", "credit balance", "quota")
+
+#: One message for both unavailable paths, so the CI report reads the same either way.
+_UNAVAILABLE: Final[str] = (
+    "evaluator unavailable ({detail}). This run evaluated NOTHING - the golden set and the "
+    "floors are unchanged and untested. Raise the workspace spend limit in the Anthropic "
+    "console (Settings -> Limits), then re-run to record a real baseline."
+)
+
+
+def _provisioning_failure(exc: BaseException) -> BaseException | None:
+    """Return the underlying Anthropic error if ``exc`` means "no usable evaluator", else None.
+
+    The chain is walked because RAGAS runs metrics through its own executor and re-raises, so the
+    Anthropic exception arrives wrapped rather than bare. Matching only on the outermost type
+    would let a spend cap through as a hard failure.
+
+    Deliberately narrow. An evaluator that cannot be reached is an infrastructure fact and is
+    reported as a skip; anything else - a malformed dataset, a metric that errored, a model name
+    that does not exist - is a real failure and is re-raised. A broad ``except Exception: skip``
+    here would turn this gate into one that can never go red, which is worse than not having it.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+            return current
+        if isinstance(current, anthropic.BadRequestError):
+            message = str(current).lower()
+            if any(marker in message for marker in _SPEND_CAP_MARKERS):
+                return current
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _load_golden() -> Dataset:
@@ -89,7 +131,12 @@ def _run_eval() -> dict[str, float]:
     test sends over the network is the judging, not the text of every chunk.
     """
     from langchain_anthropic import ChatAnthropic
-    from langchain_community.embeddings import HuggingFaceEmbeddings
+
+    # langchain_huggingface, not langchain_community: the community copy is deprecated and
+    # emits a LangChainDeprecationWarning, which this project's filterwarnings policy turns into
+    # an error. This one had an actual fix rather than needing an exemption - the class simply
+    # moved packages.
+    from langchain_huggingface import HuggingFaceEmbeddings
     from ragas.dataset_schema import EvaluationResult
     from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.llms import LangchainLLMWrapper
@@ -97,11 +144,18 @@ def _run_eval() -> dict[str, float]:
     evaluator = LangchainLLMWrapper(ChatAnthropic(model=EVALUATOR_MODEL, timeout=120))
     embeddings = LangchainEmbeddingsWrapper(HuggingFaceEmbeddings(model_name=MODEL_NAME))
 
+    # RunConfig's defaults are max_retries=10 with backoff to 60s a wait. Against a healthy
+    # evaluator that is sensible resilience; against a dead one - a spend-capped workspace, a
+    # revoked key - it means every one of ~200 jobs exhausts ten retries before the run
+    # finishes. Measured: 13m40s to report a failure that was knowable in the first few seconds,
+    # inside a CI job with a 30 minute budget. Three retries keeps genuine transient handling
+    # and bounds the dead-evaluator case to roughly a minute.
     result = evaluate(
         _load_golden(),
         metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
         llm=evaluator,
         embeddings=embeddings,
+        run_config=RunConfig(max_retries=3, max_wait=8, timeout=60),
     )
     # evaluate() is typed as returning EvaluationResult | Executor - the second arm is the
     # deferred-execution path this call does not take. Asserting the type is what lets the
@@ -156,8 +210,37 @@ def test_ragas_baseline_thresholds() -> None:
     this fails the next question is always "did one metric move or did all of them", and a
     message naming only the first failure cannot answer it.
     """
-    scores = _run_eval()
+    try:
+        scores = _run_eval()
+    # Broad here, narrowed on the very next line. Kept for the paths that DO propagate - an
+    # unusable key can raise while the client is built, before any job is queued.
+    except Exception as exc:
+        underlying = _provisioning_failure(exc)
+        if underlying is None:
+            raise
+        pytest.skip(_UNAVAILABLE.format(detail=f"{type(underlying).__name__}: {underlying}"))
+
+    # The path that actually fires. RAGAS's executor catches each job's exception itself, logs
+    # it at ERROR, and writes NaN into that row's score - so a spend-capped evaluator does not
+    # raise anything at all, it returns a full result whose every value is NaN. Left unhandled
+    # that reads as `assert nan >= 0.80` failing, which is indistinguishable in the CI log from
+    # a genuine quality regression, and is the wrong thing to page someone about.
+    #
+    # ALL metrics NaN means no judgement happened anywhere: a provisioning fact, reported as a
+    # skip. SOME metrics NaN is a different animal - the evaluator was reachable and something
+    # about the data or a specific metric broke - so that still fails, loudly, below.
+    if scores and all(math.isnan(value) for value in scores.values()):
+        pytest.skip(
+            _UNAVAILABLE.format(
+                detail="every metric returned NaN; RAGAS logged per-job errors at ERROR level"
+            )
+        )
 
     for metric, floor in FLOORS.items():
         assert metric in scores, f"{metric} missing from RAGAS result: {scores}"
+        # Explicit, because `nan >= floor` is False rather than an error: without this the
+        # failure message would blame the floor for what is actually an un-evaluated metric.
+        assert not math.isnan(scores[metric]), (
+            f"{metric} is NaN - it was not evaluated, rather than scoring low: {scores}"
+        )
         assert scores[metric] >= floor, f"{metric} below the W7 D2 floor {floor}: {scores}"

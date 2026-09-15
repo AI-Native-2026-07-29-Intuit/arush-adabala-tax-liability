@@ -378,21 +378,39 @@ Two further notes on the type gate, which earned its place today more than on an
   every symbol as `Any`. It surfaced as an `unused-ignore` error, which is a type gate reporting
   that it had nothing to check.
 
-### A finding worth carrying forward: the uniqueness key is not tenant-scoped
+### The uniqueness key is not tenant-scoped, and the loader guards the gap
 
 `UNIQUE (doc_id, chunk_idx, model_version)` — as the brief specifies — does not include
-`tenant_id`, so `tenant_id` is not part of the `ON CONFLICT` arbiter either. Two tenants
-ingesting the same `doc_id` do not get a row each: the second load's `DO UPDATE` rewrites
-`chunk_text` and `embedding` and leaves `tenant_id` untouched, so one tenant's content ends up
-stored under another tenant's label — and the tenant-scoped read path in `rag.py` will then
-serve it to the wrong tenant.
+`tenant_id`, so `tenant_id` is not part of the `ON CONFLICT` arbiter either. Left alone, that
+means two tenants ingesting the same `doc_id` do not get a row each: the second load's
+`DO UPDATE` rewrites `chunk_text` and `embedding` and leaves `tenant_id` untouched, so one
+tenant's content ends up stored under another tenant's label — and the tenant-scoped read path
+in `rag.py` then serves it to the wrong tenant. An `INSERT` that reports success and leaks data
+across a tenant boundary is the worst shape a defect can take here.
 
-This is latent rather than live: today's corpus is single-source and uses one shared
-`taxpayer-NNN` namespace. It is called out here, and pinned by
-`test_two_tenants_sharing_a_doc_id_collide_on_the_conflict_key`, because it was found the hard
-way — three loader tests failed against a loader that was behaving exactly as designed, because
-the test fixtures shared `doc_id`s across tenants. Widening the key should be a decision someone
-makes, not a bug someone finds.
+Found the hard way: three loader tests failed against a loader behaving exactly as designed,
+because the fixtures shared `doc_id`s across tenants.
+
+**The schema is unchanged and the loader closes the hole.** The `ON CONFLICT` clause carries a
+guard:
+
+```sql
+ON CONFLICT (doc_id, chunk_idx, model_version) DO UPDATE
+SET chunk_text = EXCLUDED.chunk_text, embedding = EXCLUDED.embedding
+WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id
+```
+
+A cross-tenant collision no longer matches, so the update affects zero rows; `load_rows` compares
+`cur.rowcount` against the payload size and raises `CrossTenantDocIdError` **before** the commit,
+so the batch rolls back whole and the corpus is untouched. The collision became a loud failure at
+write time instead of a quiet one at read time, at the cost of no extra round trip.
+
+Widening the key to `(tenant_id, doc_id, chunk_idx, model_version)` is the textbook fix and
+remains the right move if the corpus ever becomes genuinely multi-source. It was not taken here
+because the narrow key is the schema the deliverable specifies, and the guard removes the hazard
+without deviating from it. Three tests pin the behaviour: the raise, the whole-batch rollback,
+and — importantly — that a same-tenant reload is still idempotent, because a guard that also
+blocked legitimate retries would have quietly removed the property the loader exists to provide.
 
 ## What this sidecar does NOT do (yet)
 

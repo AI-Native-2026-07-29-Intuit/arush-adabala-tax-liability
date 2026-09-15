@@ -627,37 +627,139 @@ its connections were otherwise collected by the GC and surfaced as `ResourceWarn
 
 ---
 
-## W7 D2 — what could not be verified here
+## W7 D2 — verification pass, once the credentials arrived
 
-Two gate steps are written to spec and have **not** been executed end to end, because this
-machine has neither credential:
+Both previously-unverified steps were run against real credentials. One passed; one is blocked
+by something no code change can fix, and the blocker itself changed the design.
 
-* **The RAGAS threshold test.** It is `@pytest.mark.slow` and skips on a missing
-  `ANTHROPIC_API_KEY`. It is gated on the credential rather than `xfail`ed on purpose, so an
-  absent secret in CI shows up as a skip in the report instead of as a green test:
+### LangSmith run-visibility — VERIFIED
 
-  ```
-  SKIPPED [1] tests/test_ragas_thresholds.py:143: ANTHROPIC_API_KEY is not set.
-  ```
+```
+seeded 100 chunks
+issued one traced retrieval; 3 chunks returned
+  attempt 1/20: no run visible yet, waiting...
+OK: 1 run(s) named 'taxcalc_ai.retrieve_chunks' visible in project 'taxcalc-ai-dev-ci'
+    (most recent id 01a0a6c6-e49b-7d81-97d1-b68dc5beb41c)
+EXIT=0
+```
 
-  The floors (`faithfulness` ≥ 0.80, `answer_relevancy` ≥ 0.80, `context_precision` ≥ 0.65,
-  `context_recall` ≥ 0.70) are the brief's, carried as written. They have not been observed
-  against this golden set, so the first CI run with the secret in place is what turns them from
-  declared floors into recorded ones. If a metric lands below its floor there, the honest move is
-  to record the observed baseline and say so — not to quietly lower the number.
+Note the first poll returning nothing and the second succeeding. That is the background-flush
+window the script's `client.flush()` and retry loop exist for, observed rather than assumed — a
+checker that queried once immediately after the call would have failed here.
 
-* **`assert_langsmith_run_visible`.** Needs a real LangSmith workspace. Its logic is exercised
-  only by the CI step.
+### RAGAS thresholds — STILL UNRECORDED, and honestly so
 
-Both require repository secrets `TAXCALC_AI_LANGSMITH_API_KEY` and `TAXCALC_AI_ANTHROPIC_API_KEY`
-to be set before the gate can go green.
+The Anthropic key is valid; the workspace is spend-capped.
+
+```
+anthropic.BadRequestError: Error code: 400 - {'type': 'invalid_request_error',
+ 'message': 'You have reached your specified workspace API usage limits.
+  You will regain access on 2026-10-01 at 00:00 UTC.'}
+```
+
+Confirmed a cap and not a bad key by calling an endpoint that does not consume quota:
+
+```
+key is VALID (models.list succeeded) -> the 400 is a spend cap, not a bad key
+```
+
+**The floors remain unobserved.** Nothing in this pass turned them from declared into recorded,
+and the skip message says so in those words, so a green CI run cannot be mistaken for a measured
+baseline.
+
+### Q12 — Why did the exception guard not fire?
+
+**Why it came up.** The first guard caught `anthropic.AuthenticationError`,
+`PermissionDeniedError` and spend-cap `BadRequestError`, walking `__cause__`/`__context__`
+because RAGAS might wrap them. It did not work.
+
+**What was checked.** Running it for real against the capped workspace:
+
+```
+ERROR    ragas.executor:executor.py:104 Exception raised in Job[185]:
+         AnthropicInvalidRequestError(Error code: 400 - ... 'usage limits' ...)
+ERROR    ragas.executor:executor.py:104 Exception raised in Job[196]: TimeoutError()
+============= 1 failed, 1 deselected, 1 error in 820.57s (0:13:40) =============
+```
+
+RAGAS's executor catches each job's exception **itself**, logs it at ERROR, and writes `NaN`
+into that row's score. Nothing propagates. `evaluate()` returns a complete result whose every
+value is `NaN`, and `assert nan >= 0.80` is simply `False` — so a dead evaluator was reporting
+as a quality regression, which is the wrong thing to page someone about.
+
+**Decided.** Detect the NaN, not the exception. All metrics `NaN` means no judgement happened
+anywhere — a provisioning fact, reported as a skip. *Some* metrics `NaN` means the evaluator was
+reachable and something else broke, so that still fails. An explicit `math.isnan` assertion sits
+in front of every floor comparison, because otherwise the failure message blames the floor for a
+metric that was never evaluated. The exception guard is kept for the paths that do propagate: an
+unusable key can raise while the client is being built, before any job is queued.
+
+**Also changed:** 13m40s to report a failure knowable in the first few seconds. RAGAS's default
+`RunConfig` is `max_retries=10` with backoff to a 60s wait, so ~200 jobs each exhausted ten
+retries — inside a CI job with a 30 minute budget. `RunConfig(max_retries=3, max_wait=8,
+timeout=60)` keeps genuine transient handling and bounds the dead-evaluator case:
+
+```
+1 skipped, 1 deselected in 32.73s
+```
+
+### Q13 — Four warning exemptions had accumulated. Why?
+
+**Why it came up.** Getting RAGAS to run surfaced a deprecation at every layer — the metric
+singletons, then `LangchainLLMWrapper`, then `LangchainEmbeddingsWrapper`, then `evaluate`
+itself. Each was individually defensible to silence. Four was a smell.
+
+**What was checked.** Whether the migration target actually accepts the current wiring:
+
+```
+llm_factory OK -> InstructorLLM | MRO has BaseRagasLLM: False
+```
+
+`llm_factory` returns an `InstructorLLM`, which is **not** a `BaseRagasLLM`, so it does not drop
+into `evaluate()` beside the metric singletons. Taking ragas 0.4's advice means moving to
+`ragas.metrics.collections` as well — an all-or-nothing rewrite of the gate, unvalidatable while
+the evaluator is capped.
+
+**Decided.** Pin `ragas>=0.1.10,<0.3` — still inside the brief's floor — where the API the brief
+specifies is the *current* one rather than the deprecated one:
+
+```
+ragas 0.2.15 - brief API imports with ZERO deprecation warnings
+```
+
+Two exemptions deleted. A pin is one reviewable decision with an obvious expiry; four ignores
+are four places for a real warning to hide. `HuggingFaceEmbeddings` got a genuine fix rather
+than an exemption — the class had simply moved to `langchain-huggingface`.
+
+The two remaining exemptions are both third-party leaks with no seam to reach: GX's ephemeral
+docs-site `TemporaryDirectory`, and RAGAS's `_analytics.py` doing `json.load(open(...))` inside
+an `lru_cache`'d pydantic `default_factory`. The latter runs while the event object is built,
+*before* `track()` consults `RAGAS_DO_NOT_TRACK` — so disabling telemetry does not avoid it,
+though telemetry is disabled anyway, because a work repository's CI should not be making
+unsolicited outbound calls to a third party on every build.
+
+### Q14 — The tenant collision: guard it or widen the key?
+
+**Decided:** guard it. The `ON CONFLICT` clause gained
+`WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id`, and `load_rows` turns the resulting
+`cur.rowcount` shortfall into `CrossTenantDocIdError` before the commit. The schema the
+deliverable specifies is untouched, the silent cross-tenant overwrite is now a loud write-time
+failure, and it costs no extra round trip. Three tests pin it: the raise, the whole-batch
+rollback, and that a same-tenant reload is still idempotent — a guard that also blocked
+legitimate retries would have quietly removed the property the loader exists to provide.
 
 ## W7 D2 — final gate
 
+Run as the workflow runs it, step for step:
+
 ```
-All checks passed!                                  # ruff check src/ tests/
-23 files already formatted                          # ruff format --check
-Success: no issues found in 23 source files         # mypy --strict src/ tests/
-69 passed, 1 skipped                                # pytest
-TOTAL   392   41   90%                              # coverage, floor 85%
+Checked 142 packages                        # uv sync --frozen
+All checks passed!                          # ruff check
+23 files already formatted                  # ruff format --check
+Success: no issues found in 23 source files # mypy --strict src/ tests/
+69 passed, 1 deselected                     # pytest (coverage step)
+Required test coverage of 85% reached. Total coverage: 89.65%
+2 passed                                    # pytest tests/test_great_expectations_suite.py
+1 skipped, 1 deselected in 31.03s           # pytest -m slow (evaluator spend-capped)
+EXIT=0                                      # assert_langsmith_run_visible
 ```

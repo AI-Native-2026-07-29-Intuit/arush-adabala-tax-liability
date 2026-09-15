@@ -29,6 +29,13 @@ os.environ.setdefault("LANGSMITH_API_KEY", "lsv2_test_not_a_real_key")
 # run to somebody's real project using the fake key above, and fail slowly on auth rather than
 # quickly on the assertion under test.
 os.environ.setdefault("LANGSMITH_TRACING", "false")
+# RAGAS ships usage telemetry that is on by default. Two reasons this is off here, and the
+# second is the one that matters: it leaks an unclosed handle on its uuid.json under
+# `_analytics.py`, which surfaces as a ResourceWarning at teardown and fails the run under this
+# project's filterwarnings=error policy - and, more importantly, a work repository's CI should
+# not be making unsolicited outbound calls to a third party on every build. Disabling it fixes
+# the leak by removing the code path rather than by exempting its warning.
+os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 from taxcalc_ai.models import Liability, LiabilityEstimateRequest, Taxpayer
 from taxcalc_ai.settings import TaxcalcAiSettings

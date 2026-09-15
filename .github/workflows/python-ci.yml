@@ -139,6 +139,10 @@ jobs:
           # RAGAS judges answers rather than producing them, so the evaluator may be a smaller
           # and cheaper model than production.
           ANTHROPIC_API_KEY: ${{ secrets.TAXCALC_AI_ANTHROPIC_API_KEY }}
+          # No unsolicited telemetry to a third party on every build. Also removes the unclosed
+          # file handle RAGAS's analytics module leaks, which this project's warnings-as-errors
+          # policy would otherwise fail the run on.
+          RAGAS_DO_NOT_TRACK: "true"
 
       - name: Assert a LangSmith run is visible for a sample retrieval
         # The only step that proves tracing WORKS rather than that the decorator is written.

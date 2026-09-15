@@ -47,6 +47,21 @@ from .corpus import CorpusRow
 
 _LOG: Final[logging.Logger] = logging.getLogger("taxcalc_ai.pgvector_loader")
 
+
+class CrossTenantDocIdError(RuntimeError):
+    """A ``doc_id`` in this batch is already owned by a different tenant.
+
+    Raised when the tenant guard on the ``ON CONFLICT`` clause suppresses an update - see
+    :data:`_INSERT_SQL`. The batch is rolled back whole, so the corpus is left exactly as it was
+    rather than partially applied.
+
+    The condition is not a transient fault and retrying will not clear it: two tenants genuinely
+    claim the same document identifier, and something upstream has to decide which one is right
+    or namespace them apart. That is why this is its own type rather than a bare
+    :class:`RuntimeError` - a caller retrying on ``RuntimeError`` should not retry on this.
+    """
+
+
 #: The environment variable carrying the Postgres DSN. Read, never defaulted - see
 #: :func:`dsn_from_env`.
 DSN_ENV_VAR: Final[str] = "TAXCALC_AI_PG_DSN"
@@ -58,12 +73,28 @@ DSN_ENV_VAR: Final[str] = "TAXCALC_AI_PG_DSN"
 #: alone: the column records when a chunk first entered the corpus, and a retry of a partially
 #: failed load is not a new arrival. Bumping it would make "when did we ingest this" answer
 #: "the last time anything was retried".
+#:
+#: The ``WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id`` clause is the tenant guard, and it is
+#: the reason this statement is safe despite ``tenant_id`` NOT being part of the uniqueness key.
+#:
+#: The key is ``(doc_id, chunk_idx, model_version)``. Without the ``WHERE``, a second tenant
+#: loading a chunk whose ``doc_id`` another tenant already owns would take the ``DO UPDATE``
+#: branch: its text and embedding would overwrite the incumbent's while ``tenant_id`` stayed put,
+#: so one tenant's content would sit under another tenant's label - and the tenant-scoped read
+#: path in :mod:`taxcalc_ai.rag` would then serve it to the wrong tenant. That is a cross-tenant
+#: data leak produced by an INSERT that reports success.
+#:
+#: With the ``WHERE``, the conflicting row simply does not match, the update affects zero rows,
+#: and :func:`load_rows` turns the resulting count shortfall into
+#: :class:`CrossTenantDocIdError`. The collision becomes a loud failure at write time instead of
+#: a quiet one at read time, and it costs no extra round trip.
 _INSERT_SQL: Final[str] = (
     "INSERT INTO doc_chunks "
     "(doc_id, chunk_idx, chunk_text, embedding, model_version, tenant_id) "
     "VALUES (%s, %s, %s, %s, %s, %s) "
     "ON CONFLICT (doc_id, chunk_idx, model_version) DO UPDATE "
-    "SET chunk_text = EXCLUDED.chunk_text, embedding = EXCLUDED.embedding"
+    "SET chunk_text = EXCLUDED.chunk_text, embedding = EXCLUDED.embedding "
+    "WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id"
 )
 
 
@@ -82,6 +113,8 @@ def load_rows(dsn: str, rows: Iterable[CorpusRow]) -> int:
     :returns: The number of rows sent. This is the payload size, not a count of rows *created*:
         an idempotent re-run returns the same number while creating nothing, which is the
         intended reading - it answers "how much was loaded", not "how much was new".
+    :raises CrossTenantDocIdError: if any ``doc_id`` in the batch is already owned by a
+        different tenant. Nothing is committed when this is raised.
     """
     # Materialised before connecting: building the payload can raise (a row with a wrong-sized
     # vector, an exhausted iterator), and doing it first means that failure never leaves an
@@ -102,6 +135,19 @@ def load_rows(dsn: str, rows: Iterable[CorpusRow]) -> int:
         register_vector(conn)
         with conn.cursor() as cur:
             cur.executemany(_INSERT_SQL, payload)
+            # Every row must have inserted or updated exactly once. A shortfall means the tenant
+            # guard on the ON CONFLICT clause suppressed an update, which is the cross-tenant
+            # doc_id collision described on _INSERT_SQL. Checked BEFORE the commit, so raising
+            # here rolls the whole batch back and the corpus is untouched.
+            affected = cur.rowcount
+            if affected != len(payload):
+                raise CrossTenantDocIdError(
+                    f"{len(payload) - affected} of {len(payload)} rows were suppressed by the "
+                    "tenant guard: a doc_id in this batch is already owned by a different "
+                    "tenant. The uniqueness key is (doc_id, chunk_idx, model_version) and does "
+                    "not include tenant_id, so the two tenants collide. Namespace the doc_id "
+                    "per tenant, or widen the key."
+                )
         conn.commit()
 
     _LOG.info(

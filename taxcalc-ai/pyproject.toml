@@ -25,12 +25,23 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.5",
     "respx>=0.21",
-    "ragas>=0.1.10",
+    # Upper-bounded deliberately. ragas 0.4 deprecates essentially the entire surface this
+    # project uses - the metric singletons, LangchainLLMWrapper, LangchainEmbeddingsWrapper and
+    # `evaluate` itself - in favour of ragas.metrics.collections plus llm_factory. That is a
+    # coherent destination, but llm_factory returns an InstructorLLM which is NOT a BaseRagasLLM
+    # (checked, not assumed), so it is an all-or-nothing migration, and it cannot be validated
+    # end to end while the evaluator workspace is spend-capped. Carrying four warning exemptions
+    # to keep a deprecated API quiet is worse than pinning to the version where that API is the
+    # current one; the pin is a single reviewable decision with an obvious expiry. Revisit when
+    # the evaluator can actually run.
+    "ragas>=0.1.10,<0.3",
     "great-expectations>=0.18",
     "testcontainers[postgres]>=4.7",
     "langchain-community<0.4",
     "pandas-stubs>=3.0.5.260914",
     "langchain-anthropic>=0.2",
+    "anthropic>=0.40",
+    "langchain-huggingface>=0.1",
 ]
 
 [tool.uv]
@@ -55,12 +66,16 @@ warn_return_any = true
 warn_unused_ignores = true
 exclude = ["build/", "dist/"]
 
-# `datasets` ships no py.typed marker, so --strict refuses the import outright rather than
-# treating it as Any. Scoped to this one module: a blanket ignore_missing_imports would switch
-# the same protection off for every third-party package, including the ones that DO ship types
-# (pandas via pandas-stubs, numpy, psycopg, pgvector, sentence-transformers, langsmith).
+# Neither `datasets` nor `ragas` (at the <0.3 pin) ships a py.typed marker, so --strict refuses
+# those imports outright rather than treating them as Any. Scoped to these two package trees: a
+# blanket ignore_missing_imports would switch the same protection off for every third-party
+# package, including the ones that DO ship types - pandas via pandas-stubs, numpy, psycopg,
+# pgvector, sentence-transformers, langsmith, great-expectations.
+#
+# Worth noting the direction of travel: ragas 0.4 DOES ship py.typed, so this half of the
+# override expires with the pin above rather than being permanent.
 [[tool.mypy.overrides]]
-module = ["datasets.*"]
+module = ["datasets.*", "ragas.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
@@ -102,15 +117,6 @@ filterwarnings = [
     # secrets_dir points at the Kubernetes mount path, which does not exist on a laptop or on
     # a CI runner. The warning is correct and expected off-cluster; it is not a test failure.
     'ignore:directory "/run/secrets" does not exist:UserWarning',
-    # ragas 0.4 deprecates the lowercase metric singletons in favour of
-    # `ragas.metrics.collections`. The new collection classes take an
-    # InstructorBaseRagasLLM at construction rather than the LangchainLLMWrapper this
-    # project builds its Anthropic evaluator from, so the migration is a real change of
-    # wiring - llm_factory(model, provider="anthropic", client=anthropic.Anthropic())
-    # is the replacement - and not one to make blind on a code path that cannot run
-    # without a live evaluator credential. Scoped to this exact message so every other
-    # DeprecationWarning in the tree stays an error.
-    'ignore:Importing .* from .ragas.metrics. is deprecated:DeprecationWarning',
     # great-expectations 1.x imports the stdlib `sre_constants`, deprecated since 3.11. It is
     # raised inside GX's own import chain, so no amount of care in this project's code avoids
     # it; the only alternatives are turning the whole filterwarnings=error policy off or not
@@ -126,4 +132,11 @@ filterwarnings = [
     # `data_source.get_engine().dispose()` in tests/test_great_expectations_suite.py. A leak
     # this project can close gets closed; only the one it cannot reach is ignored.
     "ignore:Implicitly cleaning up <TemporaryDirectory:ResourceWarning",
+    # ragas/_analytics.py does `json.load(open(uuid_filepath))` - an unclosed handle - inside an
+    # lru_cache'd get_userid(), which is a pydantic default_factory on its event model. It runs
+    # while the event object is BUILT, before track() consults RAGAS_DO_NOT_TRACK, so disabling
+    # telemetry (which tests/conftest.py does anyway, for egress reasons) does not avoid it.
+    # There is no seam to close the file from: it is an open() inside a cached function in a
+    # dependency.
+    'ignore:unclosed file .*ragas.*uuid\.json:ResourceWarning',
 ]

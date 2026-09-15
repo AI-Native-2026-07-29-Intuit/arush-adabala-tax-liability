@@ -2158,21 +2158,42 @@ import for its side effect (`import pgvector.sqlalchemy`, which registers `VECTO
 dialect's `ischema_names`). Nothing in the GX report mentions a type.
 
 `UNIQUE (doc_id, chunk_idx, model_version)` does **not** include `tenant_id`, so `tenant_id` is
-not part of the `ON CONFLICT` arbiter either. Two tenants ingesting the same `doc_id` do not get
-a row each: the second load's `DO UPDATE` rewrites `chunk_text` and `embedding` and leaves
-`tenant_id` alone, so one tenant's content ends up stored under another's label — and the
-tenant-scoped read path then serves it to the wrong tenant. Latent today (the corpus is
-single-source), found the hard way when three loader tests failed against a loader behaving
-exactly as designed, and now pinned by a test that names the blast radius so widening the key is
-a decision someone makes rather than a bug someone finds.
+not part of the `ON CONFLICT` arbiter either. Left alone, a second tenant loading a chunk whose
+`doc_id` another tenant owns would take the `DO UPDATE` branch: its content would overwrite the
+incumbent's while `tenant_id` stayed put, and the tenant-scoped read path would then serve one
+tenant's text to another. An `INSERT` that reports success and leaks across a tenant boundary is
+the worst shape a defect can take here. Found the hard way, when three loader tests failed
+against a loader behaving exactly as designed.
 
-**Result:** 69 tests green (1 skipped — RAGAS, pending the evaluator secret), 90% coverage
-against an 85% floor, zero `mypy --strict` errors, zero `ruff` findings.
+**The schema is unchanged and the loader closes it.** The `ON CONFLICT` clause carries
+`WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id`, so a cross-tenant collision matches nothing,
+and `load_rows` turns the `cur.rowcount` shortfall into `CrossTenantDocIdError` *before* the
+commit — the batch rolls back whole. A quiet read-time leak became a loud write-time failure at
+the cost of no extra round trip. Three tests pin it: the raise, the whole-batch rollback, and
+that a same-tenant reload is still idempotent, since a guard that also blocked legitimate retries
+would have removed the property the loader exists to provide.
 
-**Not yet verified end to end:** the RAGAS thresholds and the LangSmith run-visibility step need
-repository secrets `TAXCALC_AI_LANGSMITH_API_KEY` and `TAXCALC_AI_ANTHROPIC_API_KEY`. The floors
-are the brief's, carried as written; the first CI run with the secrets in place is what turns
-them from declared floors into recorded ones.
+**Result:** 69 tests green, 89.65% coverage against an 85% floor, zero `mypy --strict` errors,
+zero `ruff` findings. Both repository secrets are set.
+
+**The LangSmith run-visibility gate is verified end to end** — a real retrieval, flushed, then
+found SaaS-side in `taxcalc-ai-dev-ci` (`exit 0`). The first poll came back empty and the second
+succeeded, which is the background-flush window the script's retry loop exists for, observed
+rather than assumed.
+
+**The RAGAS floors are still unobserved, and the skip says so.** The Anthropic key is valid
+(`models.list` succeeds) but the workspace is spend-capped until 2026-10-01, so the evaluation
+judged nothing. Raising the workspace spend limit in the Anthropic console and re-running is
+what turns the floors from declared into recorded — the skip message states in those words that
+the run evaluated nothing, so a green CI cannot be mistaken for a measured baseline.
+
+Getting there produced two changes worth naming. RAGAS's executor catches each job's exception
+itself and writes `NaN` into that row's score, so a dead evaluator does not raise — it returns a
+full result of `NaN`, and `assert nan >= 0.80` reads in CI as a quality regression. The gate now
+detects the NaN: *all* metrics NaN is a provisioning fact and skips, *some* metrics NaN still
+fails. And `RunConfig(max_retries=3, …)` replaced RAGAS's default of ten-with-backoff, which had
+each of ~200 jobs exhausting its retries — 13m40s to report something knowable in seconds, inside
+a 30-minute CI budget. It now settles in ~33s.
 
 
 ## Build and Test

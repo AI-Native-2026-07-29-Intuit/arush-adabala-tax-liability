@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import numpy as np
 import psycopg
+import pytest
 from numpy.typing import NDArray
 from pgvector.psycopg import register_vector
 
 from taxcalc_ai.corpus import EMBEDDING_DIM, MODEL_NAME, CorpusRow
-from taxcalc_ai.pgvector_loader import load_rows
+from taxcalc_ai.pgvector_loader import CrossTenantDocIdError, load_rows
 
 #: The index whose use the EXPLAIN assertion is about.
 HNSW_INDEX = "doc_chunks_embedding_hnsw"
@@ -47,8 +48,10 @@ def _rows(count: int, tenant_id: str, text_prefix: str = "chunk") -> list[Corpus
     ``tenant_id`` - so two tenants using the same ``doc_id`` collide on the ``ON CONFLICT``
     arbiter, and the second load updates the first tenant's row instead of inserting its own.
     Sharing a namespace here made three tests fail against a loader that was behaving exactly
-    as designed. See :func:`test_two_tenants_sharing_a_doc_id_collide_on_the_conflict_key`,
-    which pins that behaviour rather than leaving it to be rediscovered.
+    as designed. Since the tenant guard landed, a collision raises
+    :class:`~taxcalc_ai.pgvector_loader.CrossTenantDocIdError` rather than silently overwriting -
+    see :func:`test_a_cross_tenant_doc_id_collision_raises_instead_of_overwriting` - so these
+    per-tenant namespaces now keep the fixtures legal as well as independent.
     """
     return [
         CorpusRow(
@@ -222,20 +225,19 @@ def test_loading_no_rows_is_a_no_op(pg_dsn: str) -> None:
     assert load_rows(pg_dsn, []) == 0
 
 
-def test_two_tenants_sharing_a_doc_id_collide_on_the_conflict_key(pg_dsn: str) -> None:
-    """Two tenants ingesting the same ``doc_id`` do NOT get a row each - the second overwrites.
+def test_a_cross_tenant_doc_id_collision_raises_instead_of_overwriting(pg_dsn: str) -> None:
+    """A second tenant claiming an existing ``doc_id`` fails loudly and changes nothing.
 
-    This pins a real and non-obvious consequence of the schema: ``tenant_id`` is not part of
-    ``UNIQUE (doc_id, chunk_idx, model_version)``, so it is not part of the ``ON CONFLICT``
-    arbiter either. When tenant-b loads a chunk whose ``doc_id`` tenant-a already owns, the
-    ``DO UPDATE`` set-list rewrites ``chunk_text`` and ``embedding`` but leaves ``tenant_id``
-    untouched - so tenant-b's content ends up stored under tenant-a's label, and the
-    tenant-scoped read path in :mod:`taxcalc_ai.rag` will serve it to tenant-a.
+    ``tenant_id`` is not part of ``UNIQUE (doc_id, chunk_idx, model_version)``, so it is not part
+    of the ``ON CONFLICT`` arbiter either. Without a guard, tenant-b's load would take the
+    ``DO UPDATE`` branch and rewrite tenant-a's ``chunk_text`` and ``embedding`` while leaving
+    ``tenant_id`` alone - one tenant's content stored under another's label, which the
+    tenant-scoped read path would then serve to the wrong tenant. An INSERT that reports success
+    and leaks data across a tenant boundary is the worst shape a bug can take here.
 
-    The corpus loaded today is single-source and uses a shared ``taxpayer-NNN`` namespace, so
-    this is latent rather than live. It is asserted here because a test that documents the
-    blast radius is worth more than a comment: if the key is ever widened to include
-    ``tenant_id``, this test fails and names the decision.
+    The ``WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id`` clause makes that row not match, the
+    update affects zero rows, and the count shortfall becomes this exception. Both halves are
+    asserted: that it raises, and that the incumbent's row is untouched afterwards.
     """
     shared_doc = "shared-doc-001"
 
@@ -251,12 +253,60 @@ def test_two_tenants_sharing_a_doc_id_collide_on_the_conflict_key(pg_dsn: str) -
         )
 
     load_rows(pg_dsn, [row_for("tenant-first", "first tenant content")])
-    load_rows(pg_dsn, [row_for("tenant-second", "second tenant content")])
+
+    with pytest.raises(CrossTenantDocIdError, match="already owned by a different tenant"):
+        load_rows(pg_dsn, [row_for("tenant-second", "second tenant content")])
 
     with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT tenant_id, chunk_text FROM doc_chunks WHERE doc_id = %s", (shared_doc,))
         rows = cur.fetchall()
 
-    assert len(rows) == 1, "tenant_id is not in the uniqueness key, so there is only ever one row"
-    assert rows[0][0] == "tenant-first", "DO UPDATE does not rewrite tenant_id"
-    assert rows[0][1] == "second tenant content", "but it does rewrite the text"
+    assert len(rows) == 1
+    assert rows[0][0] == "tenant-first", "the incumbent's ownership is intact"
+    assert rows[0][1] == "first tenant content", "and so is the incumbent's content"
+
+
+def test_a_cross_tenant_collision_rolls_back_the_whole_batch(pg_dsn: str) -> None:
+    """One bad row aborts the batch; the good rows beside it are not left half-applied.
+
+    The guard is checked before ``conn.commit()`` precisely so a partially-applied load is not a
+    reachable state. A batch that wrote nine of ten rows and raised would be far harder to
+    recover from than one that wrote none, because "run it again" would no longer be safe advice
+    without first working out which nine landed.
+    """
+    tenant, intruder = "tenant-rollback", "tenant-rollback-intruder"
+    load_rows(pg_dsn, _rows(3, tenant))
+    before = _count_for(pg_dsn, tenant)
+
+    # Nine clean rows in a fresh namespace, plus one that collides with the incumbent above.
+    clean = _rows(9, intruder)
+    colliding = CorpusRow(
+        doc_id=f"{tenant}-doc-000",
+        chunk_idx=0,
+        chunk_text="intruder content",
+        embedding=_unit_vector(2),
+        model_version=MODEL_NAME,
+        tenant_id=intruder,
+    )
+
+    with pytest.raises(CrossTenantDocIdError):
+        load_rows(pg_dsn, [*clean, colliding])
+
+    assert _count_for(pg_dsn, intruder) == 0, "the nine clean rows were rolled back too"
+    assert _count_for(pg_dsn, tenant) == before, "the incumbent is untouched"
+
+
+def test_the_same_tenant_reloading_its_own_rows_is_still_idempotent(pg_dsn: str) -> None:
+    """The guard does not break the ordinary retry path it sits on top of.
+
+    ``WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id`` is true for every same-tenant re-load, so
+    the update matches, the row count holds, and no exception is raised. Worth pinning: a guard
+    that also blocked legitimate retries would have quietly removed the idempotency the loader
+    exists to provide.
+    """
+    tenant = "tenant-guard-idempotent"
+    rows = _rows(20, tenant)
+    load_rows(pg_dsn, rows)
+
+    assert load_rows(pg_dsn, rows) == 20
+    assert _count_for(pg_dsn, tenant) == 20
