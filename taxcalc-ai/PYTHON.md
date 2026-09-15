@@ -65,8 +65,8 @@ rather than whatever happens to be on the global `PATH`.
 
 ### The round-trip fixture: where it comes from
 
-`tests/fixtures/taxpayer_java.json` is the **verbatim response body** of a real
-`GET /api/v1/taxpayers/taxpayer-001` against a locally-running taxcalc-api — not a hand-written
+`tests/fixtures/taxpayer_java.json` holds the **response body of a real
+`GET /api/v1/taxpayers/taxpayer-001`** against a locally-running taxcalc-api — not a hand-written
 document, and not a serialiser invoked in isolation. To reproduce it:
 
 ```bash
@@ -79,6 +79,11 @@ TOKEN=$(python3 -c "import json;print(json.load(open('.loadtest/tokens.json'))[0
 curl -s http://localhost:8080/api/v1/taxpayers/taxpayer-001 -H "Authorization: Bearer $TOKEN" \
   > taxcalc-ai/tests/fixtures/taxpayer_java.json
 ```
+
+The committed file is that captured body re-emitted through `TaxpayerReadModel` after the money
+fields gained `@JsonFormat(shape = STRING)` (below). Every value in it came off the wire; only the
+money **encoding** changed, and re-running the capture above against the current service
+reproduces the committed bytes.
 
 Two things about that run are worth knowing before the output surprises you.
 
@@ -96,43 +101,48 @@ write-through path instead carries the caller's tenant — `POST /api/v1/taxpaye
 above produces `"tenantId":"tenant-synth"`. Both are real outputs of the same endpoint; the
 fixture is the one that also carries a liability, and therefore money.
 
-### The one place the two languages do not line up: money on the wire
+### Money crosses the wire as a string, and that was a change we made
 
-The fixture shows money as a JSON **number**, with its scale written out:
+The fixture shows money as a JSON **string**, with its scale written out:
 
 ```json
-{"taxableAmount":120000.00,"liabilityAmount":26400.00}
+{"taxableAmount":"120000.00","liabilityAmount":"26400.00"}
 ```
 
-Pydantic re-emits a `Decimal` as a JSON **string** (`"120000"`), so the raw bytes of the two
-encodings differ and a literal byte-for-byte assertion is unreachable while the Java side writes
-numbers. What *is* reachable, and is what
-`tests/test_models.py::test_round_trip_against_java_json` asserts, is equality of the whole
-parsed document — every key and every value, in both directions:
+It did not start that way, and the reason it changed is the more useful half of this section.
+
+Jackson's default for `BigDecimal` is a bare JSON **number**. Pydantic emits a `Decimal` as a
+JSON **string**. Those two encodings cannot be reconciled by any setting on either side —
+Pydantic has no `ser_json_decimal` knob, and more fundamentally a JSON number's trailing zeros
+survive **no** parser: `120000.00` arrives as `Decimal('120000')`, exponent 0, in Python's
+`json` and in Pydantic alike. So while Java wrote numbers, the round-trip test could only assert
+*value* equality after normalising both sides, which was the strongest true statement available
+and weaker than the contract deserved.
+
+**The fix was to remove the seam rather than work around it.** `TaxpayerReadModel`'s two money
+fields now carry `@JsonFormat(shape = STRING)`, so both ends write the digits verbatim and the
+documents compare directly:
 
 ```python
-assert _decimalised(ours.encode()) == _decimalised(java_taxpayer_json)
+assert json.loads(ours) == json.loads(java_taxpayer_json)
 ```
 
-`_decimalised` parses with `parse_float=Decimal` and coerces the string form back to `Decimal`,
-which is the only normalisation applied and the only one needed. Note that `parse_float=Decimal`
-is load-bearing rather than cosmetic: a plain `json.loads` hands back the binary float
-`120000.0`, which is precisely the precision loss the `BigDecimal`/`Decimal` rule on both sides
-of this wire exists to prevent.
+No normalisation, no coercion, nothing for a future bug to hide behind. Key ordering is the only
+remaining difference, which is what comparing parsed documents rather than raw bytes accounts
+for.
 
-**What a JSON number preserves, and what it does not.** The *value* crosses exactly — `0.07`
-arrives as `Decimal('0.07')` and not as `0.07000000000000001`, which
-`test_java_money_crosses_the_wire_without_binary_float_error` pins down. The *scale* does not:
-`120000.00` parses to `Decimal('120000')`, exponent 0, in Python's parser and in Pydantic's
-alike. So the two sides agree on what a liability is worth, not on how many zeros were typed,
-and scale is re-imposed where it matters — by Java's `setScale(2, HALF_UP)` on the way out of a
-calculation, and by `decimal_places=2` rejecting anything finer on the way in here.
+**This was not only about the Python test.** JavaScript has one numeric type, IEEE-754 double,
+so `JSON.parse` turned `120000.00` into a float before any React code saw it. Money on a wire
+that a JS client reads is the textbook case for string encoding, and the change makes the
+2-decimal scale that `setScale(2, HALF_UP)` computes with survive all the way to the browser.
+The React types (`useGetTaxLiabilityRest.ts`) and the server-side Zod mirror
+(`server/api/chat-tools.ts`) moved to `string` in the same change.
 
-**The remaining tightening, when it is worth doing:** annotate the Java `BigDecimal` money fields
-with `@JsonFormat(shape = STRING)`. The two encodings then become identical and the assertion can
-drop `_decimalised` for raw bytes. It is not done today because it changes the wire format the W4
-React client and the W5 D4 Lambda both already parse, which is a cross-cutting change that
-deserves its own PR rather than riding along on a Python deliverable.
+**What still holds for numbers.** `test_java_money_crosses_the_wire_without_binary_float_error`
+is kept, feeding the model a bare JSON number on purpose: an older cached payload or a replayed
+event can still hand one over, and on that path the model must parse it exactly (`0.07` as
+`Decimal('0.07')`, never `0.07000000000000001`) rather than through a float. What that path
+cannot recover is scale — which is exactly why the wire moved to strings.
 
 ### `tenantId` is a contract, asserted on both sides
 

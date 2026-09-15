@@ -20,9 +20,10 @@ from taxcalc_ai.settings import TaxcalcAiSettings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-#: The captured Java-side JSON for GET /api/v1/taxpayers/taxpayer-001 - the verbatim response
-#: body of that request against a locally-running taxcalc-api. See PYTHON.md, "The round-trip
-#: fixture", for the exact capture procedure.
+#: The captured Java-side JSON for GET /api/v1/taxpayers/taxpayer-001 - the response body of that
+#: request against a locally-running taxcalc-api, re-emitted through TaxpayerReadModel after its
+#: money fields gained @JsonFormat(shape = STRING). Every value came off the wire; only the money
+#: encoding changed. See PYTHON.md, "The round-trip fixture", for the capture procedure.
 JAVA_TAXPAYER_JSON = FIXTURES / "taxpayer_java.json"
 
 PROXY_BASE_URL = "https://proxy.example.internal"

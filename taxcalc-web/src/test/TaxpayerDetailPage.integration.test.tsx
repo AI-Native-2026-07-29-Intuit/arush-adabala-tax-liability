@@ -65,8 +65,8 @@ describe('TaxpayerDetailPage integration (MSW-backed REST + filter store)', () =
           homeJurisdiction: 'COLORADO',
           createdAt: '2025-01-04T00:00:00Z',
           liabilities: [
-            { taxYear: 2023, bracketId: 'ca-bracket-0', taxableAmount: 5000, liabilityAmount: 50, computedAt: '2025-01-04T00:00:00Z' },
-            { taxYear: 2024, bracketId: 'ca-bracket-1', taxableAmount: 10000, liabilityAmount: 100, computedAt: '2025-01-04T00:00:00Z' },
+            { taxYear: 2023, bracketId: 'ca-bracket-0', taxableAmount: '5000.00', liabilityAmount: '50.00', computedAt: '2025-01-04T00:00:00Z' },
+            { taxYear: 2024, bracketId: 'ca-bracket-1', taxableAmount: '10000.00', liabilityAmount: '100.00', computedAt: '2025-01-04T00:00:00Z' },
           ],
           tags: [],
         }),
@@ -97,8 +97,8 @@ describe('TaxpayerDetailPage integration (MSW-backed REST + filter store)', () =
           homeJurisdiction: 'COLORADO',
           createdAt: '2025-01-04T00:00:00Z',
           liabilities: [
-            { taxYear: 2023, bracketId: 'ca-bracket-0', taxableAmount: 5000, liabilityAmount: 50, computedAt: '2025-01-04T00:00:00Z' },
-            { taxYear: 2024, bracketId: 'ca-bracket-1', taxableAmount: 10000, liabilityAmount: 100, computedAt: '2025-01-04T00:00:00Z' },
+            { taxYear: 2023, bracketId: 'ca-bracket-0', taxableAmount: '5000.00', liabilityAmount: '50.00', computedAt: '2025-01-04T00:00:00Z' },
+            { taxYear: 2024, bracketId: 'ca-bracket-1', taxableAmount: '10000.00', liabilityAmount: '100.00', computedAt: '2025-01-04T00:00:00Z' },
           ],
           tags: [],
         }),

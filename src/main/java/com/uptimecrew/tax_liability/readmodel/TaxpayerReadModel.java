@@ -6,6 +6,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
@@ -191,8 +193,32 @@ public class TaxpayerReadModel implements Serializable {
 
         private String bracketId;
 
+        /**
+         * Money crosses the wire as a JSON <em>string</em>, not a JSON number (W7 D1).
+         *
+         * <p>Jackson's default for {@code BigDecimal} is a bare JSON number, which loses this
+         * field's whole reason for existing the moment it leaves the JVM. Two consumers prove
+         * the point:
+         *
+         * <ul>
+         *   <li>JavaScript has one numeric type, IEEE-754 double. {@code JSON.parse} turns
+         *       {@code 120000.00} into a float before any application code sees it, so the
+         *       React client cannot represent a cent it was never handed.
+         *   <li>Python's {@code json} and Pydantic both drop a JSON number's trailing zeros on
+         *       the way in: {@code 120000.00} parses to {@code Decimal('120000')}, scale 0. The
+         *       {@code setScale(2, HALF_UP)} contract this class computes with survives inside
+         *       the JVM and nowhere else.
+         * </ul>
+         *
+         * <p>A string carries the digits verbatim, so {@code BigDecimal} on this side,
+         * {@code Decimal} in the Python sidecar, and a decimal library on the JS side all read
+         * the same value with the same scale. This is Jackson-only: it does not touch how
+         * Spring Data Mongo persists the field, nor the JDK-serialized Redis cache entry.
+         */
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
         private BigDecimal taxableAmount;
 
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
         private BigDecimal liabilityAmount;
 
         private Instant computedAt;
