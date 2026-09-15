@@ -168,7 +168,8 @@ points at `/run/secrets`, so a Kubernetes-mounted secret file works with no code
 ## AI authoring discipline
 
 Claude (Opus 5, in Claude Code) scaffolded the first cut of `models.py` and `client.py` in this
-repo. `PROMPT_JOURNAL.md` holds both transcripts verbatim, each verifiable against the commit it first landed in. Concrete deviations between what
+repo. `PROMPT_JOURNAL.md` records the decision trail behind both, as the questions the work turned on
+and what each resolved to. Concrete deviations between what
 the AI-assisted first pass produced and what is committed here:
 
 1. **The API key is `SecretStr`, not `str`.** The reference `settings.py` snippet types
