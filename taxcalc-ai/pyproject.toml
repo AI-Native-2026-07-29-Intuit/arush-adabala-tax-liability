@@ -70,6 +70,12 @@ warn_required_dynamic_aliases = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Markdown is excluded because recent ruff formats Python code blocks inside .md files, and
+# PROMPT_JOURNAL.md's blocks are VERBATIM transcripts of what Claude produced - including its
+# line breaks. Reformatting them would rewrite the evidence the journal exists to preserve:
+# a record of AI output that has been tidied is no longer a record of AI output. PYTHON.md
+# quotes the same scaffolds for the same reason. Python in src/ and tests/ is unaffected.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 # E,F default; UP for pyupgrade; B for bugbear; SIM for simplify; I for isort.
