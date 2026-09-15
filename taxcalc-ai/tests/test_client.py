@@ -183,6 +183,42 @@ def test_api_key_never_reaches_a_log_line(
     assert "proxy.call.ok" in rendered
 
 
+@respx.mock
+@pytest.mark.usefixtures("no_backoff_sleep")
+def test_retry_log_line_carries_correlation_and_tenant(
+    settings: TaxcalcAiSettings,
+    estimate_request: LiabilityEstimateRequest,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The retry line is the one you most need to filter on, so it carries the ids too.
+
+    A retry storm is exactly when a log backend has to be narrowed to a single call, and a
+    ``proxy.call.retry`` line without a ``correlation_id`` cannot be narrowed at all.
+    """
+    respx.post(COMPLETIONS_URL).mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json=PROXY_BODY)]
+    )
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="taxcalc_ai.client"),
+        LlmProxyClient(settings) as client,
+    ):
+        client.estimate(estimate_request)
+
+    retries = [
+        json.loads(JsonLogFormatter().format(record))
+        for record in caplog.records
+        if getattr(record, "event", None) == "proxy.call.retry"
+    ]
+
+    assert len(retries) == 1
+    assert retries[0]["correlation_id"] == "corr-w7d1-0001"
+    assert retries[0]["tenant_id"] == "tenant-a"
+    assert retries[0]["attempt"] == 1
+    assert "503" in retries[0]["reason"]
+    assert PROXY_API_KEY not in json.dumps(retries[0])
+
+
 def test_json_log_formatter_promotes_extras_to_top_level() -> None:
     """Structured extras become real JSON properties a log backend can filter on."""
     record = logging.LogRecord(

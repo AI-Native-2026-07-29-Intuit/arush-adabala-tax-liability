@@ -11,7 +11,7 @@ Module map:
 * :mod:`taxcalc_ai.value_types` - frozen dataclasses for purely internal values.
 * :mod:`taxcalc_ai.settings` - 12-factor configuration, secrets held in ``SecretStr``.
 * :mod:`taxcalc_ai.client` - the httpx client that calls the proxy, with retries and logs.
-* :mod:`taxcalc_ai.cli` - the one module allowed to ``print()``.
+* :mod:`taxcalc_ai.cli` - the one module allowed to write to stdout.
 """
 
 __all__ = ["__version__"]

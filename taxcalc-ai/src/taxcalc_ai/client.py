@@ -14,8 +14,10 @@ predicate that draws that line, and it is why this module does not use a bare
 ``retry_if_exception_type(httpx.HTTPStatusError)`` - that would retry 4xx too.
 
 **Structured logs that carry the correlation id and never the API key.** Every line is JSON
-with an ``event`` name, the ``correlation_id`` and the ``tenant_id``, so a support ticket
-quoting one id can be traced across the Java service and this sidecar.
+with an ``event`` name, the ``correlation_id`` and the ``tenant_id`` - the retry line included,
+which is the one that matters most, because a retry storm is exactly when you want to filter a
+log backend down to a single call. A support ticket quoting one id can therefore be traced
+across the Java service and this sidecar.
 ``SecretStr.get_secret_value()`` is called in exactly one place in this package - the line that
 builds the ``authorization`` header - so there is one place to audit.
 """
@@ -32,7 +34,7 @@ from typing import Final
 import httpx
 from tenacity import (
     RetryCallState,
-    Retrying,
+    retry,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
@@ -132,6 +134,33 @@ def configure_logging(settings: TaxcalcAiSettings) -> None:
     # WARN is Java's spelling; Python's logging module only knows WARNING.
     root.setLevel("WARNING" if settings.log_level == "WARN" else settings.log_level)
     root.handlers = [handler]
+    # httpx logs one INFO line per request with no `event` and no correlation id, which is the
+    # only thing that would break the "every line carries the ids" property of this stream -
+    # and it says nothing `proxy.call.start` and `proxy.call.ok` do not already say with them.
+    # Raised to WARNING rather than silenced, so its transport warnings still surface.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def _log_retry(state: RetryCallState) -> None:
+    """Log one structured line per retry, naming the attempt, the reason and the caller.
+
+    Reads the :class:`~taxcalc_ai.value_types.CorrelationContext` back off the call state so
+    this line carries the same ``correlation_id`` and ``tenant_id`` as every other line. That
+    is why :meth:`LlmProxyClient._post` takes its arguments keyword-only: ``state.kwargs`` is
+    then a stable place to find the context, where ``state.args`` positions would shift the
+    moment the signature changed.
+    """
+    outcome = state.outcome
+    reason = repr(outcome.exception()) if outcome is not None and outcome.failed else None
+    fields: dict[str, object] = {
+        "event": "proxy.call.retry",
+        "attempt": state.attempt_number,
+        "reason": reason,
+    }
+    context = state.kwargs.get("context")
+    if isinstance(context, CorrelationContext):
+        fields.update(context.as_log_fields())
+    _LOG.warning("retrying proxy call", extra=fields)
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -157,22 +186,12 @@ class LlmProxyClient:
     """
 
     def __init__(self, settings: TaxcalcAiSettings) -> None:
-        """Build the pooled HTTP client and the retry controller from ``settings``."""
+        """Build the pooled HTTP client from ``settings``."""
         self._settings = settings
         self._client = httpx.Client(
             base_url=str(settings.proxy_base_url),
             timeout=httpx.Timeout(settings.proxy_timeout_seconds),
             headers={"user-agent": "taxcalc-ai/0.1.0"},
-        )
-        # Built once from settings rather than applied as a @retry decorator, so that
-        # proxy_max_retries is a real, environment-tunable knob instead of a constant baked
-        # into a decorator at import time.
-        self._retrying = Retrying(
-            retry=retry_if_exception(_is_transient),
-            stop=stop_after_attempt(settings.proxy_max_retries),
-            wait=wait_exponential_jitter(initial=0.5, max=8.0),
-            before_sleep=self._log_retry,
-            reraise=True,
         )
 
     def close(self) -> None:
@@ -231,8 +250,16 @@ class LlmProxyClient:
             },
         )
 
-        response = self._retrying(self._post, wire, request.correlation_id)
-        completion = self._read_completion(response, request.correlation_id, context)
+        # `_post` carries the retry policy as its decorator. `retry_with` copies that policy
+        # with a single field overridden, so proxy_max_retries stays a live environment knob
+        # instead of a setting nothing reads; at its default of 3 the copy is identical to the
+        # declared policy. The copy wraps the undecorated function, so it is unbound - hence
+        # the explicit `self`.
+        attempt = LlmProxyClient._post.retry_with(  # type: ignore[attr-defined]
+            stop=stop_after_attempt(self._settings.proxy_max_retries)
+        )
+        response = attempt(self, wire=wire, context=context)
+        completion = self._read_completion(response, context)
         estimate = EstimateCompletion.model_validate_json(completion.text)
 
         _LOG.info(
@@ -260,18 +287,29 @@ class LlmProxyClient:
             model_id=completion.resolved_model,
         )
 
-    def _post(self, wire: ProxyCompletionRequest, correlation_id: str) -> httpx.Response:
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=8.0),
+        retry=retry_if_exception(_is_transient),
+        before_sleep=_log_retry,
+        reraise=True,
+    )
+    def _post(self, *, wire: ProxyCompletionRequest, context: CorrelationContext) -> httpx.Response:
         """Perform one attempt: POST the completion request and raise on any error status.
 
         Kept to exactly the work that can fail transiently, because this is the unit the retry
-        controller repeats.
+        policy above repeats. Arguments are keyword-only so that :func:`_log_retry` can find
+        the context by name on the call state.
+
+        ``reraise=True`` means the caller sees the underlying ``HTTPStatusError`` after the
+        last attempt, not a ``RetryError`` wrapping it.
         """
         payload: dict[str, object] = wire.model_dump(mode="json", by_alias=True)
         response = self._client.post(
             COMPLETIONS_PATH,
             json=payload,
             headers={
-                CORRELATION_HEADER: correlation_id,
+                CORRELATION_HEADER: context.correlation_id,
                 # The one place in this package where the secret becomes a plain string.
                 "authorization": f"Bearer {self._settings.proxy_api_key.get_secret_value()}",
             },
@@ -281,10 +319,7 @@ class LlmProxyClient:
         return response
 
     def _read_completion(
-        self,
-        response: httpx.Response,
-        correlation_id: str,
-        context: CorrelationContext,
+        self, response: httpx.Response, context: CorrelationContext
     ) -> ProxyCompletionResponse:
         """Validate the proxy's body, after checking it answered the question we asked.
 
@@ -294,7 +329,7 @@ class LlmProxyClient:
         attribute somebody else's answer to this taxpayer.
         """
         echoed = response.headers.get(CORRELATION_HEADER)
-        if echoed is not None and echoed != correlation_id:
+        if echoed is not None and echoed != context.correlation_id:
             _LOG.error(
                 "proxy echoed a different correlation id",
                 extra={
@@ -303,24 +338,12 @@ class LlmProxyClient:
                     **context.as_log_fields(),
                 },
             )
-            raise ValueError(f"proxy echoed correlation id {echoed!r}, expected {correlation_id!r}")
+            raise ValueError(
+                f"proxy echoed correlation id {echoed!r}, expected {context.correlation_id!r}"
+            )
         # model_validate_json reads the bytes directly through pydantic-core, which is faster
         # than json.loads followed by model_validate and gives better error locations.
         return ProxyCompletionResponse.model_validate_json(response.content)
-
-    @staticmethod
-    def _log_retry(state: RetryCallState) -> None:
-        """Log one structured line per retry, naming the attempt and the reason."""
-        outcome = state.outcome
-        reason = repr(outcome.exception()) if outcome is not None and outcome.failed else None
-        _LOG.warning(
-            "retrying proxy call",
-            extra={
-                "event": "proxy.call.retry",
-                "attempt": state.attempt_number,
-                "reason": reason,
-            },
-        )
 
 
 def _build_prompt(taxpayer: Taxpayer) -> str:
