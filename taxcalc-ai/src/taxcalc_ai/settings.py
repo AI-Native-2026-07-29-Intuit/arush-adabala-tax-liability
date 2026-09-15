@@ -56,3 +56,30 @@ class TaxcalcAiSettings(BaseSettings):
     model_id: str = Field(default="claude-haiku-4-5", min_length=1, max_length=128)
     tenant_id: str = Field(default="shared", min_length=1, max_length=64)
     log_level: str = Field(default="INFO", pattern="^(DEBUG|INFO|WARN|ERROR)$")
+
+    # ---- W7 D2: the data + AI-observability stack -------------------------------------------
+    #
+    # These four are Optional in the settings model and mandatory in the code paths that use
+    # them, which is a deliberate split rather than an inconsistency. The CLI and the LLM-proxy
+    # client - everything W7 D1 shipped - run without a LangSmith account, a Postgres corpus or
+    # a RAGAS evaluator, and making these required would mean no existing entrypoint could boot
+    # without credentials it never touches. The modules that DO need them fail loudly at their
+    # own boundary instead: taxcalc_ai.rag raises at import on a missing key, and
+    # pgvector_loader.dsn_from_env raises KeyError rather than defaulting to localhost.
+    #
+    # Both secrets are SecretStr for the reason proxy_api_key is: they render as ********** in
+    # repr(), str() and model_dump(), so they survive a naive log of the settings object and a
+    # traceback that prints locals.
+
+    #: LangSmith ingest credential. Reaches a laptop via .env and CI via the GitHub Actions
+    #: secret TAXCALC_AI_LANGSMITH_API_KEY; never committed.
+    langsmith_api_key: SecretStr | None = None
+    #: The LangSmith project traces land in. CI overrides this to `taxcalc-ai-dev-ci` so noisy
+    #: gate runs do not pollute the project an engineer reads while debugging.
+    langsmith_project: str = Field(default="taxcalc-ai-dev", min_length=1, max_length=128)
+    #: libpq DSN for the doc_chunks corpus. Not a URL type: a libpq DSN is legitimately either a
+    #: URI or a key=value string, and HttpUrl would reject the second form.
+    pg_dsn: str | None = Field(default=None, min_length=1)
+    #: Evaluator-model credential for the RAGAS baseline. The evaluator may be a smaller and
+    #: cheaper model than production - it is judging answers, not producing them.
+    anthropic_api_key: SecretStr | None = None

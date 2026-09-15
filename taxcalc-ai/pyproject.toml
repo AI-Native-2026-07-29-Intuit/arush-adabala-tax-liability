@@ -30,6 +30,7 @@ dev = [
     "testcontainers[postgres]>=4.7",
     "langchain-community<0.4",
     "pandas-stubs>=3.0.5.260914",
+    "langchain-anthropic>=0.2",
 ]
 
 [tool.uv]
@@ -54,6 +55,14 @@ warn_return_any = true
 warn_unused_ignores = true
 exclude = ["build/", "dist/"]
 
+# `datasets` ships no py.typed marker, so --strict refuses the import outright rather than
+# treating it as Any. Scoped to this one module: a blanket ignore_missing_imports would switch
+# the same protection off for every third-party package, including the ones that DO ship types
+# (pandas via pandas-stubs, numpy, psycopg, pgvector, sentence-transformers, langsmith).
+[[tool.mypy.overrides]]
+module = ["datasets.*"]
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_typed = true
 warn_required_dynamic_aliases = true
@@ -69,9 +78,17 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/taxcalc_ai/cli.py" = ["T20"]  # the CLI is allowed to print()
+# Operator/CI entrypoints report their verdict on stdout and exit with a status code; a gate
+# whose output only reached a log handler would be invisible in the Actions UI.
+"src/taxcalc_ai/scripts/*.py" = ["T20"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"
+# --strict-markers means an unregistered marker is an error, so `slow` is declared here rather
+# than typo'd into silence at the one call site that uses it.
+markers = [
+    "slow: makes real network calls to an evaluator model; opt out locally with -m 'not slow'",
+]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
@@ -79,4 +96,13 @@ filterwarnings = [
     # secrets_dir points at the Kubernetes mount path, which does not exist on a laptop or on
     # a CI runner. The warning is correct and expected off-cluster; it is not a test failure.
     'ignore:directory "/run/secrets" does not exist:UserWarning',
+    # ragas 0.4 deprecates the lowercase metric singletons in favour of
+    # `ragas.metrics.collections`. The new collection classes take an
+    # InstructorBaseRagasLLM at construction rather than the LangchainLLMWrapper this
+    # project builds its Anthropic evaluator from, so the migration is a real change of
+    # wiring - llm_factory(model, provider="anthropic", client=anthropic.Anthropic())
+    # is the replacement - and not one to make blind on a code path that cannot run
+    # without a live evaluator credential. Scoped to this exact message so every other
+    # DeprecationWarning in the tree stays an error.
+    'ignore:Importing .* from .ragas.metrics. is deprecated:DeprecationWarning',
 ]

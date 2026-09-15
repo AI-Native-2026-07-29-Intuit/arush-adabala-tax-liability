@@ -15,67 +15,16 @@ an empty table.
 
 from __future__ import annotations
 
-import time
-from collections.abc import Iterator
-from pathlib import Path
-
 import numpy as np
 import psycopg
-import pytest
 from numpy.typing import NDArray
 from pgvector.psycopg import register_vector
-
-# testcontainers.community.postgres, not testcontainers.postgres: the short path is a
-# deprecation shim in testcontainers 4.x, and this project's pytest config turns warnings into
-# errors, so the shim fails at collection rather than at runtime.
-from testcontainers.community.postgres import PostgresContainer
 
 from taxcalc_ai.corpus import EMBEDDING_DIM, MODEL_NAME, CorpusRow
 from taxcalc_ai.pgvector_loader import load_rows
 
-DDL_PATH = Path(__file__).resolve().parent.parent / "sql" / "V001__doc_chunks.sql"
-
 #: The index whose use the EXPLAIN assertion is about.
 HNSW_INDEX = "doc_chunks_embedding_hnsw"
-
-
-def _await_ready(dsn: str, attempts: int = 60, delay_seconds: float = 0.5) -> None:
-    """Block until the container accepts a real connection, not just a TCP handshake.
-
-    The official Postgres entrypoint starts a temporary server for ``initdb``, shuts it down,
-    then starts the real one - so "database system is ready to accept connections" appears in
-    the logs twice, and a port that was open a moment ago refuses the next connection. Waiting
-    on a successful ``SELECT 1`` is the only check that spans that gap; without it this fixture
-    fails intermittently, on whichever test happened to run first.
-    """
-    last: Exception | None = None
-    for _ in range(attempts):
-        try:
-            with psycopg.connect(dsn, connect_timeout=2) as conn, conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            return
-        except psycopg.OperationalError as exc:  # not ready yet; the restart window
-            last = exc
-            time.sleep(delay_seconds)
-    raise AssertionError(f"postgres never became ready at {dsn}") from last
-
-
-@pytest.fixture(scope="session")
-def pg_dsn() -> Iterator[str]:
-    """Spin a Postgres + pgvector container for the session and apply the sidecar's DDL.
-
-    Yields a psycopg3-compatible DSN. ``get_connection_url()`` returns a SQLAlchemy-style
-    ``postgresql+psycopg2://`` URL; psycopg3 does not understand the driver suffix, so it is
-    stripped here rather than at each call site.
-    """
-    with PostgresContainer("pgvector/pgvector:pg16") as pg:
-        dsn = pg.get_connection_url().replace("postgresql+psycopg2", "postgresql")
-        _await_ready(dsn)
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(DDL_PATH.read_text())
-            conn.commit()
-        yield dsn
 
 
 def _unit_vector(seed: int) -> NDArray[np.float32]:
