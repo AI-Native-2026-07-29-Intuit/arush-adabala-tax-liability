@@ -241,3 +241,51 @@ A JSON number's trailing zeros survive no parser, Pydantic's included. What cros
 the **value** (`0.07` is `Decimal('0.07')`, never `0.07000000000000001`), and that is what the
 replacement test asserts. Scale is re-imposed by `setScale(2, HALF_UP)` on the Java side and
 bounded by `decimal_places=2` here — it is not something the wire preserves.
+
+---
+
+## Addendum 2 — the retry controller went back to being a decorator
+
+Turn 4 above records dropping the reference's `@retry` decorator in favour of a `Retrying`
+controller built in `__init__`, on the grounds that a decorator freezes `proxy_max_retries` at
+import time. That reasoning was half right, and the shipped code no longer matches it — the
+turn record is left standing as written, and this is the correction.
+
+The controller did make the budget tunable, but it paid for it by moving the retry policy away
+from the function it governs: `_post` read like an ordinary method, and nothing at the call
+site said it would be attempted three times. `retry_with()` gets both. The policy is declared
+as a decorator directly above `_post`, where anyone reading that function sees it, and the call
+site copies it with one field overridden:
+
+```python
+attempt = LlmProxyClient._post.retry_with(stop=stop_after_attempt(self._settings.proxy_max_retries))
+response = attempt(self, wire=wire, context=context)
+```
+
+At the default of 3 the copy is identical to the declared policy. The copy wraps the
+*undecorated* function and is therefore unbound, which is why `self` is passed explicitly — a
+detail worth writing down, because the version that omits it fails at runtime rather than under
+mypy.
+
+The same pass fixed something the first cut got wrong and no test had caught: `proxy.call.retry`
+was the only event in the log stream with no `correlation_id` on it. The retry logger was a
+`@staticmethod` with no access to the `CorrelationContext`, so the one line you would most want
+to filter on during a retry storm was the one line you could not filter. `_log_retry` is now a
+module function that reads the context back off `RetryCallState.kwargs` — which is why `_post`
+takes keyword-only arguments, so the lookup is by name rather than by an argument position that
+would shift under any signature change. `httpx`'s own per-request INFO line, which carries no
+ids either, is raised to WARNING rather than silenced, so its transport warnings still surface.
+
+`tests/test_client.py::test_retry_log_line_carries_correlation_and_tenant` pins it: one 503
+followed by a 200, and the single `proxy.call.retry` record must carry the correlation id, the
+tenant id, the attempt number, the status in its reason, and no API key.
+
+### Gate after this pass
+
+```
+uv run ruff check                → All checks passed!
+uv run ruff format --check       → 15 files already formatted
+uv run mypy --strict src/ tests/ → Success: no issues found in 13 source files
+uv run pytest -v --cov=src --cov-fail-under=85
+                                 → 43 passed, total coverage 98.78%
+```

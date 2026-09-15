@@ -161,7 +161,27 @@ Claude (Opus 5, in Claude Code) scaffolded the first cut of `models.py` and `cli
 repo. `PROMPT_JOURNAL.md` holds the unedited session record. Concrete deviations between what
 the AI-assisted first pass produced and what is committed here:
 
-1. **`retry_if_exception_type(httpx.HTTPStatusError)` → a custom `_is_transient` predicate.**
+1. **The API key is `SecretStr`, not `str`.** The reference `settings.py` snippet types
+   `proxy_api_key` as a plain `str`, and a plain `str` is one careless format string away from a
+   key in a log aggregator: `repr()` prints it, `model_dump()` serialises it, and a traceback
+   that dumps locals ships it to whoever reads the crash. `SecretStr` renders as `**********` in
+   all three, and `.get_secret_value()` is called in exactly **one** line of this package — the
+   `authorization: Bearer …` header in `client.py` — so the audit is one grep, not a review of
+   every call site. Two tests hold the line:
+   `test_settings.py::test_secret_never_appears_in_repr` and
+   `test_client.py::test_api_key_never_reaches_a_log_line`, the latter asserting the key is
+   absent from the *rendered* JSON of every emitted log record rather than from the format
+   string. See **Secret discipline** above for the deployment half of this.
+
+2. **`List[X]` / `Optional[X]` from `typing` → `list[X]` / `X | None`.** The first cut reached
+   for the `typing` aliases out of habit; they have been the deprecated spelling since PEP 585
+   and PEP 604 landed, and this package targets 3.12, where the builtins are the only correct
+   answer. This is the one deviation that is enforced mechanically rather than by review:
+   `select = [..., "UP", ...]` in `[tool.ruff.lint]` turns `List[X]` into a build failure
+   (`UP006`/`UP035`/`UP045`), so the habit cannot come back in a later commit and pass CI.
+   `grep -RIn 'List\[\|Optional\[\|Union\[' src/` returns 0 matches.
+
+3. **`retry_if_exception_type(httpx.HTTPStatusError)` → a custom `_is_transient` predicate.**
    The reference retry shape retries on *any* `HTTPStatusError`, which means a 400 is retried
    three times. The `if 400 <= status < 500: raise` line inside the `except` block reads like it
    prevents that, but it re-raises the same exception type, which the predicate then matches
@@ -169,29 +189,41 @@ the AI-assisted first pass produced and what is committed here:
    `HTTPStatusError` at status >= 500, and two tests pin the attempt counts (exactly 3 on a 503,
    exactly 1 on a 400) so the distinction cannot silently regress.
 
-2. **`dict[str, Any]` → `dict[str, object]`, everywhere.** `Any` is the type that switches type
+4. **`dict[str, Any]` → `dict[str, object]`, everywhere.** `Any` is the type that switches type
    checking off for whatever it touches. `disallow_any_explicit = true` in `[tool.mypy]` makes
    that a build failure rather than a habit, and `object` expresses the same "I do not know the
    value type" without the opt-out. `grep -RIn 'Any' src/` returns nothing but a comment.
 
-3. **`@retry(stop=stop_after_attempt(3))` decorator → a `Retrying` controller built in
-   `__init__`.** A decorator freezes the retry budget at import time, which makes
-   `proxy_max_retries` a setting that exists in `settings.py` and changes nothing. Building the
-   controller from settings makes it a real knob.
+5. **A hard-coded retry budget → `retry_with(stop=...)` from settings.** The reference
+   `@retry(stop=stop_after_attempt(3))` freezes the budget at import time, which makes
+   `proxy_max_retries` a setting that exists in `settings.py` and changes nothing. The
+   committed client keeps the decorator — it is the readable place to declare a policy, right
+   above the function it governs — and copies it per call with `retry_with()`, overriding only
+   `stop` from settings. At the default of 3 the copy is identical to the declared policy; the
+   knob is live without the policy moving away from the code it protects.
 
-4. **Added: the correlation-id echo check.** The reference client propagates `x-correlation-id`
+6. **Added: the correlation-id echo check.** The reference client propagates `x-correlation-id`
    outbound and stops there. The Java `CorrelationIdFilter` echoes the header back on every
    response, so the sidecar can *assert* — not assume — that the answer in hand belongs to the
    question it asked. A mismatch now raises instead of being attributed to the wrong taxpayer.
 
-5. **Added: identifiers are never read back out of the model's JSON.** `EstimateCompletion` (the
+7. **Added: identifiers are never read back out of the model's JSON.** `EstimateCompletion` (the
    object the LLM is asked to produce) deliberately has no `correlationId`, `taxpayerId` or
    `modelId`, and `extra="forbid"` rejects them if the model volunteers them anyway. The client
    composes those from what the process already knows. An LLM is a plausible source of a
    judgement and a terrible source of an identity: a hallucinated id would address the wrong
    taxpayer's record.
 
-6. **The `pydantic.mypy` plugin had to be enabled before `--strict` was meaningful.** Without it
+8. **Added: every log line carries the ids, including the retry line.** The first cut logged
+   retries through a `@staticmethod` that had no access to the `CorrelationContext`, so
+   `proxy.call.retry` was the one event in the stream without a `correlation_id` — and a retry
+   storm is precisely when a log backend has to be narrowed to a single call. `_log_retry` is
+   now a module function that reads the context back off `RetryCallState.kwargs`, which is why
+   `_post` takes keyword-only arguments: `state.kwargs` is a stable place to find it, where
+   `state.args` positions would shift the moment the signature changed. `httpx`'s own INFO
+   line, which carries no ids, is raised to WARNING for the same reason.
+
+9. **The `pydantic.mypy` plugin had to be enabled before `--strict` was meaningful.** Without it
    mypy sees only the synthesised `__init__(**data: Any)` — which `disallow_any_explicit` then
    rejects on every model's class line — and knows nothing about `populate_by_name` aliases.
    This one was found by running the gate, not by reading the code.
