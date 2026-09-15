@@ -105,9 +105,10 @@ public class TaxpayerController {
     })
     public ResponseEntity<TaxpayerReadModel> create(@RequestBody CreateTaxpayerRequest request,
             @AuthenticationPrincipal Jwt jwt) {
-        LOG.info("create id={} subject={}", request.id(), jwt.getSubject());
+        String owningTenant = owningTenantOf(jwt);
+        LOG.info("create id={} subject={} tenant={}", request.id(), jwt.getSubject(), owningTenant);
         service.computeLiability(request.id(), request.displayName(), request.filingStatus(),
-                request.taxableAmount());
+                request.taxableAmount(), owningTenant);
         TaxpayerReadModel created = service.findById(request.id())
                 .orElseThrow(() -> new IllegalStateException("just-created taxpayer not found: " + request.id()));
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
@@ -165,6 +166,30 @@ public class TaxpayerController {
     private static String tenantOf(Jwt jwt) {
         String claim = jwt.getClaimAsString("tenant");
         return claim == null || claim.isBlank() ? "shared" : claim;
+    }
+
+    /**
+     * Resolve the tenant that will <em>own</em> the created taxpayer, from the same verified
+     * {@code tenant} claim, normalised to the {@code tenant-} prefix
+     * {@link TaxpayerReadModel#TENANT_ID_PREFIX} requires.
+     *
+     * <p>Separate from {@link #tenantOf(Jwt)} on purpose, even though both read one claim. That
+     * one produces a cost-attribution label, where a coarse bucket is a tolerable loss of
+     * reporting granularity; this one produces an ownership attribute that is stored on the
+     * document and read back by the W7 D1 Python sidecar, so its shape is a contract. Collapsing
+     * them into one method would make a future change to either silently change the other.
+     *
+     * <p>Like its neighbour it falls back rather than throwing - a missing claim must not fail a
+     * taxpayer's write - and it never returns blank.
+     */
+    private static String owningTenantOf(Jwt jwt) {
+        String claim = jwt.getClaimAsString("tenant");
+        if (claim == null || claim.isBlank()) {
+            return TaxpayerReadModel.DEFAULT_TENANT_ID;
+        }
+        return claim.startsWith(TaxpayerReadModel.TENANT_ID_PREFIX)
+                ? claim
+                : TaxpayerReadModel.TENANT_ID_PREFIX + claim;
     }
 
     @PostMapping("/{id}/summary")

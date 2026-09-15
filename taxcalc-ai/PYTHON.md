@@ -21,7 +21,7 @@ taxcalc-ai/
 │   ├── settings.py         # BaseSettings + SecretStr
 │   ├── client.py           # httpx + tenacity + structured JSON logs
 │   └── cli.py              # the one place print() is allowed
-└── tests/                  # pytest; fixtures/taxpayer_java.json is real Jackson output
+└── tests/                  # pytest; fixtures/taxpayer_java.json is a captured live response
 ```
 
 ## How to run locally
@@ -63,36 +63,85 @@ rather than whatever happens to be on the global `PATH`.
   to `taxcalc-ai/**`, so Java-only PRs do not pay the Python tax. See that file's header for why
   this workflow may be path-filtered while `ci.yml` next door may not.
 
+### The round-trip fixture: where it comes from
+
+`tests/fixtures/taxpayer_java.json` is the **verbatim response body** of a real
+`GET /api/v1/taxpayers/taxpayer-001` against a locally-running taxcalc-api — not a hand-written
+document, and not a serialiser invoked in isolation. To reproduce it:
+
+```bash
+MINT_ONLY=1 COUNT=1 scripts/loadtest-token.sh          # RS256 keypair + one token, into .loadtest/
+docker compose -f compose.yaml -f compose.override.yaml up -d postgres mongo redis kafka
+SPRING_PROFILES_ACTIVE=local,loadtest \
+TAXCALC_LOADTEST_JWT_PUBLIC_KEY="file:$PWD/.loadtest/public.pem" \
+  ./gradlew bootRun                                     # datastore host/ports per your compose mapping
+TOKEN=$(python3 -c "import json;print(json.load(open('.loadtest/tokens.json'))[0])")
+curl -s http://localhost:8080/api/v1/taxpayers/taxpayer-001 -H "Authorization: Bearer $TOKEN" \
+  > taxcalc-ai/tests/fixtures/taxpayer_java.json
+```
+
+Two things about that run are worth knowing before the output surprises you.
+
+**Every route is authenticated and there is no IdP.** The base profile's `issuer-uri` is a
+placeholder, so no real token can be minted against it and every request is a 401. The `loadtest`
+profile exists for exactly this: it clears `issuer-uri` and validates against a locally-generated
+public key. `scripts/loadtest-token.sh` in `MINT_ONLY=1` mode produces the keypair and a token
+carrying `taxpayers.read`/`taxpayers.write` and `tenant: tenant-synth`, with no cluster involved.
+
+**The captured document's `tenantId` reads `tenant-shared`, and that is not a placeholder.** The
+response came back through the Postgres fallback in `TaxLiabilityService.findById` (Redis → Mongo
+→ Postgres), which rebuilds a projection from the JPA entity and has no request context to take
+an owning tenant from, so it stamps the documented default. A document written by the
+write-through path instead carries the caller's tenant — `POST /api/v1/taxpayers` with the token
+above produces `"tenantId":"tenant-synth"`. Both are real outputs of the same endpoint; the
+fixture is the one that also carries a liability, and therefore money.
+
 ### The one place the two languages do not line up: money on the wire
 
-The round-trip fixture at `tests/fixtures/taxpayer_java.json` is **real Jackson output** — it was
-produced by serialising this project's own compiled `TaxpayerReadModel` class with Spring Boot's
-date settings, not hand-written to match what Python happens to emit. It shows money as a JSON
-**number** with its scale preserved:
+The fixture shows money as a JSON **number**, with its scale written out:
 
 ```json
 {"taxableAmount":120000.00,"liabilityAmount":26400.00}
 ```
 
-Pydantic reads that into a `Decimal` losslessly *in value*, but re-emits a `Decimal` as a JSON
-**string** (`"120000.00"`). Worse for byte-equality: a JSON number's trailing zeros survive
-neither parser — `120000.00` parses to `Decimal('120000')`, scale 0.
+Pydantic re-emits a `Decimal` as a JSON **string** (`"120000"`), so the raw bytes of the two
+encodings differ and a literal byte-for-byte assertion is unreachable while the Java side writes
+numbers. What *is* reachable, and is what
+`tests/test_models.py::test_round_trip_against_java_json` asserts, is equality of the whole
+parsed document — every key and every value, in both directions:
 
-So a literal byte-for-byte round-trip assertion is not achievable between these two encodings in
-either direction, and the only way to make one pass would have been to fake one side of the
-fixture. `tests/test_models.py::test_round_trip_against_java_json` asserts the contract that
-actually matters instead:
+```python
+assert _decimalised(ours.encode()) == _decimalised(java_taxpayer_json)
+```
 
-1. every key the Java side emits is consumed (`extra="forbid"` would reject a stray one);
-2. every key Pydantic emits is one the Java side emits — the alias map is complete, with no
-   snake_case leaking onto the wire;
-3. re-validating our own output reproduces an equal model, money included.
+`_decimalised` parses with `parse_float=Decimal` and coerces the string form back to `Decimal`,
+which is the only normalisation applied and the only one needed. Note that `parse_float=Decimal`
+is load-bearing rather than cosmetic: a plain `json.loads` hands back the binary float
+`120000.0`, which is precisely the precision loss the `BigDecimal`/`Decimal` rule on both sides
+of this wire exists to prevent.
 
-**The fix, when it is worth doing:** annotate the Java `BigDecimal` money fields with
-`@JsonFormat(shape = STRING)`. The two encodings then become identical and the assertion can be
-tightened to raw bytes. It is not done today because it changes the wire format the W4 React
-client and the W5 D4 Lambda both already parse, which is a cross-cutting change that deserves its
-own PR rather than riding along on a Python deliverable.
+**What a JSON number preserves, and what it does not.** The *value* crosses exactly — `0.07`
+arrives as `Decimal('0.07')` and not as `0.07000000000000001`, which
+`test_java_money_crosses_the_wire_without_binary_float_error` pins down. The *scale* does not:
+`120000.00` parses to `Decimal('120000')`, exponent 0, in Python's parser and in Pydantic's
+alike. So the two sides agree on what a liability is worth, not on how many zeros were typed,
+and scale is re-imposed where it matters — by Java's `setScale(2, HALF_UP)` on the way out of a
+calculation, and by `decimal_places=2` rejecting anything finer on the way in here.
+
+**The remaining tightening, when it is worth doing:** annotate the Java `BigDecimal` money fields
+with `@JsonFormat(shape = STRING)`. The two encodings then become identical and the assertion can
+drop `_decimalised` for raw bytes. It is not done today because it changes the wire format the W4
+React client and the W5 D4 Lambda both already parse, which is a cross-cutting change that
+deserves its own PR rather than riding along on a Python deliverable.
+
+### `tenantId` is a contract, asserted on both sides
+
+`Taxpayer.tenant_id` requires a `tenant-` prefix, and so does the Java
+`TaxpayerReadModel` constructor (`TENANT_ID_PREFIX`). Neither side assumes it of the other. A
+tenant id, a taxpayer id and a bracket id are all opaque strings; in a log line or a
+cross-service payload the prefix is the only thing that says which one you are holding. The Java
+controller normalises a bare `tenant` JWT claim onto the prefix on the way in, so a token minted
+elsewhere cannot write a document this boundary would then reject.
 
 ## Secret discipline
 

@@ -10,17 +10,19 @@ means a validated object cannot be edited afterwards into a state validation nev
 ``Taxpayer`` mirrors the Java ``TaxpayerReadModel`` exactly, including its camelCase wire
 names. The Java side serialises through Spring Boot's Jackson defaults, so:
 
-* keys are camelCase (``displayName``, ``createdAt``, ...) - hence ``alias=`` plus
-  ``populate_by_name=True``, so Python code can construct with snake_case while the wire form
-  stays camelCase;
+* keys are camelCase (``displayName``, ``tenantId``, ``createdAt``, ...) - hence ``alias=``
+  plus ``populate_by_name=True``, so Python code can construct with snake_case while the wire
+  form stays camelCase;
 * ``Instant`` is an ISO-8601 string ending in ``Z`` - which is exactly what Pydantic emits for
   a UTC-aware ``datetime``;
 * ``BigDecimal`` money is a JSON **number**, not a string.
 
 That last point is the one real seam between the two languages, and
-``tests/test_models.py::test_round_trip_against_java_json`` documents it: Pydantic reads the
-Java number into a ``Decimal`` losslessly, but re-emits it as a JSON string. See that test and
-``PYTHON.md`` for why the round-trip is asserted on parsed values rather than raw bytes.
+``tests/test_models.py::test_round_trip_against_java_json`` closes it: Pydantic reads the Java
+number into a ``Decimal`` with no binary-float error, but re-emits it as a JSON string, so the
+two encodings are compared as parsed values rather than as bytes. The comparison is of the
+whole document - every key and every value, both directions - not merely of the key sets. See
+that test and ``PYTHON.md`` for what a JSON number does and does not preserve.
 
 Money is ``decimal.Decimal`` throughout and never ``float`` - the same rule the Java side
 follows with ``BigDecimal``. A binary float cannot represent 0.01, and rounding error in a tax
@@ -43,6 +45,10 @@ FILING_STATUSES: Final[frozenset[str]] = frozenset(
 
 #: Default model id for an estimate call. Matches the Java service's `LiabilityExplanationService`.
 DEFAULT_MODEL_ID: Final[str] = "claude-haiku-4-5"
+
+#: Required prefix on a tenant id, mirroring ``TaxpayerReadModel.TENANT_ID_PREFIX`` on the Java
+#: side. Both ends assert it rather than one assuming it of the other.
+TENANT_ID_PREFIX: Final[str] = "tenant-"
 
 #: Below this confidence a short rationale is acceptable; at or above it, one is required.
 HIGH_CONFIDENCE: Final[float] = 0.9
@@ -109,12 +115,27 @@ class Taxpayer(BaseModel):
     )
 
     id: str = Field(min_length=1, max_length=64)
+    tenant_id: str = Field(min_length=1, max_length=64, alias="tenantId")
     display_name: str = Field(min_length=1, max_length=255, alias="displayName")
     filing_status: str = Field(min_length=1, alias="filingStatus")
     home_jurisdiction: str = Field(min_length=1, max_length=64, alias="homeJurisdiction")
     created_at: datetime = Field(alias="createdAt")
     liabilities: tuple[Liability, ...] = ()
     tags: tuple[str, ...] = ()
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _tenant_id_shape(cls, v: str) -> str:
+        """Require the ``tenant-`` prefix the Java document guarantees.
+
+        A tenant id, a taxpayer id and a bracket id are all opaque strings, and the prefix is
+        what tells them apart in a log line. Asserting it here rather than assuming it means a
+        Java-side change to the ownership model surfaces as a boundary failure on the first
+        request, not as a mis-scoped query somewhere downstream.
+        """
+        if not v.startswith(TENANT_ID_PREFIX):
+            raise ValueError(f"tenant_id must start with '{TENANT_ID_PREFIX}'")
+        return v
 
     @field_validator("filing_status")
     @classmethod
