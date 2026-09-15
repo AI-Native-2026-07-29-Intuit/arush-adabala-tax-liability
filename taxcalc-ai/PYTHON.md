@@ -30,7 +30,7 @@ taxcalc-ai/
 │   │   └── assert_langsmith_run_visible.py
 │   └── cli.py              # the one place print() is allowed
 └── tests/
-    ├── fixtures/corpus_seed.jsonl        # 100 synthetic chunks, 44 docs, 3 tenants
+    ├── fixtures/corpus_seed.jsonl        # 100 synthetic chunks, 100 docs, 3 tenants
     ├── golden/taxcalc_golden_50.jsonl    # 50-row RAGAS eval set, 4 failure modes
     └── ...                               # pytest; taxpayer_java.json is a captured response
 ```

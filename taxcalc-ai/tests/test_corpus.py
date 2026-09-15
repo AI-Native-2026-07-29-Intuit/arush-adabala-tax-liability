@@ -201,6 +201,11 @@ def test_committed_fixture_is_a_clean_hundred_row_corpus() -> None:
     The Great Expectations suite asserts at least 100 rows land in ``doc_chunks`` and the
     pgvector loader test asserts a load of 100 returns 100. Both read this file, so its row
     count is a contract rather than an incidental property of the generator.
+
+    The identifier range is asserted too, not just the count. ``taxpayer-001`` through
+    ``taxpayer-100``, contiguous and one chunk each, is the shape the brief specifies; a
+    regenerated fixture that packed the same 100 rows into fewer multi-chunk documents would
+    still satisfy every other assertion here, which is exactly why this one is spelled out.
     """
     df = load_corpus(FIXTURE)
 
@@ -211,3 +216,6 @@ def test_committed_fixture_is_a_clean_hundred_row_corpus() -> None:
     assert len(raw) == 100
     # Distinct text on every row; near-duplicate context is what the golden set tests against.
     assert df["chunk_text"].nunique() == 100
+    # One chunk per document, numbered taxpayer-001..taxpayer-100 with no gaps.
+    assert sorted(df["doc_id"]) == [f"taxpayer-{n:03d}" for n in range(1, 101)]
+    assert set(df["chunk_idx"].unique()) == {0}

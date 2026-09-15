@@ -28,12 +28,17 @@ import anthropic
 import pytest
 from datasets import Dataset
 from ragas import evaluate
-from ragas.metrics import (
-    answer_relevancy,
-    context_precision,
-    context_recall,
-    faithfulness,
-)
+
+# The metric CLASSES, imported from their concrete modules, rather than the module-level
+# singletons (`from ragas.metrics import faithfulness`). Those singletons are deprecated as of
+# ragas 0.4 and emit a DeprecationWarning on import, which this project's filterwarnings=error
+# policy turns into a collection error. The classes are not deprecated, are instantiated here
+# instead of being shared process-wide, and still satisfy `isinstance(..., Metric)` - which is
+# what `evaluate()` requires. See the note on the ragas requirement in pyproject.toml.
+from ragas.metrics._answer_relevance import AnswerRelevancy
+from ragas.metrics._context_precision import ContextPrecision
+from ragas.metrics._context_recall import ContextRecall
+from ragas.metrics._faithfulness import Faithfulness
 from ragas.run_config import RunConfig
 
 from taxcalc_ai.corpus import MODEL_NAME
@@ -138,8 +143,25 @@ def _run_eval() -> dict[str, float]:
     # moved packages.
     from langchain_huggingface import HuggingFaceEmbeddings
     from ragas.dataset_schema import EvaluationResult
-    from ragas.embeddings import LangchainEmbeddingsWrapper
-    from ragas.llms import LangchainLLMWrapper
+
+    # Imported from the `.base` modules rather than from `ragas.embeddings` / `ragas.llms`.
+    # Those two packages re-export these names through a `DeprecationHelper`, which warns on
+    # ATTRIBUTE ACCESS as well as on construction; importing the real classes directly leaves
+    # one deprecation site instead of two. Both are exempted by message in pyproject.toml.
+    #
+    # The legacy wrappers are kept deliberately, because the modern replacements do not fit the
+    # `evaluate()` path this test uses - both checked against ragas 0.4.3, not assumed:
+    #   * `llm_factory(...)` returns an `InstructorLLM`, which is NOT a `BaseRagasLLM`, and
+    #     `evaluate()` accepts only `BaseRagasLLM | LangchainLLM`.
+    #   * the modern `ragas.embeddings.HuggingFaceEmbeddings` is a `BaseRagasEmbedding`, whose
+    #     interface is `embed_text`/`embed_texts`; `evaluate()` assigns whatever it is given
+    #     straight onto the metric, and the old `AnswerRelevancy` calls `embed_query` and
+    #     `embed_documents`. Passing the modern provider would raise AttributeError at judging
+    #     time - a failure that only appears when a real credential is present.
+    # Moving off them means rewriting this function against `ragas.metrics.collections`, whose
+    # metrics `evaluate()` cannot drive at all. That is a real migration, not an import swap.
+    from ragas.embeddings.base import LangchainEmbeddingsWrapper
+    from ragas.llms.base import LangchainLLMWrapper
 
     evaluator = LangchainLLMWrapper(ChatAnthropic(model=EVALUATOR_MODEL, timeout=120))
     embeddings = LangchainEmbeddingsWrapper(HuggingFaceEmbeddings(model_name=MODEL_NAME))
@@ -152,7 +174,7 @@ def _run_eval() -> dict[str, float]:
     # and bounds the dead-evaluator case to roughly a minute.
     result = evaluate(
         _load_golden(),
-        metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+        metrics=[Faithfulness(), AnswerRelevancy(), ContextPrecision(), ContextRecall()],
         llm=evaluator,
         embeddings=embeddings,
         run_config=RunConfig(max_retries=3, max_wait=8, timeout=60),

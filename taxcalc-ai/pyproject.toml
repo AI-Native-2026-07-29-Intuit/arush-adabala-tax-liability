@@ -25,16 +25,20 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.5",
     "respx>=0.21",
-    # Upper-bounded deliberately. ragas 0.4 deprecates essentially the entire surface this
-    # project uses - the metric singletons, LangchainLLMWrapper, LangchainEmbeddingsWrapper and
-    # `evaluate` itself - in favour of ragas.metrics.collections plus llm_factory. That is a
-    # coherent destination, but llm_factory returns an InstructorLLM which is NOT a BaseRagasLLM
-    # (checked, not assumed), so it is an all-or-nothing migration, and it cannot be validated
-    # end to end while the evaluator workspace is spend-capped. Carrying four warning exemptions
-    # to keep a deprecated API quiet is worse than pinning to the version where that API is the
-    # current one; the pin is a single reviewable decision with an obvious expiry. Revisit when
-    # the evaluator can actually run.
-    "ragas>=0.1.10,<0.3",
+    # Unpinned at the top end deliberately, and the 0.4 surface was checked rather than assumed.
+    # ragas 0.4 deprecates the metric SINGLETONS (`from ragas.metrics import faithfulness` warns
+    # and, under this project's filterwarnings=error policy, fails), but not the metric CLASSES:
+    # importing Faithfulness/AnswerRelevancy/ContextPrecision/ContextRecall from their concrete
+    # modules is warning-free and still yields `isinstance(..., Metric)` objects that `evaluate()`
+    # accepts. tests/test_ragas_thresholds.py takes that path, so no version ceiling and no
+    # warning exemptions are needed.
+    #
+    # The `ragas.metrics.collections` rewrite is the eventual destination but is NOT a drop-in:
+    # those metrics subclass BaseMetric, which `evaluate()` does not accept, and they require an
+    # InstructorBaseRagasLLM from llm_factory rather than a LangchainLLMWrapper. That is a rewrite
+    # of the evaluation loop, not an import swap, and it is not worth doing blind while the
+    # evaluator workspace is spend-capped and the result cannot be validated end to end.
+    "ragas>=0.1.10",
     "great-expectations>=0.18",
     "testcontainers[postgres]>=4.7",
     "langchain-community<0.4",
@@ -66,16 +70,16 @@ warn_return_any = true
 warn_unused_ignores = true
 exclude = ["build/", "dist/"]
 
-# Neither `datasets` nor `ragas` (at the <0.3 pin) ships a py.typed marker, so --strict refuses
-# those imports outright rather than treating them as Any. Scoped to these two package trees: a
-# blanket ignore_missing_imports would switch the same protection off for every third-party
-# package, including the ones that DO ship types - pandas via pandas-stubs, numpy, psycopg,
-# pgvector, sentence-transformers, langsmith, great-expectations.
+# `datasets` ships no py.typed marker, so --strict refuses the import outright rather than
+# treating it as Any. Scoped to that one package tree: a blanket ignore_missing_imports would
+# switch the same protection off for every third-party package, including the ones that DO ship
+# types - pandas via pandas-stubs, numpy, psycopg, pgvector, sentence-transformers, langsmith,
+# great-expectations.
 #
-# Worth noting the direction of travel: ragas 0.4 DOES ship py.typed, so this half of the
-# override expires with the pin above rather than being permanent.
+# `ragas` used to need the same exemption and no longer does: 0.4 ships py.typed, so it is now
+# type-checked for real rather than waved through.
 [[tool.mypy.overrides]]
-module = ["datasets.*", "ragas.*"]
+module = ["datasets.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
@@ -139,4 +143,13 @@ filterwarnings = [
     # There is no seam to close the file from: it is an open() inside a cached function in a
     # dependency.
     'ignore:unclosed file .*ragas.*uuid\.json:ResourceWarning',
+    # ragas 0.4 deprecates the two legacy LangChain wrappers. They are kept deliberately: the
+    # modern replacements are not drop-ins for the `evaluate()` path (llm_factory returns an
+    # InstructorLLM, which evaluate() does not accept; the modern embedding provider exposes
+    # embed_text/embed_texts where the old metrics call embed_query/embed_documents). The
+    # reasoning, and the fact that both were checked against 0.4.3 rather than assumed, is in
+    # tests/test_ragas_thresholds.py. Scoped to the two exact messages so every other
+    # DeprecationWarning - including any future ragas one - still fails the build.
+    "ignore:LangchainLLMWrapper is deprecated:DeprecationWarning",
+    "ignore:LangchainEmbeddingsWrapper is deprecated:DeprecationWarning",
 ]
