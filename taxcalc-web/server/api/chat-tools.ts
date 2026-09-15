@@ -37,8 +37,11 @@ export class ToolResponseValidationError extends Error {
 const embeddedLiabilityRestSchema = z.object({
   taxYear: z.number(),
   bracketId: z.string(),
-  taxableAmount: z.number(),
-  liabilityAmount: z.number(),
+  // Strings, not numbers: `TaxpayerReadModel` serializes BigDecimal via
+  // @JsonFormat(shape = STRING) (W7 D1), so the 2-decimal scale survives
+  // the wire. See `useGetTaxLiabilityRest.ts`, which this mirrors.
+  taxableAmount: z.string(),
+  liabilityAmount: z.string(),
   computedAt: z.string(),
 });
 

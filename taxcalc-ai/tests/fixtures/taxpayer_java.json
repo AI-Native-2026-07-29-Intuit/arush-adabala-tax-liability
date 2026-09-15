@@ -1,0 +1,1 @@
+{"id":"taxpayer-001","displayName":"Ada Lovelace","filingStatus":"SINGLE","homeJurisdiction":"FEDERAL","createdAt":"2026-09-14T23:45:33.690400Z","liabilities":[{"taxYear":2026,"bracketId":"fed-2026-22pct","taxableAmount":"120000.00","liabilityAmount":"26400.00","computedAt":"2026-09-14T23:46:45.250267Z"}],"tags":[],"tenantId":"tenant-shared"}

@@ -245,10 +245,12 @@ the backend's Redis cache TTL) against the real `GET
 `TaxpayerReadModel`'s actual JSON shape (`id`/`displayName`/`filingStatus`/
 `homeJurisdiction`/`createdAt`/`liabilities`/`tags`), not the deliverable
 spec's generic placeholder fields — and its `taxableAmount`/
-`liabilityAmount` are typed `number`, not the BigDecimal-as-string
-convention the rest of this codebase uses, because no `@JsonFormat` is
-configured on the backend and Jackson serializes `BigDecimal` as a JSON
-number by default. A 404 resolves to `null` data instead of throwing, so
+`liabilityAmount` are typed `string`, the BigDecimal-as-string convention
+the rest of this codebase uses. (They were `number` until W7 D1, when
+`TaxpayerReadModel` gained `@JsonFormat(shape = STRING)` on both money
+fields: JavaScript has one numeric type, IEEE-754 double, so `JSON.parse`
+turned `120000.00` into a float before any code here saw it. Format these
+for display; do not pass them through `Number()`.) A 404 resolves to `null` data instead of throwing, so
 `pages.TaxpayerDetailPage`'s W4 D2 `useReducer` state machine keeps
 treating "not found" as its own `empty` state rather than folding it into
 `error` — the page now reads `:id` via `useParams` and drives that same
@@ -1954,6 +1956,82 @@ would deepen a documented drift. And **107 of 10,716 LLM requests (1%) hit the r
 the 12-minute run — `Math.random()` clusters, so a VU that draws the LLM branch several times in
 quick succession exceeds 10/min; a burst-tolerant weight would be ~0.03.
 
+## Week 7 Day 1 — Python Sidecar: uv, Pydantic v2, httpx & a Strict CI Gate
+
+The first Python in this repo. `taxcalc-api` keeps the transactional Postgres workload and the
+latency-sensitive HTTP surface — that is the JVM's sweet spot and where it stays. Alongside it
+now sits [`taxcalc-ai/`](taxcalc-ai/), a uv-managed Python package that owns the AI/ML half of
+the stack: it calls the W3 D1 LLM proxy and returns a typed result. Full write-up in
+[`taxcalc-ai/PYTHON.md`](taxcalc-ai/PYTHON.md); the AI-authoring record is in
+[`taxcalc-ai/PROMPT_JOURNAL.md`](taxcalc-ai/PROMPT_JOURNAL.md).
+
+**Same repo, not a new one.** The two services share the `Taxpayer` JSON contract. A contract
+change that spans two languages should be one diff, not two PRs in two repos that can drift
+apart between merges.
+
+- **uv project, `src/` layout, committed lockfile** — [`taxcalc-ai/pyproject.toml`](taxcalc-ai/pyproject.toml).
+  Runtime deps are separated from dev tooling via `[dependency-groups]`, and CI runs
+  `uv sync --frozen`, so `uv.lock` is the source of truth and lockfile drift fails the build
+  rather than silently resolving a different dependency set than anyone tested. The `src/`
+  layout is the load-bearing choice: a flat layout lets tests import the package straight out of
+  the working directory, so a packaging mistake passes locally and fails only after install.
+- **Pydantic v2 boundary models** — [`taxcalc-ai/src/taxcalc_ai/models.py`](taxcalc-ai/src/taxcalc_ai/models.py).
+  `Taxpayer` mirrors the Java `TaxpayerReadModel` with camelCase aliases plus
+  `populate_by_name=True`. Every model is `extra="forbid"` and `frozen=True`; every collection
+  field is a `tuple`, never a `list`, because `frozen=True` on a model holding a list is only
+  shallow. Money is `Decimal` with `max_digits=14, decimal_places=2` — the same contract as
+  `BigDecimal.setScale(2, HALF_UP)` on the Java side.
+- **The Java/Python round-trip — and the wire-format change it forced.** The fixture at
+  `taxcalc-ai/tests/fixtures/taxpayer_java.json` is a real captured `GET
+  /api/v1/taxpayers/taxpayer-001` response, not a document hand-written to match what Python
+  happens to emit — which is why it exposed a genuine seam instead of hiding one. Jackson's
+  default for `BigDecimal` is a bare JSON **number**; Pydantic emits a `Decimal` as a JSON
+  **string**; and a JSON number's trailing zeros survive *no* parser, so `120000.00` arrives as
+  `Decimal('120000')`, scale gone. No setting on either side reconciles that.
+  **So the seam was removed rather than worked around:** `TaxpayerReadModel`'s money fields now
+  carry `@JsonFormat(shape = STRING)`, both ends write the digits verbatim, and the round-trip
+  test asserts whole-document equality with no normalisation at all
+  (`json.loads(ours) == json.loads(fixture)`). This was never only about the Python test —
+  JavaScript's single IEEE-754 numeric type meant the React client was parsing money into a
+  float too, so `useGetTaxLiabilityRest.ts` and the server-side Zod mirror in
+  `server/api/chat-tools.ts` moved to `string` in the same change. The 2-decimal scale that
+  `setScale(2, HALF_UP)` computes with now survives all the way to the browser.
+- **httpx client with a retry policy that actually distinguishes 4xx from 5xx** —
+  [`taxcalc-ai/src/taxcalc_ai/client.py`](taxcalc-ai/src/taxcalc_ai/client.py). Retrying on
+  `retry_if_exception_type(httpx.HTTPStatusError)` retries a 400 three times, which spends the
+  rate-limit budget to collect the same rejection and can lock an account out on a 401. A custom
+  predicate retries only timeouts, network errors and 5xx, and two tests pin the attempt counts
+  (exactly 3 on a 503, exactly 1 on a 400). The retry budget is built from settings rather than
+  frozen into a decorator at import time, so `proxy_max_retries` is a knob that does something.
+- **Correlation-id propagation, asserted rather than assumed.** The request carries
+  `x-correlation-id`; `CorrelationIdFilter` on the Java side echoes it on every response, so the
+  sidecar refuses a reply whose echoed id does not match what it sent. A mismatch means the
+  answer in hand belongs to a different request, and attributing it to this taxpayer would be
+  worse than failing.
+- **`SecretStr` for the proxy API key** — [`taxcalc-ai/src/taxcalc_ai/settings.py`](taxcalc-ai/src/taxcalc_ai/settings.py).
+  It renders as `**********` in `repr()`, `str()` and `model_dump()`, so the key survives a naive
+  `LOG.info("settings=%s", settings)` and a traceback that prints locals.
+  `.get_secret_value()` is called in exactly one place in the package — the line that builds the
+  `authorization` header — and a test asserts the key reaches no rendered log line.
+- **Identifiers are never taken back from the model's own JSON.** `EstimateCompletion` carries a
+  label, a confidence and a rationale, and `extra="forbid"` rejects a `taxpayerId` if the model
+  volunteers one. An LLM is a plausible source of a judgement and a terrible source of an
+  identity: a hallucinated id addresses the wrong taxpayer's record.
+- **A strict CI gate** — [`.github/workflows/python-ci.yml`](.github/workflows/python-ci.yml).
+  `uv sync --frozen` → `ruff check` → `ruff format --check` → `mypy --strict src/ tests/` →
+  `pytest --cov-fail-under=85`, each as its own step so a failure names the offending step in the
+  GitHub UI. `mypy` runs with `disallow_any_explicit = true` on top of `--strict`, because
+  `--strict` alone still lets `Any` back in by hand.
+- **Why this workflow is path-filtered and `ci.yml` is not.** Unlike the Java gate — which runs
+  its full Testcontainers suite even on docs-only PRs, because a path-filtered *required* check
+  leaves GitHub waiting forever for a context that never reports (it stranded Dependabot PRs
+  #39–#42) — `python-ci` is not a required check, so scoping it to `taxcalc-ai/**` is safe and
+  buys back exactly the thing the Java gate had to give up. The workflow header says so in place,
+  so the filter comes off first if it is ever promoted to required.
+
+**Result:** 40 tests green, 98.71% coverage, zero `mypy --strict` errors, zero `ruff` findings.
+
+
 ## Build and Test
 
 ```bash
@@ -2031,4 +2109,18 @@ pnpm install
 pnpm exec playwright install chromium   # once, before the first `pnpm check` or `pnpm e2e`
 pnpm check                              # tsc --noEmit && eslint . && vitest run --coverage && playwright test - same gate as .github/workflows/web-ci.yml
 pnpm dev                                # http://localhost:5173/login
+```
+```bash
+# W7 D1 - the Python sidecar. Mirrors .github/workflows/python-ci.yml step for step.
+cd taxcalc-ai
+uv sync                                 # creates .venv from the committed lockfile
+uv run ruff check && uv run ruff format --check
+uv run mypy --strict src/ tests/        # strict + disallow_any_explicit
+uv run pytest -v --cov=src --cov-fail-under=85
+uv run python -m taxcalc_ai.cli request.json   # validate a payload at the boundary
+
+# Behind a TLS-inspecting corporate proxy, uv needs the system trust store. Deliberately not
+# baked into pyproject.toml or CI: GitHub runners do not need it, and a config that always
+# trusts the system store is a config that hides a real certificate problem.
+UV_SYSTEM_CERTS=1 uv sync
 ```

@@ -6,6 +6,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
@@ -33,6 +35,22 @@ public class TaxpayerReadModel implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Required prefix on every {@code tenantId}. A tenant id, a taxpayer id and a bracket id are
+     * all opaque strings, and in a log line or a cross-service payload the prefix is the only
+     * thing that says which one you are looking at. The W7 D1 Python sidecar enforces the same
+     * rule at its boundary (see {@code taxcalc_ai.models.Taxpayer}), so the two sides agree on
+     * what a tenant id looks like rather than each assuming.
+     */
+    public static final String TENANT_ID_PREFIX = "tenant-";
+
+    /**
+     * Owning tenant used when none is known: an unauthenticated projection path, or a document
+     * written before this field existed. Deliberately a real, prefixed value and never null or
+     * blank - a blank tenant would silently split every per-tenant grouping in two.
+     */
+    public static final String DEFAULT_TENANT_ID = TENANT_ID_PREFIX + "shared";
+
     @Id
     private String id;
 
@@ -54,6 +72,14 @@ public class TaxpayerReadModel implements Serializable {
     // field would then reject with a resolution error.
     private List<String> tags = List.of();
 
+    // Defaulted for the same reason as `tags` above, and with the same mechanism: documents
+    // written before this field existed have no "tenantId" key in their BSON, and Spring Data
+    // Mongo's reflective population leaves the initializer in place rather than nulling it. A
+    // null here would be worse than a coarse-grained one - the W7 D1 Python sidecar's `Taxpayer`
+    // model requires this key, so a null would turn every pre-existing document into a boundary
+    // ValidationError on the other side of the wire.
+    private String tenantId = DEFAULT_TENANT_ID;
+
     /** Required by Spring Data Mongo. */
     public TaxpayerReadModel() {
     }
@@ -65,6 +91,11 @@ public class TaxpayerReadModel implements Serializable {
 
     public TaxpayerReadModel(String id, String displayName, String filingStatus, String homeJurisdiction,
             Instant createdAt, List<EmbeddedLiability> liabilities, List<String> tags) {
+        this(id, displayName, filingStatus, homeJurisdiction, createdAt, liabilities, tags, DEFAULT_TENANT_ID);
+    }
+
+    public TaxpayerReadModel(String id, String displayName, String filingStatus, String homeJurisdiction,
+            Instant createdAt, List<EmbeddedLiability> liabilities, List<String> tags, String tenantId) {
         this.id = Objects.requireNonNull(id, "id must not be null");
         this.displayName = Objects.requireNonNull(displayName, "displayName must not be null");
         this.filingStatus = Objects.requireNonNull(filingStatus, "filingStatus must not be null");
@@ -72,8 +103,12 @@ public class TaxpayerReadModel implements Serializable {
         this.createdAt = Objects.requireNonNull(createdAt, "createdAt must not be null");
         this.liabilities = Objects.requireNonNull(liabilities, "liabilities must not be null");
         this.tags = Objects.requireNonNull(tags, "tags must not be null");
+        this.tenantId = Objects.requireNonNull(tenantId, "tenantId must not be null");
         if (id.isBlank()) {
             throw new IllegalArgumentException("id must not be blank");
+        }
+        if (!tenantId.startsWith(TENANT_ID_PREFIX)) {
+            throw new IllegalArgumentException("tenantId must start with " + TENANT_ID_PREFIX);
         }
     }
 
@@ -106,6 +141,18 @@ public class TaxpayerReadModel implements Serializable {
     }
 
     /**
+     * The tenant that owns this taxpayer. Never null and never blank; always
+     * {@value #TENANT_ID_PREFIX}-prefixed.
+     *
+     * <p>Distinct from the tenant {@code TaxpayerController.tenantOf(Jwt)} resolves for LLM cost
+     * attribution: that one labels a call for billing and may legitimately be coarse, this one is
+     * an ownership attribute of the stored document.
+     */
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    /**
      * Re-projects this document from a {@code taxpayers.events} update (W3 D3): overwrites the
      * scalar fields with the event's values. Applying the same event twice produces the same
      * document, so at-least-once Kafka redelivery is safe.
@@ -131,7 +178,7 @@ public class TaxpayerReadModel implements Serializable {
     public String toString() {
         return "TaxpayerReadModel{id=" + id + ", displayName=" + displayName + ", filingStatus=" + filingStatus
                 + ", homeJurisdiction=" + homeJurisdiction + ", createdAt=" + createdAt
-                + ", liabilities=" + liabilities + ", tags=" + tags + "}";
+                + ", liabilities=" + liabilities + ", tags=" + tags + ", tenantId=" + tenantId + "}";
     }
 
     /**
@@ -146,8 +193,32 @@ public class TaxpayerReadModel implements Serializable {
 
         private String bracketId;
 
+        /**
+         * Money crosses the wire as a JSON <em>string</em>, not a JSON number (W7 D1).
+         *
+         * <p>Jackson's default for {@code BigDecimal} is a bare JSON number, which loses this
+         * field's whole reason for existing the moment it leaves the JVM. Two consumers prove
+         * the point:
+         *
+         * <ul>
+         *   <li>JavaScript has one numeric type, IEEE-754 double. {@code JSON.parse} turns
+         *       {@code 120000.00} into a float before any application code sees it, so the
+         *       React client cannot represent a cent it was never handed.
+         *   <li>Python's {@code json} and Pydantic both drop a JSON number's trailing zeros on
+         *       the way in: {@code 120000.00} parses to {@code Decimal('120000')}, scale 0. The
+         *       {@code setScale(2, HALF_UP)} contract this class computes with survives inside
+         *       the JVM and nowhere else.
+         * </ul>
+         *
+         * <p>A string carries the digits verbatim, so {@code BigDecimal} on this side,
+         * {@code Decimal} in the Python sidecar, and a decimal library on the JS side all read
+         * the same value with the same scale. This is Jackson-only: it does not touch how
+         * Spring Data Mongo persists the field, nor the JDK-serialized Redis cache entry.
+         */
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
         private BigDecimal taxableAmount;
 
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
         private BigDecimal liabilityAmount;
 
         private Instant computedAt;

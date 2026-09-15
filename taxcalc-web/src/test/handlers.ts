@@ -33,8 +33,8 @@ function taxpayerRestBody(id: string): Record<string, unknown> {
       {
         taxYear: 2024,
         bracketId: 'ca-bracket-1',
-        taxableAmount: 10000,
-        liabilityAmount: 100,
+        taxableAmount: '10000.00',
+        liabilityAmount: '100.00',
         computedAt: '2025-01-04T00:00:00Z',
       },
     ],

@@ -89,6 +89,26 @@ public class TaxLiabilityService {
      */
     @Transactional
     public Taxpayer computeLiability(String id, String displayName, String filingStatus, BigDecimal taxableAmount) {
+        return computeLiability(id, displayName, filingStatus, taxableAmount, TaxpayerReadModel.DEFAULT_TENANT_ID);
+    }
+
+    /**
+     * As {@link #computeLiability(String, String, String, BigDecimal)}, but stamps the projected
+     * read-model document with the tenant that owns the taxpayer.
+     *
+     * <p>The tenant is a parameter rather than something this service resolves, because the only
+     * trustworthy source for it is the verified JWT claim the web layer holds - a service that
+     * guessed would be guessing about an ownership boundary. It does not travel on the outbox
+     * event: {@code TaxpayerUpdatedListener} re-projects an existing document in place and
+     * {@code applyEvent} does not touch {@code tenantId}, so a redelivery can never downgrade a
+     * real tenant back to the default.
+     *
+     * @param tenantId the owning tenant, must not be null and must be {@code tenant-}-prefixed
+     */
+    @Transactional
+    public Taxpayer computeLiability(String id, String displayName, String filingStatus, BigDecimal taxableAmount,
+            String tenantId) {
+        Objects.requireNonNull(tenantId, "tenantId must not be null");
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(displayName, "displayName must not be null");
         Objects.requireNonNull(filingStatus, "filingStatus must not be null");
@@ -113,7 +133,7 @@ public class TaxLiabilityService {
                     serializeEvent(toUpdatedEvent(saved)), captureTraceParent()));
 
             // Write-through: project the JPA entity into a Mongo read model.
-            readModelRepository.save(toReadModel(saved));
+            readModelRepository.save(toReadModel(saved, tenantId));
             LOG.info("write-through to mongo id={} filingStatus={}", saved.getId(), saved.getFilingStatus());
 
             return saved;
@@ -228,11 +248,15 @@ public class TaxLiabilityService {
     }
 
     private TaxpayerReadModel toReadModel(Taxpayer taxpayer) {
+        return toReadModel(taxpayer, TaxpayerReadModel.DEFAULT_TENANT_ID);
+    }
+
+    private TaxpayerReadModel toReadModel(Taxpayer taxpayer, String tenantId) {
         List<TaxpayerReadModel.EmbeddedLiability> liabilities = taxpayer.getLiabilities().stream()
                 .map(this::toEmbeddedLiability)
                 .collect(Collectors.toList());
         return new TaxpayerReadModel(taxpayer.getId(), taxpayer.getDisplayName(), taxpayer.getFilingStatus(),
-                taxpayer.getHomeJurisdiction(), taxpayer.getCreatedAt(), liabilities);
+                taxpayer.getHomeJurisdiction(), taxpayer.getCreatedAt(), liabilities, List.of(), tenantId);
     }
 
     private TaxpayerReadModel.EmbeddedLiability toEmbeddedLiability(Liability liability) {

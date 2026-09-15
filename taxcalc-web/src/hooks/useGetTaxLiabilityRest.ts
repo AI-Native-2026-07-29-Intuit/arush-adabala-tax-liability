@@ -6,12 +6,16 @@ import { getStoredJwt } from '../lib/jwtStorage';
 export type EmbeddedLiabilityRest = {
   readonly taxYear: number;
   readonly bracketId: string;
-  // Backend BigDecimal fields serialize as JSON numbers (no
-  // @JsonFormat(shape = STRING) is configured), so these are `number`
-  // rather than the string-per-BigDecimal convention this project's
-  // CLAUDE.md establishes for the Java side.
-  readonly taxableAmount: number;
-  readonly liabilityAmount: number;
+  // Money is a JSON *string*, not a number: `TaxpayerReadModel` annotates
+  // both BigDecimal fields with @JsonFormat(shape = STRING) (W7 D1).
+  // Keeping them as `string` here is the point of that annotation -
+  // JavaScript has one numeric type, IEEE-754 double, and `JSON.parse`
+  // would turn "120000.00" into a float before any code below sees it,
+  // losing the 2-decimal scale the Java side computes with. Format for
+  // display, and use a decimal library if these ever need arithmetic;
+  // do not pass them through Number().
+  readonly taxableAmount: string;
+  readonly liabilityAmount: string;
   readonly computedAt: string; // Instant, ISO-8601
 };
 
