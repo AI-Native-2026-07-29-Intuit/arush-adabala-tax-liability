@@ -145,6 +145,26 @@ def test_the_full_pipeline_returns_the_documented_payload_and_caches_it(
     The tenant on each citation is not decoration - it is what the cache's defence-in-depth
     check reads on every subsequent hit, so an answer stored without it becomes a permanent
     miss. Asserting it here is asserting that the write path satisfies the read path.
+
+    ``rerank_timed_out`` is asserted to be *present and boolean*, deliberately not to be
+    ``False``. This test is about the payload's shape and the cache round-trip, and the value of
+    that flag is a property of the CPU the suite happens to run on: the production path sends
+    twenty ``(query, passage)`` pairs through ``bge-reranker-base`` under a 300 ms soft
+    deadline, and commit 04d7158 recorded that eight pairs already breach that budget on a
+    GitHub shared runner. Asserting ``False`` here was the same flake that commit removed from
+    ``test_rerank.py::test_bge_rerank_lifts_the_gold_chunk_out_of_the_retrieval_tail``; it
+    survived that cleanup in this file and was caught locally by running two suites at once,
+    which is the same CPU starvation a shared runner produces.
+
+    The fix there was ``timeout_ms=60_000``, which is not available here: ``retrieve_and_generate``
+    has no timeout parameter - the deliverable pins its signature - and the budget cannot be
+    monkeypatched either, because ``bge_rerank`` binds ``RERANK_TIMEOUT_MS`` as a default
+    argument at definition time. So this test keeps the half of the claim that is deterministic
+    (the field is in the documented payload, and it survives the cache round-trip via the
+    ``again == answer`` comparison below) and leaves the timing assertion to
+    ``test_rerank.py``, where the breach is forced with ``timeout_ms=1`` and is therefore
+    deterministic on any hardware. A soft-failing deadline that fires is the intended behaviour
+    of this stage, not a defect for this test to police.
     """
     client = _StubAnthropic()
     with psycopg.connect(pipeline_corpus) as conn:
@@ -161,7 +181,9 @@ def test_the_full_pipeline_returns_the_documented_payload_and_caches_it(
         )
 
         assert answer["text"] == STUB_ANSWER
-        assert answer["rerank_timed_out"] is False
+        # Present and boolean, not False - see the docstring. `is False` here is a latency
+        # assertion wearing a payload assertion's clothes.
+        assert isinstance(answer["rerank_timed_out"], bool)
         citations = answer["citations"]
         assert isinstance(citations, list) and citations
         assert all(c["tenant_id"] == TENANT for c in citations)

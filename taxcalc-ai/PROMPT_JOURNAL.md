@@ -1126,3 +1126,56 @@ as a workflow annotation and a job-summary line, `docs/ragas/w7d3.md` says NOT M
 heading, and a credential-free test asserts the 0.85 gate is strictly above the W7 D2 floor so
 nobody can quietly lower it while it cannot be measured. That is the honest state of this
 deliverable, recorded rather than rounded up.
+
+## W7 D3 — audit of the report harness, and four defects between "cap raised" and "measured" (2026-09-16)
+
+**Context.** The deliverable's report requirement was assessed as met-but-unmeasured: the six
+columns exist, every cell reads `n/m`, and the blocker is an Anthropic workspace spend cap that
+only a human can lift in the console. Rather than leave it there, the harness that stands
+between "cap raised" and "measured report committed" was read line by line, on the theory that
+a path nobody can execute is a path nobody has tested. It had not been executed — it *cannot*
+be, without a working evaluator — and it held four defects, three of them silent.
+
+**Prompt.** "Nothing here can run the evaluator. Read `src/taxcalc_ai/eval/run_ragas.py` as if
+the spend cap were lifted five minutes from now and this script were about to write over the
+committed report for the first time. What does it get wrong?"
+
+**What came back, in substance.** Claude re-read its own scaffold and defended it: the
+configuration matrix is right, the `n/m` rendering is right, the explicit evaluator and
+embeddings are right, and the `--limit` cost knob is right. All true, and all beside the point.
+It did not find the overwrite, the NaN hole, the missing sub-0.85 flagging, or the cache
+contamination. Asked a second time, narrowly — *"what happens to the prose in `w7d3.md` when
+`main()` runs?"* — it identified the overwrite immediately and correctly. **Verdict: Rejected as
+a review, used as a drafting aid once the question was narrowed.** The lesson recorded rather
+than tidied away: an open-ended "what's wrong with this" to the model that wrote the code
+returns a defence of the code. The defects came out of asking what a specific line does to a
+specific file, which is a question with an answer the model cannot rationalise.
+
+**The four defects**, each now pinned by a test in `tests/test_eval_matrix.py`:
+
+1. `main()` overwrote the whole report with a title and a table, deleting the attribution
+   section and the sub-0.85 commentary — two of the three things the deliverable asks the
+   report for. Correct on an empty `tmp_path` (which is what its test used), destructive on the
+   committed document. Fixed with `BEGIN:matrix`/`END:matrix` sentinels and a splice.
+2. NaN counted as a measurement (`value is not None` is `True` for NaN), so the spend-capped
+   all-NaN result would render `nan` into 24 cells and overwrite the honest prose with it.
+   Fixed with `_measured()`, plus a refusal in `main()` to write anything when nothing was
+   judged — the capped run now exits 1 and leaves the file untouched.
+3. Sub-0.85 flagging was left to a human, so it would have been lost on the next regeneration.
+   Now generated, with `faithfulness` cells marked as the ones that gate the build.
+4. The cache-bypass docstring described a per-column tenant suffix that the code never applied.
+   The cache key is the quantised query vector and does not vary with the flags, so all six
+   columns would have been served the baseline's answers: identical scores, `+0.00` deltas, and
+   a report concluding the four upgrades did nothing. No error, no symptom. Fixed with
+   `bump_epoch` per column — not the suffix the comment proposed, which would have left five of
+   six columns searching a tenant with no chunks.
+
+**What this does not fix.** The report still holds no numbers, and nothing in this pass could
+change that: the evaluator is spend-capped in CI and absent locally. What changed is that the
+run which finally measures it will produce a correct, fully-flagged report that keeps its prose,
+instead of a `+0.00` matrix written over the explanation of why it was empty.
+
+**Verified after the fixes:** `ruff check` clean, `ruff format --check` clean,
+`mypy --strict src/ tests/` clean across 45 files, `tests/test_eval_matrix.py` 10 passed. The
+splice was exercised against a copy of the real `docs/ragas/w7d3.md` with a stubbed scorer; all
+five prose landmarks survived and the stub numbers were reverted rather than committed.

@@ -17,7 +17,9 @@ import pytest
 
 from taxcalc_ai.eval.run_ragas import (
     CONFIGURATIONS,
+    GATE_THRESHOLD,
     METRICS,
+    SUB_GATE_FLAG,
     Configuration,
     _load_questions,
     main,
@@ -139,3 +141,152 @@ def test_main_writes_the_report_and_refuses_an_ambiguous_invocation(
         main(["--out", str(out)])
     with pytest.raises(SystemExit):
         main(["--all-on", "--matrix", "--out", str(out)])
+
+
+def test_a_nan_score_renders_as_not_measured_rather_than_as_nan() -> None:
+    """The spend-capped evaluator returns all-NaN without raising; NaN is not a measurement.
+
+    This is the failure this project has actually hit, twice. RAGAS's executor catches each
+    judging job's exception itself, logs it at ERROR and writes NaN into that row, so a capped
+    or revoked evaluator returns a *complete* result whose every value is NaN. ``value is not
+    None`` is ``True`` for NaN, so the naive renderer formats the string ``nan`` into every
+    cell - and a report full of ``nan`` reads as a measurement that went badly rather than as
+    one that never happened.
+    """
+    nan = float("nan")
+    report = render_report({c.name: dict.fromkeys(METRICS, nan) for c in CONFIGURATIONS})
+
+    assert "nan" not in report
+    assert "n/m" in report
+    # And the roll-up says the cells are not determinable, not that they are all below the gate:
+    # an unmeasured cell is not a failing cell.
+    assert "not determinable" in report
+
+
+def test_measured_cells_below_the_gate_are_flagged_and_rolled_up() -> None:
+    """Every measured cell below 0.85 is flagged inline and listed, faithfulness distinctly.
+
+    The deliverable requires each sub-0.85 cell to be flagged. Doing that in the renderer is
+    what makes it survive a regeneration - a hand-annotated table loses its annotations the
+    first time anyone re-runs the harness.
+    """
+    scores = {
+        CONFIGURATIONS[0].name: dict.fromkeys(METRICS, 0.72),
+        CONFIGURATIONS[-1].name: dict.fromkeys(METRICS, 0.91),
+    }
+    report = render_report(scores)
+
+    assert f"0.72{SUB_GATE_FLAG}" in report
+    # At or above the gate is not flagged; 0.85 itself passes, so the boundary is not off by one.
+    assert f"0.91{SUB_GATE_FLAG}" not in report
+    assert f"0.85{SUB_GATE_FLAG}" not in render_report(
+        {CONFIGURATIONS[0].name: dict.fromkeys(METRICS, 0.85)}
+    )
+
+    # faithfulness is called out as the one that fails a build; the other three are diagnostics.
+    assert "`faithfulness`" in report and "**(gates the build)**" in report
+    assert "`context_recall`" in report
+    assert "**(gates the build)**" not in report.split("`context_recall`")[1]
+
+
+def test_the_report_gate_matches_the_ci_gate() -> None:
+    """The renderer's 0.85 and ``test_ragas_gate.py``'s 0.85 are the same number.
+
+    The threshold is duplicated as a literal so the report can be rendered without pytest
+    installed. This is the assertion that stops the copy drifting - a report flagging cells
+    against 0.80 while the build fails at 0.85 would be worse than no flagging at all.
+    """
+    from .test_ragas_gate import FAITHFULNESS_GATE
+
+    assert GATE_THRESHOLD == FAITHFULNESS_GATE
+
+
+def test_a_run_that_measured_nothing_refuses_to_overwrite_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An all-NaN run exits non-zero and leaves the committed report byte-for-byte unchanged.
+
+    Without this, the spend-capped case is a silent downgrade: the run "succeeds", writes a
+    table of ``n/m`` cells over a document whose prose explains at length why it holds no
+    numbers, and the explanation is gone. The report is the artefact a later day consults to
+    decide whether the reranker earns its latency; losing the reason it is empty is losing the
+    only useful thing it currently says.
+    """
+    from taxcalc_ai.eval import run_ragas
+
+    monkeypatch.setattr(
+        run_ragas,
+        "run_configuration",
+        lambda configuration, questions, tenant_id="tenant-a": dict.fromkeys(METRICS, float("nan")),
+    )
+    out = tmp_path / "w7d3.md"
+    original = "# Committed report\n\nExplains at length why it holds no numbers.\n"
+    out.write_text(original)
+
+    assert main(["--matrix", "--limit", "1", "--out", str(out)]) == 1
+    assert out.read_text() == original
+
+
+def test_a_measured_run_splices_the_table_and_preserves_the_surrounding_prose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regeneration replaces only the marked region, keeping the deliverable's prose sections.
+
+    Two of the three things the deliverable asks this report for - the attribution naming which
+    upgrade moved which metric, and the sub-0.85 commentary - are prose. The first version of
+    ``main`` wrote a title and a table over the whole file, so the first successful measurement
+    run would have deleted both and taken the deliverable with them.
+    """
+    from taxcalc_ai.eval import run_ragas
+
+    monkeypatch.setattr(
+        run_ragas,
+        "run_configuration",
+        lambda configuration, questions, tenant_id="tenant-a": dict.fromkeys(
+            METRICS, 0.90 if configuration.use_rerank else 0.80
+        ),
+    )
+    out = tmp_path / "w7d3.md"
+    out.write_text(
+        f"# Title\n\nPreamble prose.\n\n{run_ragas.MATRIX_BEGIN}\n"
+        f"| stale | table |\n{run_ragas.MATRIX_END}\n\n"
+        "## What each column attributes\n\nrerank moves context_precision.\n"
+    )
+
+    assert main(["--matrix", "--limit", "1", "--out", str(out)]) == 0
+
+    body = out.read_text()
+    assert "Preamble prose." in body
+    assert "## What each column attributes" in body
+    assert "rerank moves context_precision." in body
+    assert "| stale | table |" not in body
+    assert "0.90" in body and "+0.10" in body
+    # Idempotent: a second run must not nest or duplicate the generated region.
+    assert main(["--matrix", "--limit", "1", "--out", str(out)]) == 0
+    assert out.read_text().count(run_ragas.MATRIX_BEGIN) == 1
+    assert out.read_text().count("## What each column attributes") == 1
+
+
+def test_each_configuration_bumps_the_cache_epoch_so_columns_cannot_share_answers() -> None:
+    """``run_configuration`` invalidates the cache per column, and does NOT fake the tenant.
+
+    The bug this pins is silent and total. The pipeline checks the semantic cache first and
+    returns on a hit, and the cache key is the quantised query vector - which does not vary
+    with the four flags. So without a per-column invalidation, column two is served column
+    one's answers verbatim: every column scores identically, every delta reads ``+0.00``, and
+    the report concludes the four upgrades did nothing. Nothing errors.
+
+    The second assertion matters as much as the first: the fix must not be a per-column tenant
+    suffix. The tenant is a retrieval pre-filter as well as a cache-key component, and the
+    corpus is seeded for ``tenant-a`` only - so suffixing it would leave every column but the
+    baseline searching a tenant with no chunks, scoring badly for want of any context at all.
+    """
+    import inspect
+
+    from taxcalc_ai.eval import run_ragas
+
+    source = inspect.getsource(run_ragas.run_configuration)
+
+    assert "bump_epoch(cache, tenant_id)" in source
+    # The tenant reaches the pipeline unmodified - no f-string suffix, no concatenation.
+    assert "retrieve_and_generate(\n                question,\n                tenant_id," in source
