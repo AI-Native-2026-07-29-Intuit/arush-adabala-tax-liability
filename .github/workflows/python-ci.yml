@@ -146,43 +146,18 @@ jobs:
 
       - name: Assert a LangSmith run is visible for a sample retrieval
         # The only step that proves tracing WORKS rather than that the decorator is written.
-        # LANGSMITH_TRACING must be "true" here specifically: @traceable is a documented no-op
-        # when it is unset, so without this line the script would fire a retrieval, find no run,
-        # and correctly fail - which is the bug it exists to catch, manufactured by the gate.
-        run: |
-          uv run python - <<'PY'
-          # Start a throwaway pgvector container, seed it, and hand the DSN to the checker.
-          # The script needs a real corpus to retrieve from; everything else it does is
-          # SaaS-side.
-          import os, subprocess, sys, time
-          from pathlib import Path
-          import psycopg
-          from testcontainers.community.postgres import PostgresContainer
-          from sentence_transformers import SentenceTransformer
-          from taxcalc_ai.corpus import load_corpus, embed_dataframe, MODEL_NAME
-          from taxcalc_ai.pgvector_loader import load_rows
-
-          with PostgresContainer("pgvector/pgvector:pg16") as pg:
-              dsn = pg.get_connection_url().replace("postgresql+psycopg2", "postgresql")
-              for _ in range(60):
-                  try:
-                      with psycopg.connect(dsn, connect_timeout=2) as c, c.cursor() as cur:
-                          cur.execute("SELECT 1")
-                      break
-                  except psycopg.OperationalError:
-                      time.sleep(0.5)
-              with psycopg.connect(dsn) as c:
-                  with c.cursor() as cur:
-                      cur.execute(Path("sql/V001__doc_chunks.sql").read_text())
-                  c.commit()
-              df = load_corpus(Path("tests/fixtures/corpus_seed.jsonl"))
-              load_rows(dsn, embed_dataframe(df, model=SentenceTransformer(MODEL_NAME)))
-              os.environ["TAXCALC_AI_PG_DSN"] = dsn
-              sys.exit(subprocess.call(
-                  [sys.executable, "-m", "taxcalc_ai.scripts.assert_langsmith_run_visible"],
-                  env=os.environ,
-              ))
-          PY
+        #
+        # One command, and the same one a developer runs locally. This step used to be thirty
+        # lines of inline Python that started a pgvector container, applied the DDL, embedded
+        # the seed corpus and exported the DSN before handing off to the checker - none of which
+        # was type-checked, linted or covered, and all of which meant the documented invocation
+        # did not work anywhere but here. That provisioning now lives inside the script, where
+        # tests/test_assert_langsmith_run_visible.py can reach it.
+        #
+        # LANGSMITH_TRACING is still pinned explicitly rather than left to the script's default:
+        # what CI traces should be a property of the pipeline, stated where the pipeline can be
+        # read, not inherited from a fallback inside a module.
+        run: uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible
         env:
           LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
           LANGSMITH_PROJECT: taxcalc-ai-dev-ci
