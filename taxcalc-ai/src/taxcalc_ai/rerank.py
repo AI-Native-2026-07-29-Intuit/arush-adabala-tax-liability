@@ -36,6 +36,17 @@ means moving the model behind a process boundary that can be abandoned - a subpr
 inference server with its own deadline - which is a deployment change, not a code change, and
 is the right next step once the metric shows it is needed.
 
+**300 ms is a budget for accelerated inference, and on CPU it will breach - by design.**
+Measured on a GitHub shared runner, eight ``(query, passage)`` pairs alone exceed 300 ms; the
+production path sends twenty. So on CPU-only hardware this stage falls back to retrieval order
+most of the time, and the ``rerank_timeout`` metric will read close to 100%. That is the correct
+behaviour rather than a misconfiguration: the deadline is a statement about the latency the
+product can afford, not about what the current hardware can deliver, and the soft failure is
+what keeps the mismatch a quality degradation instead of an outage. The metric is the signal
+that the stage needs a GPU or a dedicated inference server to pay for itself - which is exactly
+the decision it exists to inform. Lowering the ambition to whatever CPU happens to manage would
+hide that.
+
 **Input length is capped by tokens, not by document count.** ``max_length=256`` on the model
 plus a character slice on each passage: a cross-encoder's cost is quadratic in sequence length,
 so a single 8 KB chunk costs more than thirty short ones. Capping the candidate *count* alone

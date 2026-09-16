@@ -560,6 +560,23 @@ reranker into a failed request is strictly worse for the user and is a self-infl
 when the model server is merely warm. The boolean is returned *and* attached to the active
 LangSmith span, so a caller that drops it still leaves the breach in the trace.
 
+**300 ms is a budget for accelerated inference, and on CPU it breaches — by design.** Measured
+on a GitHub shared runner, eight `(query, passage)` pairs alone exceed 300 ms; the production
+path sends twenty. So on CPU-only hardware this stage falls back to retrieval order most of the
+time and `rerank_timeout` reads close to 100%. That is correct rather than misconfigured: the
+deadline states what latency the product can afford, not what the current hardware delivers, and
+the soft failure is what keeps the mismatch a quality degradation instead of an outage. The
+metric is the signal that this stage needs a GPU or a dedicated inference server to pay for
+itself — which is the decision it exists to inform. Lowering the number to whatever CPU manages
+would hide that.
+
+Found by CI, twice over. `tests/test_rerank.py`'s lift test originally asserted
+`timed_out is False` under the production budget; it passed locally and failed on a runner, which
+made a test about *ranking* depend on the CPU the suite happened to run on. The lift test now
+passes a 60-second budget so what fails there is the ranking and only the ranking; the timeout
+keeps its own test, which forces the breach with `timeout_ms=1` and is deterministic on any
+hardware.
+
 **Post-hoc.** `CrossEncoder.predict` is a blocking PyTorch call with no cancellation seam, so
 the elapsed time is measured after it returns. This bounds *visibility*, not latency — a
 2-second rerank still takes 2 seconds, it is merely flagged. Genuinely capping the wall clock

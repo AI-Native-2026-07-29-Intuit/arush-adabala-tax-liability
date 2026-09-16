@@ -129,13 +129,25 @@ def test_bge_rerank_lifts_the_gold_chunk_out_of_the_retrieval_tail() -> None:
     Asserted as top-2 rather than exactly rank 1. Rank 1 is what happens on this fixture today,
     but pinning it would make a reranker version bump fail a test about *lift*; top-2 out of
     eight is a claim about the mechanism working, not about the model's exact weights.
+
+    ``timeout_ms`` is deliberately enormous, and that is the second thing this test learned the
+    hard way. It first ran with the production 300 ms budget and passed locally, then failed on
+    a GitHub runner with ``timed_out=True`` - eight ``(query, passage)`` pairs through
+    ``bge-reranker-base`` on a shared CPU runner simply take longer than 300 ms. Asserting the
+    budget here made a test about RANKING depend on the CPU the suite happens to run on, which
+    is a flake, not a finding. The timeout has its own dedicated test below, where the breach is
+    forced with ``timeout_ms=1`` and is therefore deterministic on any hardware.
     """
     question = "What is the alternative minimum tax exemption for a single filer?"
     gold_id = "chunk-fixture-p5"  # the AMT sentence, 6th in retrieval order
     candidates = _candidates()
     assert candidates[5][0] == gold_id
 
-    results, timed_out = bge_rerank(question, candidates, top_k=DEFAULT_RERANK_TOP_K)
+    # 60s: high enough that the fallback cannot fire on any runner, so what fails here is the
+    # ranking and only the ranking.
+    results, timed_out = bge_rerank(
+        question, candidates, top_k=DEFAULT_RERANK_TOP_K, timeout_ms=60_000
+    )
 
     assert timed_out is False
     assert len(results) == DEFAULT_RERANK_TOP_K
