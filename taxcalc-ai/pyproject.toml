@@ -152,4 +152,19 @@ filterwarnings = [
     # DeprecationWarning - including any future ragas one - still fails the build.
     "ignore:LangchainLLMWrapper is deprecated:DeprecationWarning",
     "ignore:LangchainEmbeddingsWrapper is deprecated:DeprecationWarning",
+    # And `evaluate()` itself, for the same reason and on the same terms. Its replacement is the
+    # @experiment decorator, which is a different execution model - it owns the dataset loop and
+    # returns per-row results rather than an aggregate - so adopting it rewrites this test
+    # rather than renaming a call. That rewrite cannot be validated while the evaluator
+    # workspace is spend-capped and every metric comes back NaN.
+    #
+    # This one is easy to miss locally and was: the two wrapper warnings above fire while the
+    # evaluator is CONSTRUCTED, which a construction-only check catches. This fires inside the
+    # call, after construction, on the line that does the work - so only a run that actually
+    # reaches evaluate() sees it. That is why the whole -m slow path is exercised before this
+    # list is called complete, rather than the import path alone.
+    # `a?` covers both: evaluate() delegates to aevaluate(), and each warns on its own way in.
+    # filterwarnings matches the message from the START, so a pattern beginning "evaluate" does
+    # NOT match "aevaluate() is deprecated" - which is how the second one survived the first fix.
+    'ignore:a?evaluate\(\) is deprecated:DeprecationWarning',
 ]

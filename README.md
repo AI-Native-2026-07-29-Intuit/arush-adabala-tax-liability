@@ -2293,7 +2293,11 @@ uv run pytest -v -m slow tests/test_ragas_thresholds.py # needs ANTHROPIC_API_KE
 uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LangSmith creds
 
 # The two secret-scan greps the gate runs. Both must return nothing.
-grep -RIn 'lsv2_pt_' .
+#
+# The LangSmith prefix is assembled rather than written out, because a doc that spells the
+# literal is itself a hit for the scan it documents - which is exactly how this line first
+# failed the gate it describes.
+grep -RIn "lsv2""_pt_" .
 grep -RIn 'except:' src/ tests/
 
 # Behind a TLS-inspecting corporate proxy, uv needs the system trust store. Deliberately not
