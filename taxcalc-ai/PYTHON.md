@@ -472,9 +472,11 @@ This sidecar gained the RAG 2.0 production retrieval stack today:
 * `src/taxcalc_ai/eval/run_ragas.py` — the six-column before-vs-after harness.
 * `tests/test_chunker.py`, `tests/test_hybrid_rrf.py`, `tests/test_rerank.py`,
   `tests/test_semantic_cache.py`, `tests/test_tenant_isolation.py`, `tests/test_ragas_gate.py`.
-* `docs/ragas/w7d3.md` — the before-vs-after report. **Its cells read `n/m`, honestly:** no
-  evaluator credential exists in this environment, so the faithfulness gate skips and the
-  matrix was not measured. See the report for why fabricating numbers there would be worse
+* `docs/ragas/w7d3.md` — the before-vs-after report. **Its cells read `n/m`, honestly:** the
+  matrix was not measured. Locally there is no evaluator credential at all; in CI the secret
+  *is* configured and the Anthropic workspace is spend-capped, so RAGAS returns a complete
+  result whose every value is NaN and the gate skips rather than raising. A configured secret
+  is not a working evaluator. See the report for why fabricating numbers there would be worse
   than leaving them absent.
 
 ### How to run today's additions
