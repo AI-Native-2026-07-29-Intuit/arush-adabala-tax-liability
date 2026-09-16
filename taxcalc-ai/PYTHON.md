@@ -446,6 +446,217 @@ without deviating from it. Three tests pin the behaviour: the raise, the whole-b
 and — importantly — that a same-tenant reload is still idempotent, because a guard that also
 blocked legitimate retries would have quietly removed the property the loader exists to provide.
 
+## What W7 D3 adds
+
+This sidecar gained the RAG 2.0 production retrieval stack today:
+
+* `sql/V002__rag2_metadata_and_partial_indexes.sql` — `chunk_metadata jsonb`, `content_hash
+  text`, a GIN `jsonb_path_ops` index, per-tenant partial HNSW indexes for
+  `tenant-a`/`tenant-b`/`tenant-c` at `m=24`/`ef_construction=128`, and a generated
+  `chunk_tsv tsvector` with its own GIN index. Every index is `CREATE INDEX CONCURRENTLY`.
+* `src/taxcalc_ai/chunker.py` — `RecursiveCharacterTextSplitter` at `chunk_size=900` /
+  `overlap=150`, with synthetic per-document `chunk_id` discipline.
+* `src/taxcalc_ai/embedder.py` — the idempotent re-embed gate: one SELECT comparing stored
+  `content_hash` and `model_version`, so an unchanged corpus costs a round trip instead of the
+  whole pipeline.
+* `src/taxcalc_ai/hybrid.py` — `dense_topk_filtered`, `sparse_topk_fts`, `rrf_fuse` (`k=60`),
+  and the `coverage` diagnostic. Every retriever decorated with `@traceable`.
+* `src/taxcalc_ai/rerank.py` — `mmr_pick` (`lambda=0.7`) and `bge_rerank` against
+  `BAAI/bge-reranker-base` with a strict 300 ms timeout-and-fallback.
+* `src/taxcalc_ai/cache.py` — Redis semantic cache keyed by `(tenant_id, epoch,
+  quantised-embedding)`; `bump_epoch` per tenant on Airflow ingest completion.
+* `src/taxcalc_ai/dags/rag_svc_ingest.py` — TaskFlow API DAG (`load_docs` → `chunk_docs` →
+  `embed_chunks` → `upsert_chunks` → `bump_cache_epochs`).
+* `src/taxcalc_ai/rag.py` — the `retrieve_and_generate` entry point W7 D4's MCP server will
+  publish. `retrieve_chunks` is unchanged and stays; see below.
+* `src/taxcalc_ai/eval/run_ragas.py` — the six-column before-vs-after harness.
+* `tests/test_chunker.py`, `tests/test_hybrid_rrf.py`, `tests/test_rerank.py`,
+  `tests/test_semantic_cache.py`, `tests/test_tenant_isolation.py`, `tests/test_ragas_gate.py`.
+* `docs/ragas/w7d3.md` — the before-vs-after report. **Its cells read `n/m`, honestly:** no
+  evaluator credential exists in this environment, so the faithfulness gate skips and the
+  matrix was not measured. See the report for why fabricating numbers there would be worse
+  than leaving them absent.
+
+### How to run today's additions
+
+```bash
+cd taxcalc-ai
+uv sync                                                  # picks up the six new deps
+uv run pytest -v tests/test_chunker.py
+uv run pytest -v tests/test_hybrid_rrf.py                # Testcontainers pgvector
+uv run pytest -v tests/test_rerank.py                    # downloads bge-reranker-base once
+uv run pytest -v tests/test_semantic_cache.py            # Testcontainers Redis
+uv run pytest -v tests/test_tenant_isolation.py          # DB-side tenant assertion
+uv run pytest -v -m slow tests/test_ragas_gate.py        # needs an evaluator key
+uv run python -c "from taxcalc_ai.dags.rag_svc_ingest import taxcalc_ai_ingest_dag"
+uv run python -m taxcalc_ai.eval.run_ragas --matrix      # needs DSN + Redis + evaluator key
+```
+
+Behind a TLS-inspecting corporate proxy, `uv` needs `UV_SYSTEM_CERTS=1` (already documented) —
+and so does **huggingface_hub**, which `uv`'s flag does not cover. The reranker download fails
+with `CERTIFICATE_VERIFY_FAILED` until the system roots reach Python's TLS stack:
+
+```bash
+{ cat "$(uv run python -c 'import certifi;print(certifi.where())')"
+  security find-certificate -a -p /Library/Keychains/System.keychain
+  security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain
+} > /tmp/ca-bundle.pem
+REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem SSL_CERT_FILE=/tmp/ca-bundle.pem uv run pytest tests/test_rerank.py
+```
+
+Deliberately not baked into `pyproject.toml` or CI: GitHub runners do not need it, and a config
+that always trusts the system store is a config that hides a real certificate problem.
+
+### `retrieve_chunks` was NOT replaced, and that was a decision
+
+The deliverable describes `rag.py` as a rewrite. It is an extension instead. `retrieve_chunks`
+is the W7 D2 single-cosine baseline, and three things depend on it being still there:
+`scripts/assert_langsmith_run_visible.py` uses it as the cheapest possible proof that tracing
+works end to end; `docs/ragas/w7d3.md`'s baseline column is *defined* as its behaviour; and the
+four feature flags stay live for two weeks so a real-traffic regression can be A/B'd back to it.
+Replacing it in place would have deleted the thing the report is measured against and the thing
+a rollback rolls back to.
+
+### RRF, and the trap it exists to avoid
+
+`0.5 * cosine + 0.5 * bm25` is the obvious fusion and the wrong one. Cosine distance is bounded
+in `[0, 2]` and smaller is better; `ts_rank_cd` is unbounded, positive, corpus- and
+query-length-dependent, and larger is better. Any fixed weighting of the two is really a
+weighting of whichever scale happens to be larger *on this query*, so the blend's behaviour
+drifts with the corpus and with the query distribution, invisibly and with no plan change or
+error to notice. Rescaling each retriever's window to `[0, 1]` is not a fix either: it makes a
+document's value depend on what else came back, so one strong hit compresses everything behind
+it toward zero.
+
+RRF sums `weight / (k_const + rank)` and throws the scores away. Rank is the one quantity both
+retrievers produce on the same scale. `k_const = 60` stays at the paper value: the per-retriever
+weights encode "trust dense more than sparse on this corpus", which is a claim about data; `k`
+encodes "trust rank 1 more than rank 2", which is a claim about arithmetic. There is
+deliberately no rescaling helper in `hybrid.py`, and the gate greps for its absence — because
+that helper is exactly what somebody reaches for when RRF's output looks unfamiliar.
+
+### The rerank timeout measured the model load, and that was a real bug
+
+Found by `tests/test_rerank.py`'s lift test, which failed with `timed_out=True` against a
+reranker that was working perfectly. `_get_reranker()` is lazy, so the first call in any process
+constructs ~1.1 GB of weights — seconds of work, once. The clock started *before* that call, so
+the first rerank of every process breached the 300 ms budget and fell back to retrieval order.
+
+That is a cold-start artefact reported as a quality event. The `rerank_timeout` metric would
+spike on every deploy and every worker recycle, and an SRE alerting on it would be paged for a
+healthy system — the exact failure mode a soft-failing timeout is supposed to avoid, reintroduced
+by the instrumentation. The timer now starts after the model is in hand, so the budget measures
+the scoring; the load stays a startup cost, and the warm-up call belongs in W7 D4's server boot.
+
+### The timeout fails soft, and the check is post-hoc
+
+Two properties worth being explicit about, because both are compromises.
+
+**Fails soft.** Reranking improves an ordering that is already usable, so an overrun returns the
+retrieval-order top-k with `rerank_timed_out=True` rather than raising. Converting a slow
+reranker into a failed request is strictly worse for the user and is a self-inflicted outage
+when the model server is merely warm. The boolean is returned *and* attached to the active
+LangSmith span, so a caller that drops it still leaves the breach in the trace.
+
+**Post-hoc.** `CrossEncoder.predict` is a blocking PyTorch call with no cancellation seam, so
+the elapsed time is measured after it returns. This bounds *visibility*, not latency — a
+2-second rerank still takes 2 seconds, it is merely flagged. Genuinely capping the wall clock
+means putting the model behind a process boundary that can be abandoned (a subprocess, or an
+inference server with its own deadline), which is a deployment change rather than a code change.
+Stated rather than pretended, and the right next step once the metric shows it is needed.
+
+### The tenant assertion reads the database, not the request
+
+`tests/test_tenant_isolation.py` takes the chunk ids a `tenant-a` query returned, looks their
+`tenant_id` up **in `doc_chunks`**, and asserts every one is `tenant-a`. The version of this
+test that checks the returned rows against the `tenant_id` the caller passed in proves nothing —
+it compares a value to itself and passes against a retriever with no `WHERE` clause at all.
+
+The fixture is adversarial for the same reason: all three tenants are seeded with the *same*
+query-relevant sentence. Seed them with unrelated text and the dense search returns the right
+rows for the wrong reason. A second test asserts the trap is actually baited — that the
+unfiltered form of the same query really does return all three tenants.
+
+### The semantic cache has two layers, and the second one is supposed to be unreachable
+
+`tenant_id` is part of the Redis key, not a field inside the value, so two tenants cannot
+address the same slot. On top of that, `cache_lookup` re-checks on *every hit* that every
+citation in the stored answer carries the requesting tenant, and treats a mismatch as a miss.
+
+That check is redundant while the key is right. That is precisely why it is worth having: it is
+the assertion that survives someone refactoring the key format. A cache keyed on the embedding
+alone is a cross-tenant data leak with a hit-rate graph in front of it — and it is a leak that
+*improves* the metric it would be noticed by. `tests/test_semantic_cache.py` plants tenant A's
+payload directly under tenant B's own key, defeating layer one, and asserts layer two still
+refuses.
+
+### The epoch bump is the last task, and the ordering is the whole design
+
+Invalidating a tenant's cache means making every key for that tenant unreachable. Deleting them
+means scanning the keyspace: `KEYS` blocks the server, `SCAN` is a loop racing the writes it is
+chasing. Instead the epoch is a per-tenant counter embedded in the key, and `bump_epoch` is a
+single `INCR` — one atomic write invalidates a tenant's entire cache and cannot half-succeed.
+
+It runs **last**, only on success. Folded into `upsert_chunks` it would share a failure boundary
+with the write. Run *first* it would be worse: a failed upsert would leave the cache emptied and
+the corpus unchanged, so every subsequent question pays full price to rebuild answers identical
+to the ones just discarded. The TTL on each entry is the backstop for the case where the bump
+task never runs at all.
+
+### faithfulness is the gate; the other three metrics are diagnostics
+
+`tests/test_ragas_gate.py` raises `SystemExit` below `faithfulness = 0.85` and merely asserts
+the other three floors. Faithfulness measures whether the answer's claims are supported by the
+retrieved context, so a regression means the system is stating things the corpus does not say,
+to a user, in a tax product. The other three explain *why*: `context_precision` and
+`context_recall` blame the retrieval, `answer_relevancy` blames the drift. Gating on a
+diagnostic would block a PR that improved the outcome while moving a diagnostic sideways — which
+is exactly what MMR does (it removes redundancy, not irrelevance, so it can lift
+`answer_relevancy` while leaving `context_precision` flat).
+
+`SystemExit` rather than `assert` is about what a CI log shows: an assertion failure is one red
+test among many, while `SystemExit` terminates the step with the measured score on the last
+line. A second test, which needs no credentials and therefore runs everywhere, asserts the gate
+is strictly above the W7 D2 floor — so "thresholds tighten but never loosen" is enforced rather
+than commented.
+
+## AI authoring discipline (W7 D3 additions)
+
+Claude scaffolded the first cut of `hybrid.py`, `rerank.py` and `docs/ragas/w7d3.md`. Deviations
+from its output, with reasons:
+
+1. **Claude fused by blending scores.** The first `hybrid.py` scaffold ranked candidates by
+   `0.5 * cosine_similarity + 0.5 * normalised_bm25`, with a per-request min/max rescale of each
+   retriever's window to make the two comparable. Rejected: the two scales are not comparable and
+   rescaling makes a document's score depend on what else came back. Replaced with rank-based RRF
+   at `k_const=60`, and `hybrid.py` now carries no rescaling helper at all — the CI gate greps
+   for its absence, because that helper is what the next person reaches for when RRF's output
+   looks unfamiliar.
+2. **Claude wrote the timeout as a bare wall-clock check with no fallback semantics, and put the
+   clock around the model load.** Two corrections. The overrun now returns the retrieval order
+   with `rerank_timed_out=True` instead of raising, because reranking improves an ordering that
+   is already usable and a slow reranker must not become a failed request. And the clock starts
+   after `_get_reranker()`, because the lazy ~1.1 GB construction made the first rerank of every
+   process breach the budget — a cold-start artefact that would have spiked the
+   `rerank_timeout` metric on every deploy. Caught by a test, not by review.
+3. **Claude left `tenant_id` out of the cache key** and out of the citation payload, keying
+   purely on the quantised embedding. That is a cross-tenant leak whose symptom is an improved
+   cache hit rate. Both the key component and the defence-in-depth citation check were added, and
+   `tests/test_semantic_cache.py` plants a cross-tenant payload under the correct key to prove
+   the second layer works independently of the first.
+4. **Claude proposed query rewriting and HyDE** as additional recall upgrades. Declined: today's
+   scope is four named stages, and the deliverable explicitly excludes them. Adding a fifth
+   unmeasured stage to a pipeline whose before-vs-after report is not yet measurable would make
+   attribution impossible — which is the one thing `docs/ragas/w7d3.md` exists to provide.
+5. **Claude filled the report table with plausible numbers.** Its draft `w7d3.md` carried a
+   complete matrix (`faithfulness 0.82 → 0.89`, `context_precision +0.13`, and so on) and an
+   attribution paragraph written as fact. No evaluation had run and no evaluator credential
+   exists here. Replaced with `n/m` in every cell plus an explicit "NOT MEASURED" section: that
+   table is the artefact a later day consults to decide whether the reranker earns its latency,
+   and a fabricated `+0.13` is not a placeholder, it is a wrong decision input in a document
+   whose purpose is to be trusted. The mechanism paragraphs were kept but relabelled as
+   expectations to be tested.
+
 ## What this sidecar does NOT do (yet)
 
 * Production RAG retrieval strategy (re-ranking, hybrid search) — W7 D3. The `doc_chunks` table

@@ -86,6 +86,19 @@ exclude = ["build/", "dist/"]
 module = ["datasets.*"]
 ignore_missing_imports = true
 
+# Airflow's TaskFlow decorators (@dag, @task) are untyped: they return a `DecoratedOperator`
+# factory built through **kwargs, so --strict's disallow_untyped_decorators reports every
+# decorated task as "untyped". There is nothing this project can do about it short of not using
+# the TaskFlow API, and the alternative - `# type: ignore[untyped-decorator]` on each of the six
+# decorated definitions - hides the same fact in six places instead of stating it once.
+#
+# SCOPED TO THE DAG PACKAGE ONLY. Every other module, including the ones the DAG's tasks call
+# into, is still checked with decorators enforced; the exemption buys nothing outside
+# taxcalc_ai.dags, where the only decorators are Airflow's own.
+[[tool.mypy.overrides]]
+module = ["taxcalc_ai.dags.*"]
+disallow_untyped_decorators = false
+
 [tool.pydantic-mypy]
 init_typed = true
 warn_required_dynamic_aliases = true
@@ -110,6 +123,7 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20"]
 # Operator/CI entrypoints report their verdict on stdout and exit with a status code; a gate
 # whose output only reached a log handler would be invisible in the Actions UI.
 "src/taxcalc_ai/scripts/*.py" = ["T20"]
+"src/taxcalc_ai/eval/*.py" = ["T20"]  # the eval harness prints its table
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"

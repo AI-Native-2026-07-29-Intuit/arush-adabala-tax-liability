@@ -453,3 +453,61 @@ def test_chunk_metadata_round_trips_as_jsonb_and_is_containment_queryable(pg_dsn
         )
         unmatched = cur.fetchone()
         assert unmatched is not None and int(unmatched[0]) == 0
+
+
+def test_embed_pending_embeds_only_the_gate_survivors_and_is_a_no_op_on_a_re_run(
+    pg_dsn: str,
+) -> None:
+    """``embed_pending`` is the function the Airflow DAG calls; it writes once, then nothing.
+
+    The zero-return on the second call is the whole value of the gate, and it is a *success*
+    case rather than a failure: a re-ingest of an unchanged corpus should cost one SELECT. The
+    first call's return being the candidate count proves the gate is not over-eager in the
+    other direction either - a gate that skipped a genuinely new chunk would be silent data
+    loss.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    from taxcalc_ai.embedder import embed_pending
+
+    tenant = "tenant-embed-pending"
+    model = SentenceTransformer(MODEL_NAME)
+    candidates = [
+        ChunkCandidate(
+            doc_id=f"{tenant}-doc-000",
+            chunk_idx=i,
+            chunk_text=f"Marginal bracket band number {i} applies above its own threshold.",
+            tenant_id=tenant,
+            chunk_metadata={"suite": "embed-pending"},
+        )
+        for i in range(3)
+    ]
+
+    assert embed_pending(pg_dsn, candidates, model=model) == 3
+    assert _count_for(pg_dsn, tenant) == 3
+    # The gate short-circuits before the model is even consulted, so this call does no encoding.
+    assert embed_pending(pg_dsn, candidates, model=model) == 0
+    assert _count_for(pg_dsn, tenant) == 3
+
+    # One chunk's text moves: exactly one row is re-embedded and rewritten, the count is stable.
+    revised = [*candidates[:2], replace(candidates[2], chunk_text="Revised band text.")]
+    assert embed_pending(pg_dsn, revised, model=model) == 1
+    assert _count_for(pg_dsn, tenant) == 3
+
+    with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT chunk_text, content_hash, chunk_metadata FROM doc_chunks "
+            "WHERE tenant_id = %s AND chunk_idx = 2",
+            (tenant,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "Revised band text."
+        # The hash was refreshed alongside the text. If it were not, every later ingest would
+        # skip this row forever and serve a vector for text the corpus no longer contains.
+        assert row[1] == content_hash("Revised band text.")
+        assert row[2] == {"suite": "embed-pending"}
+
+    # And an empty candidate list is a no-op rather than an error: a corpus whose rows were all
+    # filtered out is a legitimate outcome of load_corpus.
+    assert embed_pending(pg_dsn, [], model=model) == 0

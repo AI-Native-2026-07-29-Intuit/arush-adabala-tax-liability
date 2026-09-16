@@ -19,6 +19,7 @@ from typing import Final
 
 import psycopg
 import pytest
+import redis
 from _pytest.terminal import TerminalReporter
 
 # Set BEFORE taxcalc_ai.rag is imported anywhere: that module raises at import time on a missing
@@ -198,6 +199,42 @@ def pg_dsn() -> Iterator[str]:
             for statement in _split_statements(DDL_V002_PATH.read_text()):
                 cur.execute(statement)
         yield dsn
+
+
+# ---- Redis container, shared by the cache tests and the pipeline test ------------------------
+#
+# Session-scoped and declared here for the same reason pg_dsn is: two modules want one Redis,
+# and a fixture defined inside a test module is invisible to the other one.
+
+
+@pytest.fixture(scope="session")
+def redis_client() -> Iterator[redis.Redis]:
+    """Spin a Redis container for the session and yield a client against it.
+
+    Readiness is established with a real ``PING`` rather than a port check: the container's port
+    is bound before the server finishes loading, so a TCP handshake succeeds against a server
+    that will refuse the next command.
+    """
+    # testcontainers.community.redis, not testcontainers.redis: the short path is a deprecation
+    # shim in testcontainers 4.x, and this project's filterwarnings=error policy makes the shim
+    # fail at collection rather than at runtime.
+    from testcontainers.community.redis import RedisContainer
+
+    with RedisContainer("redis:7-alpine") as container:
+        client: redis.Redis = redis.Redis(
+            host=container.get_container_host_ip(),
+            port=int(container.get_exposed_port(6379)),
+            db=0,
+        )
+        for _ in range(60):
+            try:
+                client.ping()
+                break
+            except redis.ConnectionError:  # not accepting commands yet
+                time.sleep(0.5)
+        else:
+            raise AssertionError("redis never became ready")
+        yield client
 
 
 # ---- CI visibility: a skipped gate must not read as a gate that passed -----------------------
