@@ -9,6 +9,12 @@ dependencies = [
     "pydantic-settings>=2.3",
     "httpx>=0.27",
     "tenacity>=8.3",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "sentence-transformers>=3.0",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    "langsmith>=0.1.80",
 ]
 
 [dependency-groups]
@@ -19,6 +25,27 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.5",
     "respx>=0.21",
+    # Unpinned at the top end deliberately, and the 0.4 surface was checked rather than assumed.
+    # ragas 0.4 deprecates the metric SINGLETONS (`from ragas.metrics import faithfulness` warns
+    # and, under this project's filterwarnings=error policy, fails), but not the metric CLASSES:
+    # importing Faithfulness/AnswerRelevancy/ContextPrecision/ContextRecall from their concrete
+    # modules is warning-free and still yields `isinstance(..., Metric)` objects that `evaluate()`
+    # accepts. tests/test_ragas_thresholds.py takes that path, so no version ceiling and no
+    # warning exemptions are needed.
+    #
+    # The `ragas.metrics.collections` rewrite is the eventual destination but is NOT a drop-in:
+    # those metrics subclass BaseMetric, which `evaluate()` does not accept, and they require an
+    # InstructorBaseRagasLLM from llm_factory rather than a LangchainLLMWrapper. That is a rewrite
+    # of the evaluation loop, not an import swap, and it is not worth doing blind while the
+    # evaluator workspace is spend-capped and the result cannot be validated end to end.
+    "ragas>=0.1.10",
+    "great-expectations>=0.18",
+    "testcontainers[postgres]>=4.7",
+    "langchain-community<0.4",
+    "pandas-stubs>=3.0.5.260914",
+    "langchain-anthropic>=0.2",
+    "anthropic>=0.40",
+    "langchain-huggingface>=0.1",
 ]
 
 [tool.uv]
@@ -43,6 +70,18 @@ warn_return_any = true
 warn_unused_ignores = true
 exclude = ["build/", "dist/"]
 
+# `datasets` ships no py.typed marker, so --strict refuses the import outright rather than
+# treating it as Any. Scoped to that one package tree: a blanket ignore_missing_imports would
+# switch the same protection off for every third-party package, including the ones that DO ship
+# types - pandas via pandas-stubs, numpy, psycopg, pgvector, sentence-transformers, langsmith,
+# great-expectations.
+#
+# `ragas` used to need the same exemption and no longer does: 0.4 ships py.typed, so it is now
+# type-checked for real rather than waved through.
+[[tool.mypy.overrides]]
+module = ["datasets.*"]
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_typed = true
 warn_required_dynamic_aliases = true
@@ -50,6 +89,12 @@ warn_required_dynamic_aliases = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Markdown is excluded because recent ruff formats Python code blocks inside .md files, and
+# PROMPT_JOURNAL.md's blocks are VERBATIM transcripts of what Claude produced - including its
+# line breaks. Reformatting them would rewrite the evidence the journal exists to preserve:
+# a record of AI output that has been tidied is no longer a record of AI output. PYTHON.md
+# quotes the same scaffolds for the same reason. Python in src/ and tests/ is unaffected.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 # E,F default; UP for pyupgrade; B for bugbear; SIM for simplify; I for isort.
@@ -58,9 +103,17 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/taxcalc_ai/cli.py" = ["T20"]  # the CLI is allowed to print()
+# Operator/CI entrypoints report their verdict on stdout and exit with a status code; a gate
+# whose output only reached a log handler would be invisible in the Actions UI.
+"src/taxcalc_ai/scripts/*.py" = ["T20"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"
+# --strict-markers means an unregistered marker is an error, so `slow` is declared here rather
+# than typo'd into silence at the one call site that uses it.
+markers = [
+    "slow: makes real network calls to an evaluator model; opt out locally with -m 'not slow'",
+]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
@@ -68,4 +121,50 @@ filterwarnings = [
     # secrets_dir points at the Kubernetes mount path, which does not exist on a laptop or on
     # a CI runner. The warning is correct and expected off-cluster; it is not a test failure.
     'ignore:directory "/run/secrets" does not exist:UserWarning',
+    # great-expectations 1.x imports the stdlib `sre_constants`, deprecated since 3.11. It is
+    # raised inside GX's own import chain, so no amount of care in this project's code avoids
+    # it; the only alternatives are turning the whole filterwarnings=error policy off or not
+    # importing GX. Scoped to the message so the policy holds everywhere else.
+    # `sre_constants` and `sre_parse` are both pulled in by that same import chain.
+    "ignore:module 'sre_.*' is deprecated:DeprecationWarning",
+    # great-expectations' ephemeral context creates a TemporaryDirectory for a docs site and
+    # never disposes of it; the GC cleans it up and the warning fires at teardown. It is GX's
+    # own object, created inside get_context(), with no handle exposed to close it.
+    #
+    # Note what is NOT exempted here: the pooled SQLAlchemy connections behind GX's Postgres
+    # data source leaked the same way, and that one the tests fix rather than silence - see the
+    # `data_source.get_engine().dispose()` in tests/test_great_expectations_suite.py. A leak
+    # this project can close gets closed; only the one it cannot reach is ignored.
+    "ignore:Implicitly cleaning up <TemporaryDirectory:ResourceWarning",
+    # ragas/_analytics.py does `json.load(open(uuid_filepath))` - an unclosed handle - inside an
+    # lru_cache'd get_userid(), which is a pydantic default_factory on its event model. It runs
+    # while the event object is BUILT, before track() consults RAGAS_DO_NOT_TRACK, so disabling
+    # telemetry (which tests/conftest.py does anyway, for egress reasons) does not avoid it.
+    # There is no seam to close the file from: it is an open() inside a cached function in a
+    # dependency.
+    'ignore:unclosed file .*ragas.*uuid\.json:ResourceWarning',
+    # ragas 0.4 deprecates the two legacy LangChain wrappers. They are kept deliberately: the
+    # modern replacements are not drop-ins for the `evaluate()` path (llm_factory returns an
+    # InstructorLLM, which evaluate() does not accept; the modern embedding provider exposes
+    # embed_text/embed_texts where the old metrics call embed_query/embed_documents). The
+    # reasoning, and the fact that both were checked against 0.4.3 rather than assumed, is in
+    # tests/test_ragas_thresholds.py. Scoped to the two exact messages so every other
+    # DeprecationWarning - including any future ragas one - still fails the build.
+    "ignore:LangchainLLMWrapper is deprecated:DeprecationWarning",
+    "ignore:LangchainEmbeddingsWrapper is deprecated:DeprecationWarning",
+    # And `evaluate()` itself, for the same reason and on the same terms. Its replacement is the
+    # @experiment decorator, which is a different execution model - it owns the dataset loop and
+    # returns per-row results rather than an aggregate - so adopting it rewrites this test
+    # rather than renaming a call. That rewrite cannot be validated while the evaluator
+    # workspace is spend-capped and every metric comes back NaN.
+    #
+    # This one is easy to miss locally and was: the two wrapper warnings above fire while the
+    # evaluator is CONSTRUCTED, which a construction-only check catches. This fires inside the
+    # call, after construction, on the line that does the work - so only a run that actually
+    # reaches evaluate() sees it. That is why the whole -m slow path is exercised before this
+    # list is called complete, rather than the import path alone.
+    # `a?` covers both: evaluate() delegates to aevaluate(), and each warns on its own way in.
+    # filterwarnings matches the message from the START, so a pattern beginning "evaluate" does
+    # NOT match "aevaluate() is deprecated" - which is how the second one survived the first fix.
+    'ignore:a?evaluate\(\) is deprecated:DeprecationWarning',
 ]

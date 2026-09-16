@@ -53,7 +53,7 @@ jobs:
     # runner image changes silently is a gate that can go red for reasons that
     # have nothing to do with the diff.
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: taxcalc-ai
@@ -96,4 +96,69 @@ jobs:
         run: uv run mypy --strict src/ tests/
 
       - name: pytest with coverage
-        run: uv run pytest -v --cov=src --cov-fail-under=85
+        # -m "not slow" excludes the RAGAS evaluation, and --ignore excludes the Great
+        # Expectations suite; both run as their own steps below, with the credentials they need
+        # in scope. Running them here as well would double the judging spend and the container
+        # work, and would make this step's failure ambiguous between "a unit test broke",
+        # "answer quality regressed" and "the data contract broke" - three different problems
+        # for three different people. Coverage is unaffected: measured both ways it is 90%,
+        # because the modules the GX suite exercises are already covered by the loader tests.
+        run: >
+          uv run pytest -v -m "not slow"
+          --ignore=tests/test_great_expectations_suite.py
+          --cov=src --cov-fail-under=85
+
+      # ----- W7 D2: the three data + AI-observability gate steps -----------------------------
+      #
+      # All three run in THIS job rather than a new one, deliberately. They need the same uv
+      # environment the steps above built, and a separate job would re-resolve, re-download the
+      # ~80 MB sentence-transformers model, and re-pull the pgvector image to check three
+      # assertions. A single job also means a failure pinpoints the exact gate in the step list.
+      #
+      # Every credential arrives from secrets.* and none appears in the tree. The CI LangSmith
+      # project is taxcalc-ai-dev-ci, NOT taxcalc-ai-dev: gate runs upload a trace on every
+      # push, and mixing that volume into the project an engineer reads while debugging is how
+      # a trace view stops being useful.
+
+      - name: Great Expectations checkpoint (Testcontainers Postgres + pgvector)
+        # ubuntu-24.04 runners ship a running Docker daemon, which is what Testcontainers needs;
+        # no services: block is required because the container is started by the test itself.
+        run: uv run pytest -v tests/test_great_expectations_suite.py
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: taxcalc-ai-dev-ci
+          # Tracing off for this step: it validates data, and its traces would be noise.
+          LANGSMITH_TRACING: "false"
+
+      - name: RAGAS golden-set thresholds
+        run: uv run pytest -v -m slow tests/test_ragas_thresholds.py
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: taxcalc-ai-dev-ci
+          LANGSMITH_TRACING: "true"
+          # RAGAS judges answers rather than producing them, so the evaluator may be a smaller
+          # and cheaper model than production.
+          ANTHROPIC_API_KEY: ${{ secrets.TAXCALC_AI_ANTHROPIC_API_KEY }}
+          # No unsolicited telemetry to a third party on every build. Also removes the unclosed
+          # file handle RAGAS's analytics module leaks, which this project's warnings-as-errors
+          # policy would otherwise fail the run on.
+          RAGAS_DO_NOT_TRACK: "true"
+
+      - name: Assert a LangSmith run is visible for a sample retrieval
+        # The only step that proves tracing WORKS rather than that the decorator is written.
+        #
+        # One command, and the same one a developer runs locally. This step used to be thirty
+        # lines of inline Python that started a pgvector container, applied the DDL, embedded
+        # the seed corpus and exported the DSN before handing off to the checker - none of which
+        # was type-checked, linted or covered, and all of which meant the documented invocation
+        # did not work anywhere but here. That provisioning now lives inside the script, where
+        # tests/test_assert_langsmith_run_visible.py can reach it.
+        #
+        # LANGSMITH_TRACING is still pinned explicitly rather than left to the script's default:
+        # what CI traces should be a property of the pipeline, stated where the pipeline can be
+        # read, not inherited from a fallback inside a module.
+        run: uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: taxcalc-ai-dev-ci
+          LANGSMITH_TRACING: "true"
