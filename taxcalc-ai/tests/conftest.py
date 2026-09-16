@@ -15,9 +15,11 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 import psycopg
 import pytest
+from _pytest.terminal import TerminalReporter
 
 # Set BEFORE taxcalc_ai.rag is imported anywhere: that module raises at import time on a missing
 # LANGSMITH_API_KEY (see its docstring - a credential discovered on the first retrieval is
@@ -168,3 +170,101 @@ def pg_dsn() -> Iterator[str]:
                 cur.execute(DDL_PATH.read_text())
             conn.commit()
         yield dsn
+
+
+# ---- CI visibility: a skipped gate must not read as a gate that passed -----------------------
+#
+# pytest reports a skip as a non-failure, and GitHub Actions reports a step that exited 0 as a
+# green check. Compose those two and a gate that evaluated NOTHING renders identically to one
+# that evaluated everything and was satisfied - which is exactly the state the RAGAS threshold
+# step is in while the evaluator workspace is spend-capped, and exactly the state a reviewer
+# scanning the checks list cannot distinguish from a measured baseline.
+#
+# The honest fix is not to turn the skip into a failure: the credential is un-buyable until the
+# cap lifts, and a permanently-red required step teaches people to ignore it. It is to make the
+# skip VISIBLE at the layer the reviewer is actually looking at - a workflow annotation on the
+# run and a line in the job summary - so "green" still means "nothing is broken" while the
+# summary says, in the reviewer's eyeline, which floors went unmeasured.
+#
+# Local runs are untouched: `-ra` already prints skip reasons to a developer who is watching the
+# output scroll past. This exists for the reader who only ever sees the checkmark.
+
+#: Set to "true" on every GitHub-hosted runner. Absent everywhere else, which is what keeps the
+#: annotation syntax out of a developer's terminal.
+_GITHUB_ACTIONS_ENV: Final[str] = "GITHUB_ACTIONS"
+
+#: Path to the markdown file whose contents become the job summary panel on the run page.
+_STEP_SUMMARY_ENV: Final[str] = "GITHUB_STEP_SUMMARY"
+
+#: Prefix pytest puts on the reason it stores in a skipped report's ``longrepr``.
+_SKIP_PREFIX: Final[str] = "Skipped: "
+
+#: Collected across the session and emitted once at the end, rather than written as each skip
+#: happens: ``pytest_runtest_logreport`` fires while pytest's output capture is active, so a
+#: workflow command written there can be swallowed. ``pytest_terminal_summary`` runs after
+#: capture has been torn down, which is the only point the annotation reliably reaches stdout.
+_skipped_tests: Final[list[tuple[str, str]]] = []
+
+
+def _escape_annotation(text: str) -> str:
+    """Encode ``text`` for a ``::warning::`` workflow command.
+
+    Actions parses these line by line, so a reason containing a newline would truncate the
+    annotation at the break and leave the remainder on stdout as stray text. The three
+    substitutions are the ones the workflow-command format defines; ``%`` goes first, because
+    doing it after the others would re-encode the ``%`` they just introduced.
+    """
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _skip_reason(report: pytest.TestReport) -> str:
+    """Pull the human-readable reason out of a skipped report.
+
+    A skip's ``longrepr`` is a ``(path, lineno, "Skipped: <reason>")`` triple rather than a
+    traceback object. The prefix is stripped because it is pytest's own framing, and the
+    annotation supplies its own.
+    """
+    longrepr = report.longrepr
+    reason = longrepr[2] if isinstance(longrepr, tuple) else str(longrepr)
+    return reason.removeprefix(_SKIP_PREFIX).strip()
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Record every skip, wherever in the test's lifecycle it was raised.
+
+    Both phases matter and neither duplicates the other: a ``skipif`` decorator skips during
+    setup, while a ``pytest.skip()`` inside the body skips during the call. The RAGAS gate can
+    do either - no credential at all takes the first path, a credential whose workspace is
+    capped takes the second - and a hook that watched only one phase would miss half the ways
+    that gate goes quiet.
+    """
+    # An xfailed test is also reported as "skipped" but carries `wasxfail`. It is a recorded
+    # expectation rather than an unrun check, so it is not what this is warning about.
+    if not report.skipped or hasattr(report, "wasxfail"):
+        return
+    _skipped_tests.append((report.nodeid, _skip_reason(report)))
+
+
+def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
+    """On a GitHub runner, re-report the session's skips as annotations and a summary block.
+
+    Written through the terminal reporter rather than ``print``: it is the writer pytest itself
+    uses for the summary section, so the lines land on the step's real stdout in order, which is
+    what the Actions log parser reads workflow commands from.
+    """
+    if not _skipped_tests or os.environ.get(_GITHUB_ACTIONS_ENV) != "true":
+        return
+
+    for nodeid, reason in _skipped_tests:
+        terminalreporter.write_line(
+            f"::warning title=Skipped (not evaluated): {nodeid}::{_escape_annotation(reason)}"
+        )
+
+    summary_path = os.environ.get(_STEP_SUMMARY_ENV)
+    if not summary_path:
+        return
+    lines = ["", "### :warning: Tests skipped - these checks did not run", ""]
+    lines += [f"- `{nodeid}` - {reason}" for nodeid, reason in _skipped_tests]
+    lines.append("")
+    with Path(summary_path).open("a", encoding="utf-8") as summary:
+        summary.write("\n".join(lines))

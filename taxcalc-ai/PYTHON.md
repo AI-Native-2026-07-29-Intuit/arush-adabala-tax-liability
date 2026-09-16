@@ -282,9 +282,43 @@ uv sync                                               # picks up the eight new d
 uv run pytest -v tests/test_corpus.py
 uv run pytest -v tests/test_pgvector_loader.py        # needs a running Docker daemon
 uv run pytest -v tests/test_great_expectations_suite.py
-uv run pytest -v -m slow tests/test_ragas_thresholds.py   # needs ANTHROPIC_API_KEY
-uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LangSmith creds
+uv run pytest -v -m slow tests/test_ragas_thresholds.py   # needs an evaluator key (below)
+uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LANGSMITH_API_KEY
 ```
+
+The last two read their credentials as follows, and both skip or fail clearly without them
+rather than passing quietly:
+
+* The RAGAS gate accepts `ANTHROPIC_API_KEY` or `TAXCALC_AI_ANTHROPIC_API_KEY`, from the
+  environment or from the gitignored `.env` (the `replace-me-` placeholder in `.env.example` is
+  not treated as a key). A skip means the four floors are **declared, not measured**.
+
+### A skipped gate must not read as a gate that passed
+
+pytest reports a skip as a non-failure and GitHub Actions reports a step that exited 0 as a green
+check, so a threshold gate that evaluated *nothing* renders exactly like one that evaluated
+everything and was satisfied. That is the state the RAGAS step is in while the evaluator
+workspace is spend-capped, and it is indistinguishable, from the checks list, from a measured
+baseline.
+
+Making the skip a failure was the wrong fix. The credential cannot be bought until the cap lifts,
+and a step that is permanently red is a step people learn to scroll past — which loses the signal
+for real regressions later in the week, when this gate is the only thing standing between a
+retrieval change and a silent quality drop.
+
+Instead `tests/conftest.py` re-reports every skip at the layer the reviewer actually looks at:
+a `::warning` annotation on the run and a **"Tests skipped — these checks did not run"** block in
+the job summary, naming each test and its reason. Green still means "nothing is broken"; the
+summary says which floors went unmeasured, in the reviewer's eyeline rather than forty lines into
+a step log. It is active only when `GITHUB_ACTIONS=true`, so local output is unchanged — `-ra`
+already tells a developer watching the run. `tests/test_ci_skip_annotations.py` covers it,
+including the newline escaping, because a truncated annotation fails silently in precisely the
+situation the annotation exists for.
+* The LangSmith gate needs only `LANGSMITH_API_KEY`. It brings its own database: with no
+  `TAXCALC_AI_PG_DSN` set it starts a throwaway pgvector container, applies the DDL, embeds the
+  seed corpus, fires one traced retrieval and asks LangSmith whether the run arrived. It
+  defaults `LANGSMITH_PROJECT` to `taxcalc-ai-dev-ci` and `LANGSMITH_TRACING` to `true`, so the
+  project it uploads to is the project it queries; setting either explicitly always wins.
 
 Four invariants worth stating once:
 
