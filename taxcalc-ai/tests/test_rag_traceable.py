@@ -32,6 +32,8 @@ from taxcalc_ai.corpus import EMBEDDING_DIM, MODEL_NAME, CorpusRow
 from taxcalc_ai.pgvector_loader import load_rows
 from taxcalc_ai.rag import RETRIEVER_RUN_NAME, retrieve_chunks
 
+from .conftest import SUITE_LANGSMITH_API_KEY
+
 
 def _traceable_config(func: object) -> dict[str, object]:
     """Read the ``@traceable`` settings back off the decorated function.
@@ -92,7 +94,7 @@ def test_importing_rag_without_a_langsmith_key_fails_at_boot(
         with pytest.raises(RuntimeError, match=rag_module.LANGSMITH_API_KEY_ENV):
             importlib.reload(rag_module)
     finally:
-        monkeypatch.setenv(rag_module.LANGSMITH_API_KEY_ENV, "lsv2_test_not_a_real_key")
+        monkeypatch.setenv(rag_module.LANGSMITH_API_KEY_ENV, SUITE_LANGSMITH_API_KEY)
         importlib.reload(rag_module)
 
 
@@ -107,8 +109,12 @@ def test_the_api_key_is_never_a_parameter_or_a_default() -> None:
 
     names = [p.lower() for p in signature.parameters]
     assert not any("key" in n or "secret" in n or "token" in n for n in names), names
+    # Assembled from parts, for the same reason the check in
+    # test_retrieval_reads_its_credential_from_the_environment_only is: this file must not
+    # itself become a hit for the secret sweep whose usefulness it exists to defend.
+    key_prefix = "lsv" + "2_"
     assert all(
-        param.default is inspect.Parameter.empty or "lsv2" not in str(param.default)
+        param.default is inspect.Parameter.empty or key_prefix not in str(param.default)
         for param in signature.parameters.values()
     )
 
@@ -221,6 +227,6 @@ def test_retrieval_reads_its_credential_from_the_environment_only() -> None:
     # Assembled from parts on purpose: a test that contains the literal prefix would itself
     # be a hit for the repo-wide `grep -RIn` secret scan the CI gate runs, so the check and
     # the gate would contradict each other.
-    langsmith_key_prefix = "lsv2" + "_pt_"
+    langsmith_key_prefix = "ls" + "v2_pt_"
     assert langsmith_key_prefix not in source
     assert "os.environ" in source

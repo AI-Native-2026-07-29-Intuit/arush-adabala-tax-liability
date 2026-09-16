@@ -24,7 +24,16 @@ import pytest
 # discovered in production). conftest is imported before any test module, which makes this the
 # one place the value can be in place in time. `setdefault`, so a developer running against a
 # real LangSmith workspace keeps their own key.
-os.environ.setdefault("LANGSMITH_API_KEY", "lsv2_test_not_a_real_key")
+#
+# The stand-in value deliberately bears NO resemblance to a real LangSmith key: a fixture
+# carrying the vendor's own key prefix is a hit for any repo-wide secret sweep, and a scan that
+# returns known-harmless matches is a scan reviewers learn to skim. That prefix earns its
+# meaning by appearing nowhere in this tree except the pattern of the grep that hunts for it.
+#
+# Written as a literal rather than as a named constant on purpose: ruff's E402 tolerates
+# environment setup ahead of the imports below but not an assignment, and the constant that
+# other modules import is therefore defined after them.
+os.environ.setdefault("LANGSMITH_API_KEY", "langsmith-test-not-a-real-key")
 # Tracing OFF for the suite. With it on, every test that touches retrieve_chunks would upload a
 # run to somebody's real project using the fake key above, and fail slowly on auth rather than
 # quickly on the assertion under test.
@@ -39,6 +48,13 @@ os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 from taxcalc_ai.models import Liability, LiabilityEstimateRequest, Taxpayer
 from taxcalc_ai.settings import TaxcalcAiSettings
+
+#: The LangSmith credential the suite is actually running with - the stand-in set above, or a
+#: developer's real key when one was already in the environment. Read back rather than
+#: re-declared so that a test which has to remove and restore the variable (see
+#: test_rag_traceable.py's import-time check) puts back what was there, instead of replacing a
+#: working key with a placeholder for every test that follows it.
+SUITE_LANGSMITH_API_KEY = os.environ["LANGSMITH_API_KEY"]
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
