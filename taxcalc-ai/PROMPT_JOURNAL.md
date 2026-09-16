@@ -424,8 +424,7 @@ that nobody had to argue with.
 
 The trade was made knowingly: three full pastes run to several thousand lines, of which the
 reviewable content is the handful of places Claude and the committed code disagree, and burying
-those is the failure mode a journal exists to prevent. If a raw paste is required, the sessions
-are recoverable from the Claude Code transcripts for 2026-09-15 and can be appended wholesale.
+those is the failure mode a journal exists to prevent.
 
 ---
 
