@@ -9,11 +9,33 @@ test cannot leak configuration into the next.
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import psycopg
 import pytest
+
+# Set BEFORE taxcalc_ai.rag is imported anywhere: that module raises at import time on a missing
+# LANGSMITH_API_KEY (see its docstring - a credential discovered on the first retrieval is
+# discovered in production). conftest is imported before any test module, which makes this the
+# one place the value can be in place in time. `setdefault`, so a developer running against a
+# real LangSmith workspace keeps their own key.
+os.environ.setdefault("LANGSMITH_API_KEY", "lsv2_test_not_a_real_key")
+# Tracing OFF for the suite. With it on, every test that touches retrieve_chunks would upload a
+# run to somebody's real project using the fake key above, and fail slowly on auth rather than
+# quickly on the assertion under test.
+os.environ.setdefault("LANGSMITH_TRACING", "false")
+# RAGAS ships usage telemetry that is on by default. Two reasons this is off here, and the
+# second is the one that matters: it leaks an unclosed handle on its uuid.json under
+# `_analytics.py`, which surfaces as a ResourceWarning at teardown and fails the run under this
+# project's filterwarnings=error policy - and, more importantly, a work repository's CI should
+# not be making unsolicited outbound calls to a third party on every build. Disabling it fixes
+# the leak by removing the code path rather than by exempting its warning.
+os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 from taxcalc_ai.models import Liability, LiabilityEstimateRequest, Taxpayer
 from taxcalc_ai.settings import TaxcalcAiSettings
@@ -75,3 +97,58 @@ def taxpayer() -> Taxpayer:
 def estimate_request(taxpayer: Taxpayer) -> LiabilityEstimateRequest:
     """A valid request envelope wrapping the ``taxpayer`` fixture."""
     return LiabilityEstimateRequest(correlation_id="corr-w7d1-0001", taxpayer=taxpayer)
+
+
+# ---- Postgres + pgvector container, shared by every test module that needs one ---------------
+#
+# Session-scoped and declared here rather than in one test module, because three modules want
+# the same database: the loader tests, the retrieval tests, and the Great Expectations suite.
+# A fixture defined inside a test module is not visible to the others, so each would spin its
+# own container - three image pulls and three initdbs for one database's worth of work.
+
+#: The sidecar's own DDL. Applied by the fixture below; idempotent, so re-application is free.
+DDL_PATH = Path(__file__).resolve().parent.parent / "sql" / "V001__doc_chunks.sql"
+
+
+def _await_ready(dsn: str, attempts: int = 60, delay_seconds: float = 0.5) -> None:
+    """Block until the container accepts a real connection, not just a TCP handshake.
+
+    The official Postgres entrypoint starts a temporary server for ``initdb``, shuts it down,
+    then starts the real one - so "database system is ready to accept connections" appears in
+    the logs twice, and a port that was open a moment ago refuses the next connection. Waiting
+    on a successful ``SELECT 1`` is the only check that spans that gap; without it the suite
+    fails intermittently, on whichever test happens to run first.
+    """
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            with psycopg.connect(dsn, connect_timeout=2) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return
+        except psycopg.OperationalError as exc:  # not ready yet - the initdb restart window
+            last = exc
+            time.sleep(delay_seconds)
+    raise AssertionError(f"postgres never became ready at {dsn}") from last
+
+
+@pytest.fixture(scope="session")
+def pg_dsn() -> Iterator[str]:
+    """Spin a Postgres + pgvector container for the session and apply the sidecar's DDL.
+
+    Yields a psycopg3-compatible DSN. ``get_connection_url()`` returns a SQLAlchemy-style
+    ``postgresql+psycopg2://`` URL; psycopg3 does not understand the driver suffix, so it is
+    stripped here rather than at each call site.
+    """
+    # testcontainers.community.postgres, not testcontainers.postgres: the short path is a
+    # deprecation shim in testcontainers 4.x, and this project's pytest config turns warnings
+    # into errors, so the shim fails at collection rather than at runtime.
+    from testcontainers.community.postgres import PostgresContainer
+
+    with PostgresContainer("pgvector/pgvector:pg16") as pg:
+        dsn = pg.get_connection_url().replace("postgresql+psycopg2", "postgresql")
+        _await_ready(dsn)
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(DDL_PATH.read_text())
+            conn.commit()
+        yield dsn
