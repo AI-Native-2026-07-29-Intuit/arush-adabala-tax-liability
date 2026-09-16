@@ -39,8 +39,10 @@ batch_size=...)`` call over the whole column is the same result, an order of mag
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
@@ -72,6 +74,32 @@ REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: Hash algorithm behind :func:`content_hash`. SHA-256 rather than a faster non-cryptographic
+#: digest not for security - nobody is attacking a chunk hash - but because the value is stored,
+#: compared across processes and across machines, and persisted for the life of the corpus. A
+#: hash with a realistic collision rate would make the idempotency gate skip an embed for a
+#: chunk whose text had genuinely changed, which is a silent stale-vector bug.
+CONTENT_HASH_ALGORITHM: Final[str] = "sha256"
+
+
+def content_hash(text: str) -> str:
+    """Hash a chunk's text for the idempotent re-embed gate.
+
+    The hash is what lets W7 D3's ingest skip the model call for an unchanged chunk. The
+    ``ON CONFLICT DO UPDATE`` clause in :mod:`taxcalc_ai.pgvector_loader` already made the
+    *write* idempotent; it does not make it cheap, because the embedding it overwrites the old
+    one with had to be computed first. Comparing this hash against the stored one turns a
+    re-ingest of an unchanged corpus from "pay for every vector again" into a single SELECT.
+
+    UTF-8 is encoded explicitly rather than relying on a platform default, so the same text
+    hashes identically on a developer's laptop and on a CI runner.
+
+    :param text: The chunk text, exactly as it will be stored in ``doc_chunks.chunk_text``.
+    :returns: Lowercase hex digest, 64 characters.
+    """
+    return hashlib.new(CONTENT_HASH_ALGORITHM, text.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class CorpusRow:
     """One chunk plus its embedding, ready for a pgvector insert.
@@ -92,6 +120,15 @@ class CorpusRow:
     :param model_version: The model that produced ``embedding``; written to the table so a
         query can refuse to rank vectors from two different models against each other.
     :param tenant_id: Owning tenant. Every read path filters on this before ranking by distance.
+    :param chunk_metadata: Arbitrary JSONB payload written to ``doc_chunks.chunk_metadata`` and
+        pre-filtered with the containment operator by :func:`taxcalc_ai.hybrid.dense_topk_filtered`.
+        Defaults to empty rather than ``None`` because the column is ``NOT NULL DEFAULT '{}'``:
+        ``NULL @> '{...}'`` is NULL rather than false, so a null metadata column would make a
+        metadata filter drop the row silently instead of simply not matching it.
+    :param content_hash: SHA-256 of ``chunk_text`` from :func:`content_hash`, or ``None`` for a
+        row whose provenance is unknown. The idempotent re-embed gate in
+        :mod:`taxcalc_ai.embedder` compares this against the stored value; ``None`` compares
+        unequal to everything, so an unhashed row is re-embedded once rather than trusted.
     """
 
     doc_id: str
@@ -100,6 +137,11 @@ class CorpusRow:
     embedding: NDArray[np.float32]
     model_version: str
     tenant_id: str
+    # Appended, not inserted, and that is load-bearing: the loader binds its parameters
+    # positionally from this field order, so a new field in the middle would shift every
+    # subsequent value one column to the left without a type error to catch it.
+    chunk_metadata: Mapping[str, object] = field(default_factory=dict)
+    content_hash: str | None = None
 
 
 def load_corpus(path: Path) -> pd.DataFrame:
@@ -200,6 +242,7 @@ def embed_dataframe(
                 embedding=vec,
                 model_version=MODEL_NAME,
                 tenant_id=str(record["tenant_id"]),
+                content_hash=content_hash(str(record["chunk_text"])),
             )
         )
     return rows

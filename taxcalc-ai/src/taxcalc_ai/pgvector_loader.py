@@ -42,6 +42,7 @@ from typing import Final
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg.types.json import Jsonb
 
 from .corpus import CorpusRow
 
@@ -88,12 +89,21 @@ DSN_ENV_VAR: Final[str] = "TAXCALC_AI_PG_DSN"
 #: and :func:`load_rows` turns the resulting count shortfall into
 #: :class:`CrossTenantDocIdError`. The collision becomes a loud failure at write time instead of
 #: a quiet one at read time, and it costs no extra round trip.
+#: W7 D3 widened the statement with ``chunk_metadata`` and ``content_hash`` (added by
+#: ``sql/V002__rag2_metadata_and_partial_indexes.sql``). Both are refreshed on the ``DO UPDATE``
+#: branch, and ``content_hash`` in particular MUST be: it is the key the pre-embed gate in
+#: :mod:`taxcalc_ai.embedder` reads, so a row whose text was updated while its stored hash
+#: stayed behind would be skipped by every subsequent ingest - a stale vector that is invisible
+#: because the gate believes it is current. ``chunk_tsv`` is absent on purpose: it is a
+#: ``GENERATED ALWAYS`` column, which Postgres recomputes here and rejects any attempt to write.
 _INSERT_SQL: Final[str] = (
     "INSERT INTO doc_chunks "
-    "(doc_id, chunk_idx, chunk_text, embedding, model_version, tenant_id) "
-    "VALUES (%s, %s, %s, %s, %s, %s) "
+    "(doc_id, chunk_idx, chunk_text, embedding, model_version, tenant_id, "
+    "chunk_metadata, content_hash) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
     "ON CONFLICT (doc_id, chunk_idx, model_version) DO UPDATE "
-    "SET chunk_text = EXCLUDED.chunk_text, embedding = EXCLUDED.embedding "
+    "SET chunk_text = EXCLUDED.chunk_text, embedding = EXCLUDED.embedding, "
+    "chunk_metadata = EXCLUDED.chunk_metadata, content_hash = EXCLUDED.content_hash "
     "WHERE doc_chunks.tenant_id = EXCLUDED.tenant_id"
 )
 
@@ -119,8 +129,21 @@ def load_rows(dsn: str, rows: Iterable[CorpusRow]) -> int:
     # Materialised before connecting: building the payload can raise (a row with a wrong-sized
     # vector, an exhausted iterator), and doing it first means that failure never leaves an
     # open connection or an empty transaction behind.
+    # Jsonb(...) rather than a bare dict: psycopg3 does adapt a dict to jsonb by default, but
+    # the default is a global registry setting any library in the process can change. Wrapping
+    # explicitly makes the target type a property of this statement instead of of the
+    # environment it runs in.
     payload = [
-        (r.doc_id, r.chunk_idx, r.chunk_text, r.embedding, r.model_version, r.tenant_id)
+        (
+            r.doc_id,
+            r.chunk_idx,
+            r.chunk_text,
+            r.embedding,
+            r.model_version,
+            r.tenant_id,
+            Jsonb(dict(r.chunk_metadata)),
+            r.content_hash,
+        )
         for r in rows
     ]
     if not payload:

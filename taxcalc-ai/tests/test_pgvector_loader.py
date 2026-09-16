@@ -15,13 +15,16 @@ an empty table.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import psycopg
 import pytest
 from numpy.typing import NDArray
 from pgvector.psycopg import register_vector
 
-from taxcalc_ai.corpus import EMBEDDING_DIM, MODEL_NAME, CorpusRow
+from taxcalc_ai.corpus import EMBEDDING_DIM, MODEL_NAME, CorpusRow, content_hash
+from taxcalc_ai.embedder import ChunkCandidate, pending_candidates
 from taxcalc_ai.pgvector_loader import CrossTenantDocIdError, load_rows
 
 #: The index whose use the EXPLAIN assertion is about.
@@ -310,3 +313,143 @@ def test_the_same_tenant_reloading_its_own_rows_is_still_idempotent(pg_dsn: str)
 
     assert load_rows(pg_dsn, rows) == 20
     assert _count_for(pg_dsn, tenant) == 20
+
+
+# ---- W7 D3: the V002 additions and the idempotent re-embed gate -----------------------------
+
+
+def test_v002_added_the_metadata_hash_and_tsv_columns_with_their_indexes(pg_dsn: str) -> None:
+    """``sql/V002`` is applied by the fixture and left the table in the shape RAG 2.0 needs.
+
+    A schema assertion rather than a behaviour one, because three of these objects have no
+    behaviour this suite can otherwise reach: a partial HNSW index is only *chosen* by the
+    planner once the corpus is large enough for a sequential scan to look expensive, and the
+    generated ``chunk_tsv`` column is invisible until a full-text query runs. Asserting they
+    exist is what catches a migration that was edited into silence.
+    """
+    with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, is_nullable, is_generated FROM information_schema.columns "
+            "WHERE table_name = 'doc_chunks' AND column_name = ANY(%s)",
+            (["chunk_metadata", "content_hash", "chunk_tsv"],),
+        )
+        columns = {str(row[0]): (str(row[1]), str(row[2])) for row in cur.fetchall()}
+
+        cur.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'doc_chunks'",
+        )
+        indexes = {str(row[0]) for row in cur.fetchall()}
+
+    # chunk_metadata is NOT NULL because `NULL @> '{...}'` is NULL, not false - a nullable
+    # column would make a metadata filter drop legacy rows rather than simply not match them.
+    assert columns["chunk_metadata"] == ("NO", "NEVER"), columns
+    # content_hash is nullable on purpose: a legacy V001 row has no hash, and "unknown" must not
+    # be spelled as a value the gate would treat as a match. See taxcalc_ai.embedder.
+    assert columns["content_hash"] == ("YES", "NEVER"), columns
+    # chunk_tsv is GENERATED so the sparse index can never rank stale text.
+    assert columns["chunk_tsv"][1] == "ALWAYS", columns
+
+    assert {
+        "doc_chunks_metadata_gin",
+        "doc_chunks_tenant_a_hnsw",
+        "doc_chunks_tenant_b_hnsw",
+        "doc_chunks_tenant_c_hnsw",
+        "doc_chunks_tsv_gin",
+    } <= indexes, sorted(indexes)
+
+
+def test_the_pre_embed_gate_skips_unchanged_chunks_and_keeps_changed_ones(pg_dsn: str) -> None:
+    """The gate is the difference between an idempotent write and a cheap re-run.
+
+    ``ON CONFLICT DO UPDATE`` already made a second load harmless; it did not make it free,
+    because the embedding it overwrote had to be computed first. This asserts the three cases
+    that matter: an unchanged chunk is dropped from the batch, a chunk whose text moved is
+    kept, and a model swap keeps everything regardless of text.
+    """
+    tenant = "tenant-gate"
+    # Hashes set explicitly: `_rows` is the W7 D2 helper and leaves content_hash unset, which
+    # is the legacy shape the next test covers. Here the stored rows must already carry a hash,
+    # because a NULL one is precisely the case that does NOT skip.
+    rows = [replace(r, content_hash=content_hash(r.chunk_text)) for r in _rows(3, tenant)]
+    load_rows(pg_dsn, rows)
+
+    unchanged = [
+        ChunkCandidate(
+            doc_id=r.doc_id,
+            chunk_idx=r.chunk_idx,
+            chunk_text=r.chunk_text,
+            tenant_id=tenant,
+        )
+        for r in rows
+    ]
+
+    # All three already stored at this model version with a matching hash: nothing to embed.
+    assert pending_candidates(pg_dsn, unchanged, model_version=MODEL_NAME) == []
+
+    # One chunk's text moved. Only that one comes back.
+    edited = list(unchanged)
+    edited[1] = ChunkCandidate(
+        doc_id=unchanged[1].doc_id,
+        chunk_idx=unchanged[1].chunk_idx,
+        chunk_text=unchanged[1].chunk_text + " (revised)",
+        tenant_id=tenant,
+    )
+    assert pending_candidates(pg_dsn, edited, model_version=MODEL_NAME) == [edited[1]]
+
+    # A model swap re-embeds everything even though no text changed: two models' vectors share
+    # a geometry without sharing a meaning, so a skip here would leave the corpus mixed.
+    assert pending_candidates(pg_dsn, unchanged, model_version="some-other-model") == unchanged
+
+
+def test_a_row_written_before_v002_has_no_hash_and_is_re_embedded_once(pg_dsn: str) -> None:
+    """A ``NULL`` stored hash compares unequal to everything, so the row is re-embedded once.
+
+    This is the legacy-row path. Defaulting ``content_hash`` to ``''`` instead of leaving it
+    nullable would have made the gate assert that such a row's content hashes to the empty
+    string - and it would then skip that row forever, serving a vector whose provenance nobody
+    can establish.
+    """
+    tenant = "tenant-legacy"
+    rows = _rows(1, tenant)
+    # A V001-shaped write: the same row, with content_hash left unset.
+    load_rows(pg_dsn, [replace(rows[0], content_hash=None)])
+
+    candidate = ChunkCandidate(
+        doc_id=rows[0].doc_id,
+        chunk_idx=rows[0].chunk_idx,
+        chunk_text=rows[0].chunk_text,
+        tenant_id=tenant,
+    )
+
+    assert pending_candidates(pg_dsn, [candidate], model_version=MODEL_NAME) == [candidate]
+
+    # After one pass the hash is stored, so the next run skips it.
+    load_rows(pg_dsn, [replace(rows[0], content_hash=candidate.content_hash)])
+    assert pending_candidates(pg_dsn, [candidate], model_version=MODEL_NAME) == []
+
+
+def test_chunk_metadata_round_trips_as_jsonb_and_is_containment_queryable(pg_dsn: str) -> None:
+    """Metadata written by the loader is queryable with the ``@>`` operator the pre-filter uses.
+
+    The write and the read have to agree on the *shape*, not just the column: a metadata payload
+    stored as a JSON string rather than an object would still be a valid ``jsonb`` value and
+    would match no containment filter at all.
+    """
+    tenant = "tenant-meta"
+    row = replace(_rows(1, tenant)[0], chunk_metadata={"jurisdiction": "CA", "tax_year": 2026})
+    load_rows(pg_dsn, [row])
+
+    with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM doc_chunks WHERE tenant_id = %s AND chunk_metadata @> %s::jsonb",
+            (tenant, '{"jurisdiction": "CA"}'),
+        )
+        matched = cur.fetchone()
+        assert matched is not None and int(matched[0]) == 1
+
+        cur.execute(
+            "SELECT count(*) FROM doc_chunks WHERE tenant_id = %s AND chunk_metadata @> %s::jsonb",
+            (tenant, '{"jurisdiction": "NY"}'),
+        )
+        unmatched = cur.fetchone()
+        assert unmatched is not None and int(unmatched[0]) == 0

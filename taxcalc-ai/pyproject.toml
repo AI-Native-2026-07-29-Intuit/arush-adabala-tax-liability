@@ -11,10 +11,13 @@ dependencies = [
     "tenacity>=8.3",
     "numpy>=2.0",
     "pandas>=2.2",
-    "sentence-transformers>=3.0",
+    "sentence-transformers[cross-encoder]>=3.0",
     "psycopg[binary]>=3.2",
     "pgvector>=0.3",
     "langsmith>=0.1.80",
+    "langchain-text-splitters>=0.2",
+    "langchain-core>=0.2",
+    "redis>=5.0",
 ]
 
 [dependency-groups]
@@ -40,12 +43,13 @@ dev = [
     # evaluator workspace is spend-capped and the result cannot be validated end to end.
     "ragas>=0.1.10",
     "great-expectations>=0.18",
-    "testcontainers[postgres]>=4.7",
+    "testcontainers[postgres,redis]>=4.7",
     "langchain-community<0.4",
     "pandas-stubs>=3.0.5.260914",
     "langchain-anthropic>=0.2",
     "anthropic>=0.40",
     "langchain-huggingface>=0.1",
+    "apache-airflow>=2.9",
 ]
 
 [tool.uv]

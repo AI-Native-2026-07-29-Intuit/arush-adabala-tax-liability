@@ -124,8 +124,16 @@ def estimate_request(taxpayer: Taxpayer) -> LiabilityEstimateRequest:
 # A fixture defined inside a test module is not visible to the others, so each would spin its
 # own container - three image pulls and three initdbs for one database's worth of work.
 
-#: The sidecar's own DDL. Applied by the fixture below; idempotent, so re-application is free.
-DDL_PATH = Path(__file__).resolve().parent.parent / "sql" / "V001__doc_chunks.sql"
+#: The sidecar's own DDL, in application order. Applied by the fixture below; every statement is
+#: ``IF NOT EXISTS``, so re-application is free.
+#:
+#: V002 (W7 D3) is applied SEPARATELY and with ``autocommit=True``, because every index in it is
+#: ``CREATE INDEX CONCURRENTLY`` and Postgres rejects that inside a transaction block. psycopg3
+#: opens an implicit transaction on a connection's first statement, so running both files on one
+#: connection would fail on V002's first index with "cannot run inside a transaction block".
+SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+DDL_PATH = SQL_DIR / "V001__doc_chunks.sql"
+DDL_V002_PATH = SQL_DIR / "V002__rag2_metadata_and_partial_indexes.sql"
 
 
 def _await_ready(dsn: str, attempts: int = 60, delay_seconds: float = 0.5) -> None:
@@ -149,6 +157,19 @@ def _await_ready(dsn: str, attempts: int = 60, delay_seconds: float = 0.5) -> No
     raise AssertionError(f"postgres never became ready at {dsn}") from last
 
 
+def _split_statements(ddl: str) -> list[str]:
+    """Split a DDL file into individual statements, dropping comments and blank lines.
+
+    Naive on purpose - it splits on ``;`` and would mangle a semicolon inside a string literal
+    or a dollar-quoted body. Neither appears in this project's DDL, and a real SQL parser for
+    two files of ``CREATE INDEX`` would be more machinery than the problem deserves. The
+    ``sqlglot``-shaped solution becomes correct to reach for the first time a function body
+    lands in ``sql/``.
+    """
+    stripped = "\n".join(line for line in ddl.splitlines() if not line.lstrip().startswith("--"))
+    return [statement.strip() for statement in stripped.split(";") if statement.strip()]
+
+
 @pytest.fixture(scope="session")
 def pg_dsn() -> Iterator[str]:
     """Spin a Postgres + pgvector container for the session and apply the sidecar's DDL.
@@ -169,6 +190,13 @@ def pg_dsn() -> Iterator[str]:
             with conn.cursor() as cur:
                 cur.execute(DDL_PATH.read_text())
             conn.commit()
+        # V002 on its own autocommit connection - see the note on DDL_V002_PATH. Split into
+        # individual statements because CREATE INDEX CONCURRENTLY also cannot be sent in a
+        # multi-statement batch: psycopg wraps a multi-statement execute() in one implicit
+        # transaction, which puts it right back inside the block it must not be in.
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            for statement in _split_statements(DDL_V002_PATH.read_text()):
+                cur.execute(statement)
         yield dsn
 
 
