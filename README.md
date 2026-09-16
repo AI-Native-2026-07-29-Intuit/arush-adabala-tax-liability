@@ -2110,7 +2110,12 @@ which is why they shipped in one PR rather than as five independent ticks.
   nothing at all while long-running services trace fine. Each is a green build and a silent
   observability gap. The script fires a real retrieval through the real decorated function,
   flushes, then polls LangSmith over a bounded lookback so a leftover run from a previous job
-  cannot make a broken build pass.
+  cannot make a broken build pass. It provisions its own corpus — with `TAXCALC_AI_PG_DSN`
+  unset it starts a throwaway pgvector container, applies the DDL and embeds the seed set — so
+  the documented one-line invocation works on a laptop and the CI step is the same command
+  rather than thirty lines of YAML that nothing could lint or test. A LangSmith that cannot be
+  reached is reported as its own verdict: both exit non-zero, but "could not query" and "no run
+  visible" send the reader to different places and must not read alike.
 
 - **RAGAS 50-row golden baseline** —
   [`taxcalc-ai/tests/golden/taxcalc_golden_50.jsonl`](taxcalc-ai/tests/golden/taxcalc_golden_50.jsonl)
@@ -2119,7 +2124,10 @@ which is why they shipped in one PR rather than as five independent ticks.
   near-duplicate context. That ratio is the point: a golden set scoring 1.0 everywhere has no
   headroom to fall and therefore cannot detect a regression. A credential-free test asserts the
   mix is still present, so a regenerated all-clean set fails loudly instead of quietly raising
-  every metric and making the build *greener* than before.
+  every metric and making the build *greener* than before. The four floors are currently
+  **declared, not measured**: the evaluator workspace is spend-capped, so the threshold test
+  skips and says so in those words. It reads its credential from `ANTHROPIC_API_KEY` or
+  `TAXCALC_AI_ANTHROPIC_API_KEY`, in the environment or in the gitignored `.env`.
 
   The evaluator LLM and embeddings are passed **explicitly**. `evaluate(dataset, metrics=[...])`
   with nothing else lets RAGAS build its own defaults, and those defaults are OpenAI — so a CI
@@ -2289,8 +2297,12 @@ uv run pytest -v tests/test_corpus.py
 uv run pytest -v tests/test_pgvector_loader.py          # Testcontainers + EXPLAIN-HNSW
 uv run pytest -v tests/test_rag_traceable.py
 uv run pytest -v tests/test_great_expectations_suite.py # Testcontainers + GX doc_chunks_v1
-uv run pytest -v -m slow tests/test_ragas_thresholds.py # needs ANTHROPIC_API_KEY
-uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LangSmith creds
+# The RAGAS gate reads ANTHROPIC_API_KEY or TAXCALC_AI_ANTHROPIC_API_KEY, from the environment
+# or from the gitignored .env; it skips without one, and a skip means the floors are declared,
+# not measured. The LangSmith gate needs only LANGSMITH_API_KEY - it starts and seeds its own
+# pgvector container when TAXCALC_AI_PG_DSN is unset.
+uv run pytest -v -m slow tests/test_ragas_thresholds.py # needs an evaluator key
+uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LANGSMITH_API_KEY
 
 # The two secret-scan greps the gate runs. Both must return nothing.
 #

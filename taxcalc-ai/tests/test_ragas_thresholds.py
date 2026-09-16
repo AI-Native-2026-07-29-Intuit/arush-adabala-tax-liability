@@ -45,9 +45,24 @@ from taxcalc_ai.corpus import MODEL_NAME
 
 GOLDEN: Final[Path] = Path(__file__).resolve().parent / "golden" / "taxcalc_golden_50.jsonl"
 
-#: The evaluator credential. RAGAS judges answers rather than producing them, so a smaller and
-#: cheaper model than production is the right choice here.
+#: The evaluator credential, under the name the Anthropic SDK itself reads.
 ANTHROPIC_KEY_ENV: Final[str] = "ANTHROPIC_API_KEY"
+
+#: The same credential under this project's own prefix - the name `.env.example` documents and
+#: the name the GitHub Actions secret carries. Both are accepted because both are real: CI
+#: exports the bare name into the step, while a developer's key lives in `.env` under the
+#: prefixed one. Reading only the bare name (which is what this file used to do) meant the
+#: placeholder the deliverable asked for was documented, committed, and ignored - so the
+#: documented way to configure an evaluator produced a skipped test, which is the single most
+#: likely reason this gate has never been run by anyone but CI.
+PREFIXED_ANTHROPIC_KEY_ENV: Final[str] = "TAXCALC_AI_ANTHROPIC_API_KEY"
+
+#: The gitignored local config. Read directly rather than through
+#: :class:`~taxcalc_ai.settings.TaxcalcAiSettings`, because that model makes the LLM-proxy
+#: fields mandatory: constructing it here would demand a proxy URL and key to answer a question
+#: about the evaluator, and would fail on a machine that has the evaluator configured and
+#: nothing else.
+ENV_FILE: Final[Path] = Path(__file__).resolve().parents[1] / ".env"
 
 #: Cheapest current Claude model that still judges reliably. The evaluator is called several
 #: times per row per metric, so the model choice is most of this test's cost.
@@ -77,6 +92,44 @@ _UNAVAILABLE: Final[str] = (
     "floors are unchanged and untested. Raise the workspace spend limit in the Anthropic "
     "console (Settings -> Limits), then re-run to record a real baseline."
 )
+
+
+def _evaluator_api_key() -> str | None:
+    """Find an evaluator credential, or ``None`` if this machine has none configured.
+
+    Checks the process environment under both names first, then the gitignored ``.env`` under
+    both. The ``.env`` lookup is what makes "paste your key into the file `.env.example` told
+    you to copy" a working instruction instead of a near miss.
+
+    The value is returned rather than exported here: a module-level import that quietly wrote a
+    credential into ``os.environ`` would change the behaviour of every other test in the session.
+    """
+    for name in (ANTHROPIC_KEY_ENV, PREFIXED_ANTHROPIC_KEY_ENV):
+        value = os.environ.get(name)
+        if value:
+            return value
+
+    if not ENV_FILE.is_file():
+        return None
+
+    # python-dotenv arrives with pydantic-settings, which this project already depends on for
+    # exactly this file's format - so the parsing rules match what TaxcalcAiSettings applies.
+    from dotenv import dotenv_values
+
+    values = dotenv_values(ENV_FILE)
+    for name in (ANTHROPIC_KEY_ENV, PREFIXED_ANTHROPIC_KEY_ENV):
+        value = values.get(name)
+        # The committed example ships a `replace-me-...` placeholder. Treating that as a
+        # credential would turn a clear skip into an authentication failure inside RAGAS's
+        # executor, which surfaces as every metric returning NaN - a far worse error message
+        # than the one below.
+        if value and not value.startswith("replace-me"):
+            return value
+    return None
+
+
+#: Resolved once at import so the skip decorator and the evaluator construction cannot disagree.
+EVALUATOR_API_KEY: Final[str | None] = _evaluator_api_key()
 
 
 def _provisioning_failure(exc: BaseException) -> BaseException | None:
@@ -163,6 +216,14 @@ def _run_eval() -> dict[str, float]:
     from ragas.embeddings.base import LangchainEmbeddingsWrapper
     from ragas.llms.base import LangchainLLMWrapper
 
+    # Exported rather than passed as a constructor argument: ChatAnthropic takes the key under an
+    # alias (`api_key` for the field `anthropic_api_key`), and threading a credential through an
+    # aliased pydantic field is the kind of detail that breaks silently on a minor upgrade. Set
+    # here, inside the only function that needs it, and only when it is not already set -
+    # `_evaluator_api_key` may have read it out of `.env`, where the SDK cannot see it.
+    if EVALUATOR_API_KEY is not None:
+        os.environ.setdefault(ANTHROPIC_KEY_ENV, EVALUATOR_API_KEY)
+
     evaluator = LangchainLLMWrapper(ChatAnthropic(model=EVALUATOR_MODEL, timeout=120))
     embeddings = LangchainEmbeddingsWrapper(HuggingFaceEmbeddings(model_name=MODEL_NAME))
 
@@ -218,11 +279,13 @@ def test_golden_set_is_committed_and_covers_the_named_failure_modes() -> None:
 
 @pytest.mark.slow
 @pytest.mark.skipif(
-    ANTHROPIC_KEY_ENV not in os.environ,
+    EVALUATOR_API_KEY is None,
     reason=(
-        f"{ANTHROPIC_KEY_ENV} is not set. The evaluation makes real judging calls; it is gated "
-        "on the credential rather than xfailed so a missing secret in CI is visible as a skip "
-        "in the report instead of passing as a green test."
+        f"no evaluator credential: set {ANTHROPIC_KEY_ENV} or {PREFIXED_ANTHROPIC_KEY_ENV} in "
+        f"the environment, or put either in {ENV_FILE.name} (gitignored). The evaluation makes "
+        "real judging calls; it is gated on the credential rather than xfailed so a missing "
+        "secret in CI is visible as a skip in the report instead of passing as a green test. "
+        "A skip here means the four floors are DECLARED, not measured."
     ),
 )
 def test_ragas_baseline_thresholds() -> None:
