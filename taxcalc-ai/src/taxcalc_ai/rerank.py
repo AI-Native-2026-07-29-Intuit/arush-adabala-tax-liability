@@ -24,9 +24,11 @@ improvement on an ordering that is already correct-ish: the retrieval-order list
 answer. So when the reranker overruns, the right behaviour is to return the retrieval order and
 carry on - raising would convert a slow reranker into a failed request, which is a strictly
 worse outcome for the user and a self-inflicted outage when the model server is merely warm.
-What must NOT happen is the overrun passing unnoticed, so the timeout returns a
-``rerank_timed_out`` boolean that the caller attaches to its LangSmith span and exports as a
-metric. An SRE can alert on the rate; nobody gets paged for a 400 ms p99.
+What must NOT happen is the overrun passing unnoticed, so every rerank attempt increments the
+``rerank_timeout``/``rerank_requests`` counters in :mod:`taxcalc_ai.metrics` (scrapeable, and the
+thing an alert rule actually reads), writes the breach onto its own LangSmith span, and returns a
+``rerank_timed_out`` boolean the caller can propagate. An SRE alerts on the counter ratio; nobody
+gets paged for a 400 ms p99.
 
 **The check is post-hoc, and that is a real limitation, stated rather than hidden.**
 ``CrossEncoder.predict`` is a synchronous blocking call into PyTorch with no cancellation seam,
@@ -64,6 +66,8 @@ from langsmith import get_current_run_tree, traceable
 from numpy.typing import NDArray
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
+from taxcalc_ai.metrics import record_rerank
+
 _LOG: Final[logging.Logger] = logging.getLogger("taxcalc_ai.rerank")
 
 #: The cross-encoder. A reranker, not an embedder: it consumes ``(query, passage)`` pairs and
@@ -94,7 +98,9 @@ DEFAULT_MMR_K: Final[int] = 20
 DEFAULT_RERANK_TOP_K: Final[int] = 6
 
 #: Span attribute and metric name the timeout is reported under. A contract with whatever
-#: dashboards and alerts consume the LangSmith project, so it is named once here.
+#: dashboards and alerts consume the LangSmith project, so it is named once here - and the same
+#: string names the Prometheus counter family in :mod:`taxcalc_ai.metrics`, so the trace
+#: attribute and the alertable series cannot drift apart.
 RERANK_TIMEOUT_ATTRIBUTE: Final[str] = "rerank_timeout"
 
 #: Module-level cache. ``bge-reranker-base`` is ~1.1 GB on disk and several seconds to
@@ -243,6 +249,11 @@ def bge_rerank(
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
     timed_out = elapsed_ms > timeout_ms
+    # Counted BEFORE anything that could fail, and counted on both paths. This is the signal an
+    # SRE alerts on: the soft failure changes no status code and raises nothing, so without a
+    # counter a reranker that times out on every request looks identical to one that never does.
+    # See taxcalc_ai.metrics for why the span attribute below is not a substitute.
+    record_rerank(timed_out)
     # Attached to the ACTIVE span rather than returned only to the caller, so the breach is
     # visible in the trace even when a caller forgets to propagate the boolean. get_current_run_tree
     # returns None when tracing is off (the whole test suite), which is why it is guarded.

@@ -18,6 +18,10 @@ dependencies = [
     "langchain-text-splitters>=0.2",
     "langchain-core>=0.2",
     "redis>=5.0",
+    # The rerank timeout is a soft failure, so the only thing that makes it visible to an SRE
+    # is a scrapeable counter - see src/taxcalc_ai/metrics.py. A production dependency, not a
+    # dev one: the metric has to exist in the process that serves requests.
+    "prometheus-client>=0.20",
 ]
 
 [dependency-groups]

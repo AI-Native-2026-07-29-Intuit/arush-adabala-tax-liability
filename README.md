@@ -2257,7 +2257,7 @@ by a test, not by review.
 check (a second, no container), tenant + metadata isolation, the semantic-cache smoke test, and
 the RAGAS faithfulness gate last because it is the only step that spends money.
 
-**Result:** 111 tests green in the fast gate (88.13% coverage against an 85% floor), plus 2
+**Result:** 120 tests green in the fast gate (88.12% coverage against an 85% floor), plus 2
 tenant-isolation, 4 semantic-cache and 2 Great Expectations tests in their own steps; zero
 `mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; all four gate greps
 empty.

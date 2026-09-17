@@ -19,6 +19,7 @@ from sentence_transformers import SentenceTransformer
 
 from taxcalc_ai import rerank as rerank_module
 from taxcalc_ai.corpus import MODEL_NAME
+from taxcalc_ai.metrics import RERANK_REQUESTS_COUNTER, RERANK_TIMEOUT_COUNTER
 from taxcalc_ai.rerank import (
     DEFAULT_RERANK_TOP_K,
     bge_rerank,
@@ -163,15 +164,21 @@ def test_bge_rerank_lifts_the_gold_chunk_out_of_the_retrieval_tail() -> None:
 def test_the_timeout_falls_back_to_retrieval_order_and_reports_the_breach() -> None:
     """``timeout_ms=1`` fires the fallback: retrieval order, incoming scores, flag set True.
 
-    The flag is the whole contract. A soft failure that is not reported is just a silent quality
-    regression, so this asserts BOTH halves - that the request still returns usable context, and
-    that the breach is visible to the caller.
+    Reporting is the whole contract. A soft failure that is not reported is just a silent quality
+    regression, so this asserts all three halves - that the request still returns usable context,
+    that the breach is visible to the caller, and that it moved the Prometheus counter an SRE
+    alerts on. The returned boolean depends on the caller propagating it; the counter does not,
+    which is why the counter is the one that gets asserted against the real reranker.
     """
     candidates = _candidates()
+    timeouts_before = RERANK_TIMEOUT_COUNTER._value.get()
+    requests_before = RERANK_REQUESTS_COUNTER._value.get()
 
     results, timed_out = bge_rerank("any question at all", candidates, top_k=3, timeout_ms=1)
 
     assert timed_out is True
+    assert RERANK_TIMEOUT_COUNTER._value.get() - timeouts_before == 1
+    assert RERANK_REQUESTS_COUNTER._value.get() - requests_before == 1
     # Retrieval order, not reranked order, and the incoming scores are preserved untouched
     # because no rerank score exists on this path.
     assert results == candidates[:3]
@@ -180,6 +187,9 @@ def test_the_timeout_falls_back_to_retrieval_order_and_reports_the_breach() -> N
     # request. Asserting no raise is the point of calling it at all here.
     empty, empty_flag = bge_rerank("q", [], timeout_ms=1)
     assert empty == [] and empty_flag is False
+    # An empty candidate list never reached the model, so it is not a rerank attempt and must not
+    # appear in the denominator - padding it would dilute the timeout ratio the alert reads.
+    assert RERANK_REQUESTS_COUNTER._value.get() - requests_before == 1
 
 
 def test_the_reranker_model_is_constructed_exactly_once_per_process() -> None:

@@ -560,6 +560,34 @@ reranker into a failed request is strictly worse for the user and is a self-infl
 when the model server is merely warm. The boolean is returned *and* attached to the active
 LangSmith span, so a caller that drops it still leaves the breach in the trace.
 
+A soft failure changes no status code and raises nothing, so the only thing that makes it visible
+is instrumentation — and the span attribute alone is not enough to alert on. `src/taxcalc_ai/metrics.py`
+exports two Prometheus counters, incremented together in `bge_rerank` via `record_rerank()`:
+
+| series | role |
+| --- | --- |
+| `rerank_timeout_total` | breaches of the latency budget — the numerator |
+| `rerank_requests_total` | attempts, breach or not — the denominator |
+
+```promql
+rate(rerank_timeout_total[10m]) / rate(rerank_requests_total[10m]) > 0.5
+```
+
+Two counters rather than one because a numerator cannot be alerted on: ten breaches an hour means
+something different at ten requests an hour than at ten thousand. `record_rerank()` is a single
+function rather than two exported counters the caller bumps itself, so the invariant that every
+breach also counts as a request holds in one place — split across two call sites it would drift,
+and the failure is silent (the alert still evaluates, it just returns a meaningless number). An
+empty candidate list never reaches the model and is deliberately counted as neither.
+
+The counters and the LangSmith attribute share the name `rerank_timeout` on purpose, and both are
+kept because they answer different questions: the span answers *what happened to this request* and
+sits next to the trace showing which chunks came back in which order; the counter answers *how
+often is this happening* and is scraped in the serving process, so it survives tracing being
+sampled, unreachable, or switched off entirely. An alert rule that depends on a tracing backend
+being complete goes quiet exactly when things are bad. `render_metrics()` is there for a process
+with its own HTTP server to serve on `/metrics`; `start_metrics_server()` for one without.
+
 **300 ms is a budget for accelerated inference, and on CPU it breaches — by design.** Measured
 on a GitHub shared runner, eight `(query, passage)` pairs alone exceed 300 ms; the production
 path sends twenty. So on CPU-only hardware this stage falls back to retrieval order most of the
