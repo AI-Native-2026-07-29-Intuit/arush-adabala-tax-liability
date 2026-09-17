@@ -106,6 +106,8 @@ jobs:
         run: >
           uv run pytest -v -m "not slow"
           --ignore=tests/test_great_expectations_suite.py
+          --ignore=tests/test_tenant_isolation.py
+          --ignore=tests/test_semantic_cache.py
           --cov=src --cov-fail-under=85
 
       # ----- W7 D2: the three data + AI-observability gate steps -----------------------------
@@ -142,6 +144,58 @@ jobs:
           # No unsolicited telemetry to a third party on every build. Also removes the unclosed
           # file handle RAGAS's analytics module leaks, which this project's warnings-as-errors
           # policy would otherwise fail the run on.
+          RAGAS_DO_NOT_TRACK: "true"
+
+      # ----- W7 D3: the four RAG 2.0 gate steps ---------------------------------------------
+      #
+      # Same job again, same reasoning as the W7 D2 block: these need the uv environment the
+      # steps above built, and a new job would re-resolve, re-download the ~80 MB MiniLM model
+      # and the ~1.1 GB bge-reranker, and re-pull the pgvector and Redis images.
+      #
+      # ORDERED CHEAPEST-FIRST, and the order carries information. The DAG import check is a
+      # second and needs no container, so it runs first: a typo in the DAG has nothing to do
+      # with retrieval quality and should not be discovered after twenty minutes of judging.
+      # The tenant-isolation and cache steps come next (containers, no model judging), and the
+      # RAGAS faithfulness gate last, because it is the only step that spends money.
+
+      - name: Airflow DAG import check
+        # The bar is importability, not a running scheduler - this catches a bad decorator
+        # argument, a missing dependency and a typo'd task edge, which is what actually breaks.
+        run: >
+          uv run python -c
+          "from taxcalc_ai.dags.rag_svc_ingest import taxcalc_ai_ingest_dag"
+
+      - name: Tenant + metadata isolation (Testcontainers Postgres + pgvector)
+        # Asserts the DATABASE-side tenant_id of every returned chunk, not the tenant_id the
+        # request passed in - the latter compares a value to itself and passes against a
+        # retriever with no WHERE clause at all.
+        run: uv run pytest -v tests/test_tenant_isolation.py
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: taxcalc-ai-dev-ci
+          LANGSMITH_TRACING: "false"
+
+      - name: Semantic cache smoke test (Testcontainers Redis)
+        # Near-duplicate collision, cross-tenant refusal at both layers, and epoch invalidation.
+        run: uv run pytest -v tests/test_semantic_cache.py
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: taxcalc-ai-dev-ci
+          LANGSMITH_TRACING: "false"
+
+      - name: RAGAS faithfulness >= 0.85 gate
+        # The W7 D3 gate. faithfulness is fatal (SystemExit); the other three metrics are
+        # asserted floors that diagnose the cause rather than being the user-facing failure.
+        #
+        # A SKIP HERE IS NOT A PASS. conftest.py re-reports every skip as a ::warning::
+        # annotation and a job-summary line, so "the evaluator was unreachable and nothing was
+        # measured" is visible on the run page instead of rendering as a green check.
+        run: uv run pytest -v -m slow tests/test_ragas_gate.py
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: taxcalc-ai-dev-ci
+          LANGSMITH_TRACING: "true"
+          ANTHROPIC_API_KEY: ${{ secrets.TAXCALC_AI_ANTHROPIC_API_KEY }}
           RAGAS_DO_NOT_TRACK: "true"
 
       - name: Assert a LangSmith run is visible for a sample retrieval

@@ -2204,6 +2204,75 @@ each of ~200 jobs exhausting its retries — 13m40s to report something knowable
 a 30-minute CI budget. It now settles in ~33s.
 
 
+## Week 7 Day 3 — RAG 2.0 Production Retrieval: hybrid + RRF + MMR + bge-reranker + semantic cache
+
+The W7 D2 sidecar's retrieval was one cosine ANN query. Today it becomes a production retrieval
+pipeline: hybrid dense + sparse search fused by Reciprocal Rank Fusion, MMR diversification, a
+cross-encoder reranker under a strict 300 ms soft deadline, tenant + JSONB metadata
+pre-filtering against per-tenant partial HNSW indexes, a Redis semantic cache, an Airflow
+ingest DAG, and a `faithfulness >= 0.85` CI gate. Full write-up in
+[`taxcalc-ai/PYTHON.md`](taxcalc-ai/PYTHON.md); the authoring transcripts, including the one
+where Claude invented an entire measurement matrix, are in
+[`taxcalc-ai/PROMPT_JOURNAL.md`](taxcalc-ai/PROMPT_JOURNAL.md).
+
+**Six knobs, one contract.** The schema, the fusion algorithm, the reranker timeout, the cache
+key shape, the tenant pre-filter and the faithfulness gate are a single composite thing. Any one
+of them missing turns a green build into a silent retrieval-quality regression, a tenant leak,
+or a p99 violation — six checkboxes ticked independently is exactly the failure mode.
+
+| Artefact | What it is | Why it is shaped that way |
+|---|---|---|
+| [`sql/V002__rag2_metadata_and_partial_indexes.sql`](taxcalc-ai/sql/V002__rag2_metadata_and_partial_indexes.sql) | `chunk_metadata jsonb` + `content_hash` + GIN `jsonb_path_ops` + three per-tenant partial HNSW (`m=24`, `ef_construction=128`) + generated `chunk_tsv` | HNSW cannot see `tenant_id`, so a global index collects candidates from every tenant and discards them after ranking — under-recalled, silently, with no plan change. Every index is `CREATE INDEX CONCURRENTLY`. |
+| [`chunker.py`](taxcalc-ai/src/taxcalc_ai/chunker.py) | `RecursiveCharacterTextSplitter`, 900/150, coarse-to-fine separator ladder | `overlap >= chunk_size/2` is rejected: at `overlap == chunk_size` the stride is zero and the splitter cannot terminate. Chunk ids are per-document so one document gaining a paragraph cannot renumber another's citations. |
+| [`embedder.py`](taxcalc-ai/src/taxcalc_ai/embedder.py) | The pre-embed gate | `ON CONFLICT DO UPDATE` made the write idempotent; it did not make it cheap, because the embedding it overwrote had to be computed first. One SELECT on `(content_hash, model_version)` turns a re-ingest of an unchanged corpus into a round trip. |
+| [`hybrid.py`](taxcalc-ai/src/taxcalc_ai/hybrid.py) | Dense ANN + Postgres FTS, fused by RRF at `k=60`, plus a coverage diagnostic | **Fusion is on rank, not score.** Cosine distance is bounded and smaller-is-better; `ts_rank_cd` is unbounded and larger-is-better. Any fixed blend weights whichever scale is larger *on this query*. There is deliberately no rescaling helper, and the gate greps for its absence. |
+| [`rerank.py`](taxcalc-ai/src/taxcalc_ai/rerank.py) | MMR at `lambda=0.7` (60 → 20), then `BAAI/bge-reranker-base` (20 → 6) under 300 ms | MMR first, because the cross-encoder costs a forward pass per candidate and RRF's head can be five restatements of one fact. The timeout **fails soft** and reports `rerank_timed_out` to the caller and to the LangSmith span. |
+| [`cache.py`](taxcalc-ai/src/taxcalc_ai/cache.py) | Redis cache keyed `(tenant_id, epoch, quantised embedding)` | A cache keyed on the embedding alone is a cross-tenant leak that *improves* the metric it would be noticed by. `tenant_id` is a key component **and** every citation is re-checked on every hit. `bump_epoch` invalidates a tenant in one `INCR`. |
+| [`dags/rag_svc_ingest.py`](taxcalc-ai/src/taxcalc_ai/dags/rag_svc_ingest.py) | TaskFlow DAG: `load_docs` → `chunk_docs` → `embed_chunks` → `upsert_chunks` → `bump_cache_epochs` | The bump is last and only on success. Run first, a failed upsert leaves the cache emptied and the corpus unchanged — every later question pays full price to rebuild answers identical to the ones just discarded. |
+| [`rag.py`](taxcalc-ai/src/taxcalc_ai/rag.py) | `retrieve_and_generate` — the entry point W7 D4's MCP server publishes and W7 D5's LangGraph nodes call | Signature pinned today (keyword-only after `tenant_id`) so both later days are wiring, not re-negotiation. Four `RAG_USE_*` flags, all defaulting to **on**, stay live two weeks for an A/B rollback to the W7 D2 baseline. |
+| [`eval/run_ragas.py`](taxcalc-ai/src/taxcalc_ai/eval/run_ragas.py) | Six-column before-vs-after harness | A matrix, not a before/after pair: all-four-on tells you the bundle helped, not that all four helped. One stage may be neutral and one may be negative and masked. |
+
+**`retrieve_chunks` was not replaced.** It is the W7 D2 baseline, and three things are defined in
+terms of it: the LangSmith visibility gate, the report's baseline column, and the A/B rollback
+target. `retrieve_and_generate` was added beside it.
+
+**"Nothing was judged" is not a diagnosis.** The report, `PYTHON.md` and the PR description all
+said "spend-capped" for most of this branch's life, on no evidence: the annotation CI emits comes
+from the all-NaN branch, which fires for *any* per-job failure — revoked key, wrong model id,
+blocked egress, rate limit — because RAGAS catches each job's exception itself, logs it, and
+writes NaN. Four different fixes behind one identical green run. The gate now captures those log
+records and names the cause, and the first run with it returned `You have reached your specified
+workspace API usage limits. You will regain access on 2026-10-01 at 00:00 UTC.` The inference was
+right; it took a code change to *know* it — and it surfaced a fact nobody had, that the limit is
+**periodic**, so the gate measures itself for free on 1 October with no configuration change.
+
+**The RAGAS gate skipped, and the report says so.** `faithfulness >= 0.85` raises `SystemExit`;
+the other three metrics are asserted floors that diagnose the cause rather than being the
+user-facing failure. No evaluator credential exists in this environment, so the gate **skips** —
+and [`taxcalc-ai/docs/ragas/w7d3.md`](taxcalc-ai/docs/ragas/w7d3.md) carries `n/m` in every cell
+under a "Status of this report: NOT MEASURED" heading rather than plausible invented numbers.
+`conftest.py` re-emits the skip as a GitHub Actions annotation and a job-summary line, and a
+credential-free test asserts the 0.85 gate is strictly above the W7 D2 floor so it cannot be
+quietly lowered while it cannot be measured. Claude's first draft of that report contained a
+complete matrix and an attribution paragraph reasoning from it; see `PROMPT_JOURNAL.md` Q-section
+for why that was rejected rather than trimmed.
+
+**The reranker timeout measured the model load.** `_get_reranker()` is lazy, so the clock started
+before ~1.1 GB of weights were constructed — the first rerank of every process breached 300 ms
+and fell back to retrieval order. A cold-start artefact reported as a quality event, which would
+spike the `rerank_timeout` metric on every deploy and page somebody for a healthy system. Caught
+by a test, not by review.
+
+**CI gains four steps**, ordered cheapest-first in the existing job: the Airflow DAG import
+check (a second, no container), tenant + metadata isolation, the semantic-cache smoke test, and
+the RAGAS faithfulness gate last because it is the only step that spends money.
+
+**Result:** 122 tests green in the fast gate (88.12% coverage against an 85% floor), plus 2
+tenant-isolation, 4 semantic-cache and 2 Great Expectations tests in their own steps; zero
+`mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; all four gate greps
+empty.
+
+
 ## Build and Test
 
 ```bash
@@ -2312,8 +2381,37 @@ uv run python -m taxcalc_ai.scripts.assert_langsmith_run_visible  # needs LANGSM
 grep -RIn "lsv2""_pt_" .
 grep -RIn 'except:' src/ tests/
 
+# W7 D3 - the RAG 2.0 production retrieval stack. The container-backed tests need a running
+# Docker daemon (Postgres + pgvector AND Redis); the first rerank run downloads the ~200MB
+# bge-reranker-base weights.
+uv run pytest -v tests/test_chunker.py                  # chunking discipline, no container
+uv run pytest -v tests/test_hybrid_rrf.py               # metadata filter, exact-phrase FTS, RRF
+uv run pytest -v tests/test_rerank.py                   # MMR limits + timeout-and-fallback
+uv run pytest -v tests/test_semantic_cache.py           # Testcontainers Redis
+uv run pytest -v tests/test_tenant_isolation.py         # DB-side tenant assertion
+uv run pytest -v tests/test_ingest_dag.py tests/test_eval_matrix.py
+uv run pytest -v tests/test_rag_pipeline.py             # retrieve_and_generate end to end
+# The W7 D3 CI gate: faithfulness >= 0.85 raises SystemExit. Skips without an evaluator key,
+# and a skip means the gate is DECLARED, not measured - see docs/ragas/w7d3.md.
+uv run pytest -v -m slow tests/test_ragas_gate.py
+# Importability is the bar for the DAG, not a running scheduler.
+uv run python -c "from taxcalc_ai.dags.rag_svc_ingest import taxcalc_ai_ingest_dag"
+# The before-vs-after report. Needs TAXCALC_AI_PG_DSN, TAXCALC_AI_REDIS_URL and an evaluator key.
+uv run python -m taxcalc_ai.eval.run_ragas --matrix
+
+# The two W7 D3 gate greps, in addition to the two above. Both must return nothing.
+grep -RIn 'CREATE INDEX [^C]' sql/V002__rag2_metadata_and_partial_indexes.sql
+grep -RIn 'normalize.*score\|min[_-]max' src/taxcalc_ai/hybrid.py
+
 # Behind a TLS-inspecting corporate proxy, uv needs the system trust store. Deliberately not
 # baked into pyproject.toml or CI: GitHub runners do not need it, and a config that always
 # trusts the system store is a config that hides a real certificate problem.
 UV_SYSTEM_CERTS=1 uv sync
+# uv's flag does NOT cover huggingface_hub, which has its own TLS stack - the bge-reranker
+# download fails with CERTIFICATE_VERIFY_FAILED until the system roots reach Python directly:
+{ cat "$(uv run python -c 'import certifi;print(certifi.where())')"
+  security find-certificate -a -p /Library/Keychains/System.keychain
+  security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain
+} > /tmp/ca-bundle.pem
+REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem SSL_CERT_FILE=/tmp/ca-bundle.pem uv run pytest tests/test_rerank.py
 ```

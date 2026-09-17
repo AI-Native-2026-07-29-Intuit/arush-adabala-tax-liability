@@ -19,8 +19,12 @@ Marked ``slow`` so a developer can opt out locally (``-m "not slow"``). CI does 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
@@ -87,10 +91,20 @@ MINIMUM_GOLDEN_ROWS: Final[int] = 50
 _SPEND_CAP_MARKERS: Final[tuple[str, ...]] = ("usage limit", "credit balance", "quota")
 
 #: One message for both unavailable paths, so the CI report reads the same either way.
+#: One message for both unavailable paths, so the CI report reads the same either way.
+#:
+#: The remediation is deliberately NOT "raise the spend limit" alone, which is what this said
+#: until the capture below revealed the actual error. An Anthropic workspace usage limit is
+#: PERIODIC: the error names the instant access returns, so waiting costs nothing and raising the
+#: limit is the option for someone who needs the number sooner. Telling a reader to go change a
+#: billing setting when the constraint clears by itself is advice that costs money for no reason
+#: - and the date is in `{detail}`, which is why this points at it rather than repeating it.
 _UNAVAILABLE: Final[str] = (
     "evaluator unavailable ({detail}). This run evaluated NOTHING - the golden set and the "
-    "floors are unchanged and untested. Raise the workspace spend limit in the Anthropic "
-    "console (Settings -> Limits), then re-run to record a real baseline."
+    "floors are unchanged and untested. If the detail above names a date on which access "
+    "returns, the limit is periodic and re-running after it costs nothing; otherwise raise the "
+    "workspace limit in the Anthropic console (Settings -> Limits). Either way, re-run to "
+    "record a real baseline."
 )
 
 
@@ -173,8 +187,127 @@ def _load_golden() -> Dataset:
     )
 
 
-def _run_eval() -> dict[str, float]:
+#: Loggers RAGAS writes its per-job failures to. The executor catches each judging job's
+#: exception itself, logs it, and writes NaN into that row - so this is the ONLY place the real
+#: cause survives. Both names are watched because the package has moved the executor between
+#: them across versions, and a capture that silently matched nothing would be worse than none.
+_RAGAS_LOGGERS: Final[tuple[str, ...]] = ("ragas", "ragas.executor")
+
+
+class _JudgeErrorCapture(logging.Handler):
+    """Collect ERROR records emitted by RAGAS while an evaluation runs.
+
+    RAGAS reports a dead evaluator as a complete result full of NaN rather than as an exception,
+    which is why both gates have an all-NaN branch. That branch could say *that* nothing was
+    judged but never *why* - and "why" is the whole difference between "raise the spend limit",
+    "rotate the key", "the model id is wrong" and "CI has no egress". Those are four different
+    fixes, and the run that could distinguish them was throwing the evidence away.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+        # Records seen, by identity. The handler is attached to BOTH "ragas" and
+        # "ragas.executor", and a child logger propagates the SAME LogRecord object to its
+        # parent - so without this every message is captured twice and the job count doubles.
+        # Caught by the test below, which logged 201 records and was told 402 failed. A wrong
+        # count is worse than no count: "402 jobs failed" against a 50-row golden set invites
+        # someone to go looking for a retry storm that never happened.
+        self._seen: set[int] = set()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Record one formatted ERROR message, ignoring a record already seen.
+
+        ``format`` rather than ``record.getMessage()``: RAGAS attaches the underlying exception
+        via ``exc_info``, and the exception type and message are the informative part - the log
+        text itself is usually just "Exception raised in Job".
+        """
+        if id(record) in self._seen:
+            return
+        self._seen.add(id(record))
+        self.messages.append(self.format(record))
+
+
+@contextmanager
+def _capture_judge_errors() -> Iterator[_JudgeErrorCapture]:
+    """Attach the capture handler to RAGAS's loggers for the duration of the block.
+
+    Handlers are removed and levels restored in a ``finally``, so a failing evaluation cannot
+    leave a handler attached to a module-level logger for the rest of the session.
+    """
+    capture = _JudgeErrorCapture()
+    capture.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    touched: list[tuple[logging.Logger, int, bool]] = []
+    try:
+        for name in _RAGAS_LOGGERS:
+            logger = logging.getLogger(name)
+            touched.append((logger, logger.level, logger.propagate))
+            # RAGAS's own logger may be configured above ERROR by the time we get here; forcing
+            # the level is what makes the capture independent of the library's defaults.
+            logger.setLevel(logging.ERROR)
+            logger.addHandler(capture)
+        yield capture
+    finally:
+        for logger, level, propagate in touched:
+            logger.removeHandler(capture)
+            logger.setLevel(level)
+            logger.propagate = propagate
+
+
+#: Per-request noise that makes two records of the SAME cause compare unequal. Without this the
+#: deduplication in :func:`judge_failure_detail` collapses nothing: every Anthropic error carries
+#: its own ``request_id`` and every RAGAS record its own ``Job[n]`` index, so 200 instances of one
+#: usage-limit error reported as "+197 other distinct errors" - a 4,000-character annotation
+#: saying there are 200 problems when there is one. Observed on run 35190597131.
+_VOLATILE_ERROR_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    (r"'request_id': '[^']*'", "'request_id': '...'"),
+    (r"\bJob\[\d+\]", "Job[n]"),
+)
+
+
+def _normalise_job_error(message: str) -> str:
+    """Strip per-request identifiers so two records of one cause compare equal.
+
+    Deliberately a small fixed list rather than a general "remove anything that looks like an
+    id": over-normalising would merge genuinely different failures into one line and hide the
+    second cause, which is the failure mode this whole capture exists to prevent.
+
+    :param message: One formatted log record, already whitespace-collapsed.
+    :returns: The message with volatile per-request fields replaced by placeholders.
+    """
+    for pattern, replacement in _VOLATILE_ERROR_FIELDS:
+        message = re.sub(pattern, replacement, message)
+    return message
+
+
+def judge_failure_detail(capture: _JudgeErrorCapture) -> str:
+    """Summarise captured judging errors for a skip message.
+
+    Deduplicated and truncated: a fifty-row run against a dead evaluator produces ~200 identical
+    records, and a skip reason that is two hundred copies of one line is not more informative
+    than one copy - it is less, because nobody reads to the end of it.
+
+    :param capture: The handler that was active during the evaluation.
+    :returns: A human-readable detail string naming the distinct underlying errors.
+    """
+    if not capture.messages:
+        return "every metric returned NaN and RAGAS logged nothing - cause unknown"
+    seen: list[str] = []
+    for message in capture.messages:
+        collapsed = _normalise_job_error(" ".join(message.split()))
+        if collapsed not in seen:
+            seen.append(collapsed)
+    shown = "; ".join(seen[:3])
+    suffix = f" (+{len(seen) - 3} other distinct causes)" if len(seen) > 3 else ""
+    return f"{len(capture.messages)} judging job(s) failed. Underlying: {shown}{suffix}"
+
+
+def _run_eval() -> tuple[dict[str, float], _JudgeErrorCapture]:
     """Evaluate the golden set across the four core metrics and return the scores.
+
+    Returns the capture handler alongside the scores so a caller that finds every metric NaN can
+    report WHY rather than only THAT. RAGAS never raises in that case, so the log is the only
+    surviving evidence - see :class:`_JudgeErrorCapture`.
 
     The evaluator LLM and the embedding model are both passed EXPLICITLY, which is a deliberate
     departure from the shape the lesson's reference snippet uses. Calling ``evaluate(dataset,
@@ -233,13 +366,14 @@ def _run_eval() -> dict[str, float]:
     # finishes. Measured: 13m40s to report a failure that was knowable in the first few seconds,
     # inside a CI job with a 30 minute budget. Three retries keeps genuine transient handling
     # and bounds the dead-evaluator case to roughly a minute.
-    result = evaluate(
-        _load_golden(),
-        metrics=[Faithfulness(), AnswerRelevancy(), ContextPrecision(), ContextRecall()],
-        llm=evaluator,
-        embeddings=embeddings,
-        run_config=RunConfig(max_retries=3, max_wait=8, timeout=60),
-    )
+    with _capture_judge_errors() as capture:
+        result = evaluate(
+            _load_golden(),
+            metrics=[Faithfulness(), AnswerRelevancy(), ContextPrecision(), ContextRecall()],
+            llm=evaluator,
+            embeddings=embeddings,
+            run_config=RunConfig(max_retries=3, max_wait=8, timeout=60),
+        )
     # evaluate() is typed as returning EvaluationResult | Executor - the second arm is the
     # deferred-execution path this call does not take. Asserting the type is what lets the
     # aggregation below be checked rather than silently operating on an Executor.
@@ -250,7 +384,8 @@ def _run_eval() -> dict[str, float]:
     # headline number actually is - an unweighted average over the fifty rows, which is why a
     # single badly-scored row moves a metric by ~0.02 and not more.
     frame = result.to_pandas()
-    return {metric: float(frame[metric].mean()) for metric in FLOORS if metric in frame.columns}
+    scores = {metric: float(frame[metric].mean()) for metric in FLOORS if metric in frame.columns}
+    return scores, capture
 
 
 def test_golden_set_is_committed_and_covers_the_named_failure_modes() -> None:
@@ -296,7 +431,7 @@ def test_ragas_baseline_thresholds() -> None:
     message naming only the first failure cannot answer it.
     """
     try:
-        scores = _run_eval()
+        scores, capture = _run_eval()
     # Broad here, narrowed on the very next line. Kept for the paths that DO propagate - an
     # unusable key can raise while the client is built, before any job is queued.
     except Exception as exc:
@@ -315,11 +450,10 @@ def test_ragas_baseline_thresholds() -> None:
     # skip. SOME metrics NaN is a different animal - the evaluator was reachable and something
     # about the data or a specific metric broke - so that still fails, loudly, below.
     if scores and all(math.isnan(value) for value in scores.values()):
-        pytest.skip(
-            _UNAVAILABLE.format(
-                detail="every metric returned NaN; RAGAS logged per-job errors at ERROR level"
-            )
-        )
+        # The captured detail is the point: "nothing was judged" is the same annotation whether
+        # the workspace is capped, the key is revoked, the model id is wrong or CI has no egress,
+        # and those are four different fixes.
+        pytest.skip(_UNAVAILABLE.format(detail=judge_failure_detail(capture)))
 
     for metric, floor in FLOORS.items():
         assert metric in scores, f"{metric} missing from RAGAS result: {scores}"

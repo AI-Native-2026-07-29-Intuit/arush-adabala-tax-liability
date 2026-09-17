@@ -93,6 +93,14 @@ _PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 #: table shape nothing else uses.
 _DDL_PATH: Final[Path] = _PROJECT_ROOT / "sql" / "V001__doc_chunks.sql"
 
+#: The W7 D3 migration, applied after V001. NOT optional and not a nicety: ``load_rows`` writes
+#: ``chunk_metadata`` and ``content_hash``, so a container holding V001 alone fails the seed with
+#: ``UndefinedColumn`` - which this gate would then report as "no LangSmith run was visible",
+#: blaming tracing for a schema that was never migrated. That is exactly how this step broke when
+#: V002 landed, and it is the reason the two files are listed together here rather than one being
+#: the "current" DDL.
+_DDL_V002_PATH: Final[Path] = _PROJECT_ROOT / "sql" / "V002__rag2_metadata_and_partial_indexes.sql"
+
 #: The same synthetic corpus the retrieval tests load. The question below is answerable from it,
 #: which matters only for the chunk count this prints - the gate's verdict depends on the run
 #: reaching LangSmith, not on what came back.
@@ -143,6 +151,22 @@ def _await_ready(dsn: str, attempts: int = 60, delay_seconds: float = 0.5) -> No
     raise RuntimeError(f"postgres never became ready at {dsn}") from last
 
 
+def _split_statements(ddl: str) -> list[str]:
+    """Split a DDL file into individual statements, dropping comment lines and blanks.
+
+    Naive by design - it splits on ``;`` and would mangle a semicolon inside a string literal or
+    a dollar-quoted body. Neither appears in this project's two DDL files, and a real SQL parser
+    for a handful of ``ALTER TABLE`` and ``CREATE INDEX`` statements would be more machinery than
+    the problem deserves. Reaching for ``sqlglot`` becomes correct the first time a function body
+    lands in ``sql/``.
+
+    :param ddl: The contents of a ``.sql`` file.
+    :returns: The statements, in file order, without their trailing semicolons.
+    """
+    stripped = "\n".join(line for line in ddl.splitlines() if not line.lstrip().startswith("--"))
+    return [statement.strip() for statement in stripped.split(";") if statement.strip()]
+
+
 def _seed(dsn: str) -> int:
     """Apply the sidecar's DDL and load the synthetic seed corpus.
 
@@ -152,6 +176,17 @@ def _seed(dsn: str) -> int:
         with conn.cursor() as cur:
             cur.execute(_DDL_PATH.read_text())
         conn.commit()
+
+    # V002 on its own AUTOCOMMIT connection, one statement at a time. Every index in it is
+    # CREATE INDEX CONCURRENTLY, which Postgres refuses inside a transaction block - and psycopg3
+    # opens an implicit transaction on a connection's first statement, and wraps a
+    # multi-statement execute() in one. Either shortcut fails with "cannot run inside a
+    # transaction block". tests/conftest.py applies the same file the same way for the same
+    # reason; the duplication is deliberate, as with _await_ready above - this module ships in
+    # the installed package and must not import the test tree to run.
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        for statement in _split_statements(_DDL_V002_PATH.read_text()):
+            cur.execute(statement)
 
     # No model is passed, so embed_dataframe loads its own. That is a second copy of the same
     # ~80 MB of weights this module already holds via taxcalc_ai.rag, and it is accepted rather
