@@ -2236,6 +2236,16 @@ or a p99 violation — six checkboxes ticked independently is exactly the failur
 terms of it: the LangSmith visibility gate, the report's baseline column, and the A/B rollback
 target. `retrieve_and_generate` was added beside it.
 
+**"Nothing was judged" is not a diagnosis.** The report, `PYTHON.md` and the PR description all
+said "spend-capped" for most of this branch's life, on no evidence: the annotation CI emits comes
+from the all-NaN branch, which fires for *any* per-job failure — revoked key, wrong model id,
+blocked egress, rate limit — because RAGAS catches each job's exception itself, logs it, and
+writes NaN. Four different fixes behind one identical green run. The gate now captures those log
+records and names the cause, and the first run with it returned `You have reached your specified
+workspace API usage limits. You will regain access on 2026-10-01 at 00:00 UTC.` The inference was
+right; it took a code change to *know* it — and it surfaced a fact nobody had, that the limit is
+**periodic**, so the gate measures itself for free on 1 October with no configuration change.
+
 **The RAGAS gate skipped, and the report says so.** `faithfulness >= 0.85` raises `SystemExit`;
 the other three metrics are asserted floors that diagnose the cause rather than being the
 user-facing failure. No evaluator credential exists in this environment, so the gate **skips** —
@@ -2257,7 +2267,7 @@ by a test, not by review.
 check (a second, no container), tenant + metadata isolation, the semantic-cache smoke test, and
 the RAGAS faithfulness gate last because it is the only step that spends money.
 
-**Result:** 121 tests green in the fast gate (88.12% coverage against an 85% floor), plus 2
+**Result:** 122 tests green in the fast gate (88.12% coverage against an 85% floor), plus 2
 tenant-isolation, 4 semantic-cache and 2 Great Expectations tests in their own steps; zero
 `mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; all four gate greps
 empty.

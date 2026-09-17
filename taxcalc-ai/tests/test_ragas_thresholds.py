@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -243,6 +244,32 @@ def _capture_judge_errors() -> Iterator[_JudgeErrorCapture]:
             logger.propagate = propagate
 
 
+#: Per-request noise that makes two records of the SAME cause compare unequal. Without this the
+#: deduplication in :func:`judge_failure_detail` collapses nothing: every Anthropic error carries
+#: its own ``request_id`` and every RAGAS record its own ``Job[n]`` index, so 200 instances of one
+#: usage-limit error reported as "+197 other distinct errors" - a 4,000-character annotation
+#: saying there are 200 problems when there is one. Observed on run 35190597131.
+_VOLATILE_ERROR_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    (r"'request_id': '[^']*'", "'request_id': '...'"),
+    (r"\bJob\[\d+\]", "Job[n]"),
+)
+
+
+def _normalise_job_error(message: str) -> str:
+    """Strip per-request identifiers so two records of one cause compare equal.
+
+    Deliberately a small fixed list rather than a general "remove anything that looks like an
+    id": over-normalising would merge genuinely different failures into one line and hide the
+    second cause, which is the failure mode this whole capture exists to prevent.
+
+    :param message: One formatted log record, already whitespace-collapsed.
+    :returns: The message with volatile per-request fields replaced by placeholders.
+    """
+    for pattern, replacement in _VOLATILE_ERROR_FIELDS:
+        message = re.sub(pattern, replacement, message)
+    return message
+
+
 def judge_failure_detail(capture: _JudgeErrorCapture) -> str:
     """Summarise captured judging errors for a skip message.
 
@@ -257,11 +284,11 @@ def judge_failure_detail(capture: _JudgeErrorCapture) -> str:
         return "every metric returned NaN and RAGAS logged nothing - cause unknown"
     seen: list[str] = []
     for message in capture.messages:
-        collapsed = " ".join(message.split())
+        collapsed = _normalise_job_error(" ".join(message.split()))
         if collapsed not in seen:
             seen.append(collapsed)
     shown = "; ".join(seen[:3])
-    suffix = f" (+{len(seen) - 3} other distinct errors)" if len(seen) > 3 else ""
+    suffix = f" (+{len(seen) - 3} other distinct causes)" if len(seen) > 3 else ""
     return f"{len(capture.messages)} judging job(s) failed. Underlying: {shown}{suffix}"
 
 

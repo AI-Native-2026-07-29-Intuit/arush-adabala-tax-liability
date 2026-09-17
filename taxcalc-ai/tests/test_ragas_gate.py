@@ -178,3 +178,59 @@ def test_the_all_nan_skip_reports_the_underlying_error_not_just_its_absence() ->
     from .test_ragas_thresholds import _JudgeErrorCapture
 
     assert "cause unknown" in judge_failure_detail(_JudgeErrorCapture())
+
+
+#: The real record RAGAS emitted on run 35190597131, with the request_id that made 200 copies of
+#: one cause compare unequal. Pinned verbatim because the normalisation is only worth anything if
+#: it handles the payload actually observed, rather than a tidied-up version of it.
+_REAL_CI_ERROR = (
+    "Exception raised in Job[{index}]: AnthropicInvalidRequestError(Error code: 400 - "
+    "{{'type': 'error', 'error': {{'type': 'invalid_request_error', 'message': 'You have "
+    "reached your specified workspace API usage limits. You will regain access on 2026-10-01 "
+    "at 00:00 UTC.'}}, 'request_id': 'req_011Cf8Z9{suffix}'}})"
+)
+
+
+def test_two_hundred_copies_of_one_cause_collapse_to_one_line() -> None:
+    """The real CI payload deduplicates to a single cause, not "+197 other distinct errors".
+
+    This is the bug the first version of the capture shipped with. Deduplication compared raw
+    strings, and every Anthropic error carries its own ``request_id`` while every RAGAS record
+    carries its own ``Job[n]`` index - so 200 instances of ONE usage-limit error were reported as
+    200 distinct causes in a 4,000-character annotation. An annotation that says there are two
+    hundred problems when there is one is not more informative than no annotation; it is a wall
+    of text a reviewer scrolls past, which is exactly what the capture was added to prevent.
+
+    Observed on run 35190597131, and pinned here with that run's own payload.
+    """
+    import logging
+
+    from .test_ragas_thresholds import _capture_judge_errors, judge_failure_detail
+
+    with _capture_judge_errors() as capture:
+        log = logging.getLogger("ragas.executor")
+        for index in range(200):
+            log.error(_REAL_CI_ERROR.format(index=index, suffix=f"{index:04d}xyz"))
+
+    detail = judge_failure_detail(capture)
+
+    assert "200 judging job(s) failed" in detail
+    # One cause, so no "+N other distinct causes" suffix at all.
+    assert "other distinct causes" not in detail, detail
+    # The actionable part survives normalisation: what went wrong, and when it clears.
+    assert "workspace API usage limits" in detail
+    assert "2026-10-01" in detail
+    # The volatile fields are replaced rather than deleted, so a reader can still see that a
+    # request id existed - they just cannot make two identical causes look different.
+    assert "'request_id': '...'" in detail
+    assert "Job[n]" in detail
+
+    # Normalisation must not be so aggressive that a genuinely different failure is swallowed.
+    with _capture_judge_errors() as mixed:
+        log = logging.getLogger("ragas.executor")
+        log.error(_REAL_CI_ERROR.format(index=1, suffix="0001abc"))
+        log.error("Exception raised in Job[2]: AuthenticationError: invalid x-api-key")
+
+    mixed_detail = judge_failure_detail(mixed)
+    assert "workspace API usage limits" in mixed_detail
+    assert "invalid x-api-key" in mixed_detail

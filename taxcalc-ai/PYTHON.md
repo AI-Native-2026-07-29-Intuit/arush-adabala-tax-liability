@@ -474,10 +474,11 @@ This sidecar gained the RAG 2.0 production retrieval stack today:
   `tests/test_semantic_cache.py`, `tests/test_tenant_isolation.py`, `tests/test_ragas_gate.py`.
 * `docs/ragas/w7d3.md` — the before-vs-after report. **Its cells read `n/m`, honestly:** the
   matrix was not measured. Locally there is no evaluator credential at all; in CI the secret
-  *is* configured and the Anthropic workspace is spend-capped, so RAGAS returns a complete
+  *is* configured and the workspace has hit its API usage limit, so RAGAS returns a complete
   result whose every value is NaN and the gate skips rather than raising. A configured secret
-  is not a working evaluator. See the report for why fabricating numbers there would be worse
-  than leaving them absent.
+  is not a working evaluator. **The limit is periodic and resets on 2026-10-01**, so re-running
+  the gate then measures it for free. See the report for why fabricating numbers there would be
+  worse than leaving them absent.
 
 ### How to run today's additions
 
@@ -690,6 +691,45 @@ test among many, while `SystemExit` terminates the step with the measured score 
 line. A second test, which needs no credentials and therefore runs everywhere, asserts the gate
 is strictly above the W7 D2 floor — so "thresholds tighten but never loosen" is enforced rather
 than commented.
+
+### "Nothing was judged" is not a diagnosis
+
+For most of this branch's life, the report, this file and the PR description all said the
+Anthropic workspace was **spend-capped**. Nobody had measured that. The annotation CI emits comes
+from the all-NaN branch, not from `_provisioning_failure` — and `_provisioning_failure` is the
+only code that matches on `"usage limit"`/`"credit balance"`/`"quota"`. The all-NaN branch fires
+for *any* per-job failure: a revoked key, a wrong model id, blocked egress from the runner, a
+rate limit, an SDK mismatch. RAGAS's executor catches each judging job's exception itself, logs
+it at ERROR and writes NaN into that row, so nothing propagates.
+
+Four different fixes behind one identical green-with-annotation run, and the evidence to tell
+them apart was in a log record being thrown away.
+
+`_JudgeErrorCapture` now attaches to RAGAS's loggers for the duration of an evaluation and
+`judge_failure_detail()` names the distinct underlying causes in the skip message. The first CI
+run with it said:
+
+> `You have reached your specified workspace API usage limits. You will regain access on
+> 2026-10-01 at 00:00 UTC.`
+
+The inference was right, and it took a code change to *know* that. It also produced a fact
+nobody had: the limit is **periodic**, so the gate measures itself for free on 1 October without
+anyone raising a limit or swapping a judge.
+
+Two bugs surfaced while building it, both in the capture rather than the pipeline:
+
+1. **Every record was counted twice.** The handler attaches to both `ragas` and `ragas.executor`,
+   and a child logger propagates the *same* `LogRecord` object to its parent. 201 logged records
+   were reported as 402 failed jobs. A wrong count is worse than no count — "402 jobs failed"
+   against a 50-row golden set sends someone hunting a retry storm that never happened. Records
+   are now deduplicated by identity.
+2. **Deduplication collapsed nothing.** It compared raw strings, and every Anthropic error
+   carries its own `request_id` while every RAGAS record carries its own `Job[n]` index — so 200
+   instances of one usage-limit error rendered as "+197 other distinct errors" in a
+   4,000-character annotation. An annotation claiming two hundred problems when there is one is a
+   wall of text a reviewer scrolls past, which is what the capture existed to prevent. Those two
+   volatile fields are now normalised before comparison — a small fixed list, deliberately, since
+   over-normalising would merge genuinely different failures and hide the second cause.
 
 ## AI authoring discipline (W7 D3 additions)
 
