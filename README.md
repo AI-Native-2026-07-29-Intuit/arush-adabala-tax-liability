@@ -2340,9 +2340,6 @@ database and the gate could not run anywhere but production. All of it now resol
   decorator and lifespan surfaces. Everything downstream — the committed `mcp.json`, the Claude
   Desktop launcher, the W7 D5 agent — is written against the v1 contract, so the pin is what
   keeps that contract true. Moving to 2.x is a rewrite of `app.py` and both transports.
-* **W7 D3 is not yet merged to `main`.** This branch is cut from `w7d3-implementation` rather
-  than `main`, because `retrieve_and_generate` — the function the RAG tool publishes — only
-  exists there.
 
 **Result:** 73 tests green (75.38% coverage against a 70% floor) plus 3 E2E tests skipping with a
 named cause; zero `mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; the
