@@ -43,6 +43,7 @@ from .test_ragas_thresholds import (
     PREFIXED_ANTHROPIC_KEY_ENV,
     _provisioning_failure,
     _run_eval,
+    judge_failure_detail,
 )
 
 #: The fatal floor. Below this the build stops.
@@ -80,7 +81,7 @@ def test_ragas_faithfulness_gate() -> None:
     means the evaluator was reachable and something specific broke, which still fails.
     """
     try:
-        scores = _run_eval()
+        scores, capture = _run_eval()
     # Broad, narrowed on the next line. Kept for the paths that DO propagate - an unusable key
     # can raise while the client is built, before any job is queued.
     except Exception as exc:
@@ -90,11 +91,9 @@ def test_ragas_faithfulness_gate() -> None:
         pytest.skip(_UNAVAILABLE.format(detail=f"{type(underlying).__name__}: {underlying}"))
 
     if scores and all(math.isnan(value) for value in scores.values()):
-        pytest.skip(
-            _UNAVAILABLE.format(
-                detail="every metric returned NaN; RAGAS logged per-job errors at ERROR level"
-            )
-        )
+        # Carries the real underlying error, not just "nothing was judged" - see
+        # test_ragas_thresholds._JudgeErrorCapture for why that distinction is the whole fix.
+        pytest.skip(_UNAVAILABLE.format(detail=judge_failure_detail(capture)))
 
     faithfulness = scores.get("faithfulness")
     if faithfulness is None or math.isnan(faithfulness):
@@ -137,3 +136,45 @@ def test_the_gate_threshold_is_stricter_than_the_w7d2_floor() -> None:
     # And the diagnostic floors are at or above their W7 D2 values, for the same reason.
     for metric, floor in DIAGNOSTIC_FLOORS.items():
         assert floor >= FLOORS[metric], (metric, floor, FLOORS[metric])
+
+
+def test_the_all_nan_skip_reports_the_underlying_error_not_just_its_absence() -> None:
+    """A dead evaluator produces a skip naming the real cause, deduplicated.
+
+    Runs without credentials and without a network. RAGAS reports a dead evaluator as a complete
+    result full of NaN rather than as an exception, so the all-NaN branch is the one that fires
+    in CI - and until now it could say only *that* nothing was judged, never *why*. "Raise the
+    spend limit", "rotate the key", "the model id is wrong" and "CI has no egress" are four
+    different fixes behind one identical annotation.
+
+    The deduplication matters as much as the capture: a fifty-row run against a dead evaluator
+    logs ~200 identical records, and a skip reason that is two hundred copies of one line is less
+    informative than one copy, because nobody reads to the end of it.
+    """
+    import logging
+
+    from .test_ragas_thresholds import _capture_judge_errors, judge_failure_detail
+
+    with _capture_judge_errors() as capture:
+        ragas_log = logging.getLogger("ragas.executor")
+        for _ in range(200):
+            ragas_log.error("Exception raised in Job: AuthenticationError: invalid x-api-key")
+        ragas_log.error("Exception raised in Job: BadRequestError: credit balance is too low")
+
+    detail = judge_failure_detail(capture)
+
+    assert "201 judging job(s) failed" in detail
+    # Both distinct causes survive; the 200 duplicates collapse to one mention.
+    assert "invalid x-api-key" in detail
+    assert "credit balance is too low" in detail
+    assert detail.count("invalid x-api-key") == 1, detail
+
+    # The handler is detached on exit, so a later evaluation in the same session cannot
+    # accumulate this one's records - and a module-level logger is not left holding it.
+    assert capture not in logging.getLogger("ragas.executor").handlers
+
+    # And the honest answer when RAGAS logged nothing at all: say the cause is unknown rather
+    # than inventing one.
+    from .test_ragas_thresholds import _JudgeErrorCapture
+
+    assert "cause unknown" in judge_failure_detail(_JudgeErrorCapture())
