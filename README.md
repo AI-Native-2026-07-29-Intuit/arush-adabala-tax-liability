@@ -2300,7 +2300,8 @@ DTO — seven checkboxes ticked independently is exactly the failure mode.
 | [`transports/sse.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/transports/sse.py) | Raw-ASGI bearer middleware, JWKS validation **opt-in** | The bearer is captured at the `GET /sse` handshake, not at `POST /messages/`, because the **entire session runs inside the handshake's coroutine** and an asyncio task inherits the context it was created in — a `ContextVar` set during a POST is invisible to the tool call. `BaseHTTPMiddleware` runs downstream in a separate task and breaks exactly that, hence raw ASGI. Local JWKS validation defaults **off**: the Java services validate authoritatively, and a second validator on the wrong issuer is not defence in depth, it is an outage that looks like a broken service. |
 | [`scripts/replay.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/scripts/replay.py) | Fixture replay, per-tool p50/p95/p99, ±15% p95 gate | Times **this server's own work** against canned upstreams, deliberately excluding the network: a change here cannot make the network faster, and a gate that fires on other teams' deploys stops being read. Compares p95 as a **ratio against the previous run**, because an absolute millisecond budget is a statement about the CI runner's instance type, not about the diff. |
 | [`tests/test_tool_descriptions.py`](taxcalc-mcp-server/tests/test_tool_descriptions.py) | ≥200 chars, `Use this`, `Do NOT`, a closing example, plus `mcp.json` drift | A tool that raises gets an error someone can act on. A tool whose description does not say *when* to use it simply never gets called — the model picks something else, answers worse, and **nothing logs a problem**. There is no stack trace for "the model did not consider this tool". |
-| [`taxcalc_mcp_server-ci.yml`](.github/workflows/taxcalc_mcp_server-ci.yml) | PR tier (unit + schema + description + 100-call smoke + replay + wheel), merge tier (Testcontainers E2E) | The PR tier catches everything inside this codebase; it **cannot** catch drift between this server and the Java one, because it supplies its own stub upstream. That is what the merge tier is for. The merge tier also **fails on a skip** — the E2E skips itself when Docker is unavailable, which is right on a laptop and wrong on `main`, where a skip would let integration drift through under a green tick. |
+| [`taxcalc-orders/`](taxcalc-orders/) | A standalone Spring Boot order service: two endpoints, Postgres, Flyway, no JPA | Built because the course's `uptimecrew/taxcalc-orders:w3d1` image is not pullable here, and an E2E that skips is an E2E that proves nothing. Standalone rather than a slice of the monolith, which needs MongoDB, Redis, Kafka and an OAuth2 issuer to reach a healthy state — a nine-container test mostly exercising infrastructure. **Idempotency is a unique index on `(tenant_id, idempotency_key)`, not application code**: two retries arrive concurrently as a matter of course, so "check the key, then insert" lets both check, both find nothing, and both insert, debiting the ledger twice while every line of code looks correct in review. |
+| [`taxcalc_mcp_server-ci.yml`](.github/workflows/taxcalc_mcp_server-ci.yml) | PR tier (unit + schema + description + 100-call smoke + replay + wheel), merge tier (Testcontainers E2E) | The PR tier catches everything inside this codebase; it **cannot** catch drift between this server and the Java one, because it supplies its own stub upstream. That is what the merge tier is for. The merge tier also **fails on a skip** — the E2E skips itself when Docker or a JDK is unavailable, which is right on a laptop and wrong on `main`, where a skip would let integration drift through under a green tick. |
 
 ### Three defects found by running it, none by reading it
 
@@ -2325,12 +2326,18 @@ database and the gate could not run anywhere but production. All of it now resol
 
 ### Honest gaps
 
-* **The Testcontainers E2E has not run here.** `uptimecrew/taxcalc-orders:w3d1` is not pullable
-  from this machine (`pull access denied`), so the E2E **skips, naming that exact cause**, and
-  the merge-to-main tier is written to fail on a skip. The idempotency contract is nonetheless
-  verified locally: `tests/stub_orders.py` implements a real idempotency index, and the stdio
-  smoke test asserts both that two calls return one `refund_id` **and** that the ledger holds
-  one entry — a stub that always answered the same would satisfy the first and fail the second.
+* **The order service is ours, not the course's image.** `uptimecrew/taxcalc-orders:w3d1`
+  returns `pull access denied` here, so [`taxcalc-orders/`](taxcalc-orders/) is a real
+  implementation of that contract rather than the course's binary. The E2E therefore proves this
+  capstone's two services agree with each other; it cannot prove agreement with an image nobody
+  here can run. Everything it asserts — cross-language field names, `BigDecimal` scale, the
+  `Idempotency-Key` header, a single ledger row — is real, and the service is deployable.
+* **The order service authenticates by presence, not by signature.** `TenantAuthFilter` requires
+  a bearer token and an `X-Tenant` header; it does not verify the signature, issuer, audience or
+  scopes, because doing so needs an identity provider in the test topology. Presence is exactly
+  the property the E2E asserts and exactly the one that regresses — a refactor that drops the
+  `Authorization` header is caught. **It is not a trust boundary and must not be deployed as
+  one**; the service that owns the data verifies the token against the real issuer.
 * **`llm.chat` targets this capstone's real proxy, not the generic one.** The Java
   `LlmProxyController` serves `POST /v1/completions` taking `{prompt, model, feature}`, not a
   `/v1/chat/completions` endpoint taking a `messages` array. The MCP-facing schema keeps the
@@ -2341,10 +2348,11 @@ database and the gate could not run anywhere but production. All of it now resol
   Desktop launcher, the W7 D5 agent — is written against the v1 contract, so the pin is what
   keeps that contract true. Moving to 2.x is a rewrite of `app.py` and both transports.
 
-**Result:** 73 tests green (75.38% coverage against a 70% floor) plus 3 E2E tests skipping with a
-named cause; zero `mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; the
-wheel builds and exposes both console scripts; all four tools replay with p95 under 1 ms except
-the first-call outlier on `orders.create_refund`.
+**Result:** 73 Python tests green (75.38% coverage against a 70% floor), **6 Testcontainers E2E
+tests green** against Postgres + the real Spring service, and 13 JUnit 5 tests on the order
+service; zero `mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; the wheel
+builds and exposes both console scripts; all four tools replay with p95 under 1 ms except the
+first-call outlier on `orders.create_refund`.
 
 
 ## Build and Test
@@ -2502,8 +2510,13 @@ TAXCALC_MCP_BEARER_JWT=dummy-for-tests LANGSMITH_API_KEY=dummy-for-tests \
 # .replay/latest.json; add --compare-to to fail on a >15% p95 regression.
 TAXCALC_MCP_BEARER_JWT=dummy-for-tests LANGSMITH_API_KEY=dummy-for-tests \
   uv run python -m taxcalc_mcp_server.scripts.replay --fixtures tests/fixtures/
-# The merge tier. Needs Docker AND a pullable uptimecrew/taxcalc-orders:w3d1; it SKIPS with the
-# exact cause otherwise, and CI treats a skip here as a failure.
+# The order service the E2E runs against (a standalone Gradle build; the root wrapper drives it).
+cd .. && ./gradlew -p taxcalc-orders test        # 13 JUnit 5 tests, no containers
+./gradlew -p taxcalc-orders bootJar              # the artefact the E2E's image copies in
+cd taxcalc-mcp-server
+# The merge tier: Postgres + taxcalc-orders + the MCP server, three real processes. Needs Docker
+# and a JDK; it builds the jar itself if missing and SKIPS with the exact cause if it cannot,
+# which CI treats as a failure.
 uv run pytest -v -m e2e
 
 # Drive the stdio server by hand, the way Claude Desktop does.

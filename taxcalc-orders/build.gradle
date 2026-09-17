@@ -1,0 +1,53 @@
+// taxcalc-orders/build.gradle
+//
+// Deliberately small. Four starters and a driver: web for the two endpoints, jdbc for the
+// repositories, flyway for the schema, actuator for the readiness probe the E2E waits on.
+//
+// No JPA, and that is a decision rather than an omission. This project's conventions put
+// `private final` on fields and forbid Lombok; a JPA entity needs a no-arg constructor and
+// mutable fields for Hibernate's proxying and dirty-checking, so every entity would be a
+// documented exception to the rule. JdbcTemplate lets the domain types stay immutable records
+// and the SQL stay visible, which for a service with two tables is also simply less machinery.
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.uptimecrew'
+version = '0.1.0'
+
+java {
+    toolchain {
+        // Pinned rather than inherited from whatever JDK happens to be on PATH: a jar built on
+        // 21 and run on the image's 17 fails at class-load time with an unhelpful error.
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    // JUnit 5 only, per this repository's conventions.
+    useJUnitPlatform()
+}
+
+// A fixed jar name so the Dockerfile and the E2E can both name the artefact without globbing a
+// version into their paths.
+tasks.named('bootJar') {
+    archiveFileName = 'taxcalc-orders.jar'
+}

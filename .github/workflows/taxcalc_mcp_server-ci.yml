@@ -27,6 +27,7 @@ on:
     paths:
       - "taxcalc-mcp-server/**"
       - "taxcalc-ai/**"
+      - "taxcalc-orders/**"
       - ".github/workflows/taxcalc_mcp_server-ci.yml"
   pull_request:
     branches: [main]
@@ -35,6 +36,10 @@ on:
       # taxcalc-ai is a path dependency: a change to the sidecar can break this server's import
       # or its RAG adapter without touching a single file under taxcalc-mcp-server/.
       - "taxcalc-ai/**"
+      # taxcalc-orders is the service the orders.* tools forward to. A field renamed in its DTOs
+      # breaks the MCP tools' response parsing without touching a Python file, which is the whole
+      # reason the E2E exists.
+      - "taxcalc-orders/**"
       - ".github/workflows/taxcalc_mcp_server-ci.yml"
 
 concurrency:
@@ -48,6 +53,31 @@ permissions:
   contents: read
 
 jobs:
+  orders-service:
+    name: taxcalc-orders unit tests (JUnit 5)
+    # On the PR tier: no Docker, no containers, a couple of seconds. These pin the money rules
+    # (scale 2, HALF_UP, never scientific notation) and the snake_case wire shape the Python
+    # consumer validates against with extra="forbid" - so a renamed @JsonProperty fails here, in
+    # the fast tier, rather than waiting for the merge-tier E2E to catch it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        # Same SHA-pinned action serverless.yml already uses, rather than a second pin of the
+        # same action to keep in step. 17 not 21: taxcalc-orders' toolchain pins 17, and the
+        # image it ships in is a 17 JRE.
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: gradle
+
+      - name: gradle test
+        run: ./gradlew -p taxcalc-orders test
+
   per-pr:
     name: ruff + mypy + unit + schema + description + smoke + replay
     # Pinned, not ubuntu-latest: `latest` moves under you, and a gate whose runner image
@@ -138,7 +168,7 @@ jobs:
   merge-to-main:
     name: Testcontainers E2E (MCP -> Spring -> Postgres)
     if: github.ref == 'refs/heads/main'
-    needs: per-pr
+    needs: [orders-service, per-pr]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
@@ -147,6 +177,21 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: gradle
+
+      - name: Build the taxcalc-orders jar
+        # Built here rather than inside the image: an in-image build would download Gradle and the
+        # whole dependency graph on every run to produce an artefact the runner makes in seconds
+        # from its cache. The E2E can build it itself, but doing it as its own step means a Java
+        # compile error is reported as a Java compile error rather than as a skipped Python test.
+        working-directory: .
+        run: ./gradlew -p taxcalc-orders bootJar
 
       - name: Install uv (pinned)
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0

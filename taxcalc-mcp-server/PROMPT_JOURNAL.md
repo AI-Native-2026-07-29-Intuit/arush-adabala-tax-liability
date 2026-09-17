@@ -115,9 +115,27 @@ would have passed while proving the opposite of what it claims. The shipped vers
 More importantly, `assert first["result"] == second["result"]` is **not an idempotency test**. It
 passes if the service issues two separate refunds and happens to render them identically; it
 would also pass against a stub that returns a constant. What makes a retry safe is that the
-*ledger* was debited once, so the shipped assertion checks the refund ids match **and** that only
-one refund exists. The local stub in `tests/stub_orders.py` implements the idempotency index for
-real, for the same reason: a stub written to agree with the assertion tests nothing.
+*ledger* was debited once, so the shipped assertion checks the refund ids match **and** that the
+ledger holds exactly one row.
+
+The prompt also assumed an order service that could be pulled. It could not
+(`uptimecrew/taxcalc-orders:w3d1` returns `pull access denied` here), so `taxcalc-orders/` is a
+real implementation of that contract — and writing it moved the idempotency guarantee to where it
+belongs. Claude's first draft of the Java side did the natural thing:
+
+```java
+if (refunds.findByIdempotencyKey(tenantId, key).isEmpty()) {
+    refunds.insert(...);
+}
+```
+
+**Rejected.** That is the same defect as the float literal, one layer down: it reads correctly and
+is wrong under the only conditions that matter. Two retries of one request arrive concurrently as
+a matter of course — a retry is what a caller does when the first response was slow — so both
+lookups find nothing, both inserts succeed, and the ledger is debited twice with no line of code
+having misbehaved. The shipped version pushes the decision into a unique index on
+`(tenant_id, idempotency_key)` and reads back the winner on conflict, because the database is the
+only participant that sees both statements.
 
 ## What running it caught that reading it did not
 
