@@ -23,25 +23,22 @@ other in-flight request on this process stops, including their heartbeats. ``asy
 moves it off the loop and ``asyncio.wait_for`` puts a ceiling on it; a miss raises 5040, which
 is a code the W7 D5 agent can act on (retry smaller, or answer ungrounded) rather than a hang.
 
-**Clients are opened lazily, on first use, not in the lifespan.** Three of the four tools on
-this server need neither Postgres nor Redis nor an Anthropic key. Opening those connections at
-startup would mean a desktop user who only ever looks up orders cannot start the server without
-a corpus - a hard dependency created by nothing but where the code was placed.
+**This module owns no clients.** The pipeline's Anthropic client, corpus connection and Redis
+handle are resolved inside :func:`taxcalc_mcp_server.app.rag_entrypoint`, behind a
+``(question, tenant_id, top_k)`` signature. That keeps the hard dependencies off the other three
+tools - a desktop user who only looks up orders can run this server with no corpus at all - and
+it is what lets the fixture-replay gate substitute a canned pipeline without a live Postgres.
 """
 
 import asyncio
-import os
 from typing import Annotated, Final
 
-import psycopg
-import redis
-from anthropic import Anthropic
 from langsmith import traceable
-from psycopg.rows import TupleRow
 from pydantic import BaseModel, ConfigDict, Field
 
-from taxcalc_mcp_server.app import ctx, log, mcp
+from taxcalc_mcp_server.app import ctx, mcp
 from taxcalc_mcp_server.errors import rag_timeout
+from taxcalc_mcp_server.observability import observe
 from taxcalc_mcp_server.tools.orders import TENANT_PATTERN
 
 #: A retrieval relevance score, in [0, 1]. A float, and correctly so.
@@ -53,12 +50,6 @@ from taxcalc_mcp_server.tools.orders import TENANT_PATTERN
 #: a balance, and no auditor ever reconciles it. Money in this package is `Decimal`, always; this
 #: is not money.
 type RelevanceScore = float
-
-#: Environment variables the pipeline's clients are built from. Named here rather than read
-#: inline so the three that this server adds to the sidecar's own set are visible in one place.
-PG_DSN_ENV: Final[str] = "TAXCALC_AI_PG_DSN"
-REDIS_URL_ENV: Final[str] = "TAXCALC_AI_REDIS_URL"
-
 
 class RagArgs(BaseModel):
     """Arguments for ``rag.retrieve_and_generate``."""
@@ -128,36 +119,6 @@ _DESC_RAG: Final[str] = (
 
 _RAG_ARGS: Final = RagArgs.model_fields
 
-#: Lazily-opened pipeline clients, cached for the life of the process. Opened on the first call
-#: to this tool and reused by every later one - a per-call Postgres connection would spend a TCP
-#: handshake and a TLS negotiation on every question asked.
-_CLIENTS: dict[str, object] = {}
-
-
-def _clients() -> tuple[Anthropic, psycopg.Connection[TupleRow], redis.Redis]:
-    """Open (once) and return the three clients the W7 D3 pipeline is injected with.
-
-    :returns: The Anthropic client, the corpus connection, and the Redis client.
-    :raises KeyError: if ``TAXCALC_AI_PG_DSN`` or ``TAXCALC_AI_REDIS_URL`` is unset. Deliberately
-        not defaulted to a localhost DSN: a default turns a misconfigured deployment into a
-        process that connects somewhere plausible and wrong, which is discovered much later than
-        one that refuses. Raised on first *use* rather than at boot, so the three tools that need
-        no corpus keep working on a server that has none.
-    """
-    if not _CLIENTS:
-        _CLIENTS["anthropic"] = Anthropic()
-        _CLIENTS["conn"] = psycopg.connect(os.environ[PG_DSN_ENV])
-        _CLIENTS["redis"] = redis.from_url(os.environ[REDIS_URL_ENV])
-        log.info("rag.clients.opened")
-    anthropic = _CLIENTS["anthropic"]
-    conn = _CLIENTS["conn"]
-    r = _CLIENTS["redis"]
-    assert isinstance(anthropic, Anthropic)  # noqa: S101 - narrowing a heterogeneous cache
-    assert isinstance(conn, psycopg.Connection)  # noqa: S101
-    assert isinstance(r, redis.Redis)  # noqa: S101
-    return anthropic, conn, r
-
-
 def _doc_id_of(chunk_id: str) -> str:
     """Recover the document id from a chunk id.
 
@@ -184,69 +145,50 @@ async def _retrieve_and_generate(args: RagArgs) -> dict[str, object]:
     :raises McpError: 5040 when the pipeline misses :attr:`Settings.tool_timeout_rag_s`.
     """
     c = ctx()
-    log.info(
-        "tool.invoke.start",
-        tool="rag.retrieve_and_generate",
-        tenant_id=args.tenant_id,
-        top_k=args.top_k,
-    )
-    anthropic, conn, r = _clients()
+    async with observe("rag.retrieve_and_generate", args.tenant_id) as span:
+        span["top_k"] = args.top_k
 
-    try:
-        # to_thread because the pipeline is synchronous CPU work; wait_for because a cross-encoder
-        # that never returns must not become a request that never returns. See the module docstring.
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                c.rag_fn, args.question, args.tenant_id, anthropic=anthropic, conn=conn, r=r
-            ),
-            timeout=c.settings.tool_timeout_rag_s,
-        )
-    except TimeoutError as exc:
-        log.info(
-            "tool.invoke.end",
-            tool="rag.retrieve_and_generate",
-            tenant_id=args.tenant_id,
-            mcp_error_code=5040,
-        )
-        raise rag_timeout(
-            f"rag timed out after {c.settings.tool_timeout_rag_s}s"
-        ) from exc
-
-    raw_citations = result.get("citations", [])
-    citations: list[Citation] = []
-    if isinstance(raw_citations, list):
-        for item in raw_citations[: args.top_k]:
-            if not isinstance(item, dict):
-                continue
-            chunk_id = str(item.get("chunk_id", ""))
-            citations.append(
-                Citation(
-                    chunk_id=chunk_id,
-                    doc_id=_doc_id_of(chunk_id),
-                    score=float(item.get("score", 0.0)),
-                )
+        try:
+            # to_thread because the pipeline is synchronous CPU work; wait_for because a
+            # cross-encoder that never returns must not become a request that never returns.
+            # See the module docstring.
+            result = await asyncio.wait_for(
+                asyncio.to_thread(c.rag_fn, args.question, args.tenant_id, args.top_k),
+                timeout=c.settings.tool_timeout_rag_s,
             )
+        except TimeoutError as exc:
+            raise rag_timeout(f"rag timed out after {c.settings.tool_timeout_rag_s}s") from exc
 
-    raw_coverage = result.get("coverage", {})
-    # The pipeline's `coverage` is a four-key mapping; `jaccard` is the one number a caller can
-    # act on. `.get(..., 0.0)` rather than `[...]` so a future pipeline that renames the key
-    # degrades one field instead of failing the whole answer.
-    jaccard = raw_coverage.get("jaccard", 0.0) if isinstance(raw_coverage, dict) else 0.0
+        raw_citations = result.get("citations", [])
+        citations: list[Citation] = []
+        if isinstance(raw_citations, list):
+            for item in raw_citations[: args.top_k]:
+                if not isinstance(item, dict):
+                    continue
+                chunk_id = str(item.get("chunk_id", ""))
+                citations.append(
+                    Citation(
+                        chunk_id=chunk_id,
+                        doc_id=_doc_id_of(chunk_id),
+                        score=float(item.get("score", 0.0)),
+                    )
+                )
 
-    answer = RagAnswer(
-        answer=str(result.get("text", "")),
-        citations=citations,
-        coverage=float(jaccard),
-        rerank_timed_out=bool(result.get("rerank_timed_out", False)),
-    )
-    log.info(
-        "tool.invoke.end",
-        tool="rag.retrieve_and_generate",
-        tenant_id=args.tenant_id,
-        citations=len(answer.citations),
-        rerank_timed_out=answer.rerank_timed_out,
-    )
-    return answer.model_dump(mode="json")
+        raw_coverage = result.get("coverage", {})
+        # The pipeline's `coverage` is a four-key mapping; `jaccard` is the one number a caller
+        # can act on. `.get(..., 0.0)` rather than `[...]` so a future pipeline that renames the
+        # key degrades one field instead of failing the whole answer.
+        jaccard = raw_coverage.get("jaccard", 0.0) if isinstance(raw_coverage, dict) else 0.0
+
+        answer = RagAnswer(
+            answer=str(result.get("text", "")),
+            citations=citations,
+            coverage=float(jaccard),
+            rerank_timed_out=bool(result.get("rerank_timed_out", False)),
+        )
+        span["citations"] = len(answer.citations)
+        span["rerank_timed_out"] = answer.rerank_timed_out
+        return answer.model_dump(mode="json")
 
 
 @mcp.tool(name="rag.retrieve_and_generate", description=_DESC_RAG)

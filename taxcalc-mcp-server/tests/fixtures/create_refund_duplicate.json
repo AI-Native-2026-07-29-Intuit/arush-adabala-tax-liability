@@ -1,0 +1,20 @@
+{
+  "tool": "orders.create_refund",
+  "arguments": {
+    "order_id": "ord-synth-9001",
+    "amount": "10.00",
+    "reason": "duplicate",
+    "tenant_id": "tenant-a",
+    "idempotency_key": "123e4567-e89b-42d3-a456-426614174000"
+  },
+  "upstream": {
+    "status": 200,
+    "body": {
+      "order_id": "ord-synth-9001",
+      "refund_id": "rfnd-synth-0001",
+      "amount": "10.00",
+      "reason": "duplicate",
+      "status": "refunded"
+    }
+  }
+}

@@ -27,8 +27,9 @@ from typing import Annotated, Final, Literal
 from langsmith import traceable
 from pydantic import BaseModel, ConfigDict, Field
 
-from taxcalc_mcp_server.app import ctx, log, mcp
+from taxcalc_mcp_server.app import ctx, mcp
 from taxcalc_mcp_server.errors import _map_http
+from taxcalc_mcp_server.observability import observe
 from taxcalc_mcp_server.tenancy import auth_headers
 from taxcalc_mcp_server.tools.orders import TENANT_PATTERN
 
@@ -116,52 +117,42 @@ async def _chat(args: ChatArgs) -> dict[str, object]:
         4030 when the JWT lacks the proxy's scope.
     """
     c = ctx()
-    log.info(
-        "tool.invoke.start",
-        tool="llm.chat",
-        tenant_id=args.tenant_id,
-        turns=len(args.messages),
-    )
+    async with observe("llm.chat", args.tenant_id) as span:
+        span["turns"] = len(args.messages)
 
-    # An absolute URL through the SAME client as the order calls: the base_url is the order
-    # service, so this one line is what keeps a second connection pool, a second timeout policy
-    # and a second thing to close from existing.
-    url = f"{c.settings.normalised_llm_proxy_url()}{c.settings.llm_proxy_chat_path}"
-    r = await c.http.post(
-        url,
-        json={
-            "prompt": _flatten(args.messages),
-            "maxTokens": args.max_tokens,
-            "feature": COST_FEATURE,
-        },
-        headers=auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id),
-    )
-    if r.status_code != 200:
-        log.info(
-            "tool.invoke.end", tool="llm.chat", tenant_id=args.tenant_id, http_status=r.status_code
+        # An absolute URL through the SAME client as the order calls: the base_url is the order
+        # service, so this one line is what keeps a second connection pool, a second timeout
+        # policy and a second thing to close from existing.
+        url = f"{c.settings.normalised_llm_proxy_url()}{c.settings.llm_proxy_chat_path}"
+        r = await c.http.post(
+            url,
+            json={
+                "prompt": _flatten(args.messages),
+                "maxTokens": args.max_tokens,
+                "feature": COST_FEATURE,
+            },
+            headers=auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id),
         )
-        raise _map_http(r.status_code, r.text)
-
-    body = r.json()
-    reply = ChatReply(
-        text=body.get("text", ""),
-        model=body.get("modelId", ""),
-        input_tokens=int(body.get("inputTokens", 0)),
-        output_tokens=int(body.get("outputTokens", 0)),
-    )
-    log.info(
-        "tool.invoke.end",
-        tool="llm.chat",
-        tenant_id=args.tenant_id,
-        http_status=200,
+        span["http_status"] = r.status_code
         # The proxy reports the call's cost in a response header. Echoed into this server's own
-        # structured log - as integer minor units, per the W6 D4 money discipline, never a float -
-        # so the Grafana dashboard can aggregate MCP-attributed spend without joining against the
-        # proxy's logs. Absent header means "the proxy did not price this call", which is a 0
-        # here and a question for the proxy's own metrics, not an error for the caller.
-        cost_usd_minor=_cost_minor(r.headers.get("X-Cost-Usd")),
-    )
-    return reply.model_dump(mode="json")
+        # structured log - as integer minor units, per the W6 D4 money discipline, never a
+        # float - so the Grafana dashboard can aggregate MCP-attributed spend without joining
+        # against the proxy's logs. A missing header means "the proxy did not price this call",
+        # which is a 0 here and a question for the proxy's own metrics, not an error for the
+        # caller. Recorded BEFORE the status check so a rate-limited call still reports what it
+        # cost - a 429 that billed is exactly the case an operator wants to see.
+        span["cost_usd_minor"] = _cost_minor(r.headers.get("X-Cost-Usd"))
+        if r.status_code != 200:
+            raise _map_http(r.status_code, r.text)
+
+        body = r.json()
+        reply = ChatReply(
+            text=body.get("text", ""),
+            model=body.get("modelId", ""),
+            input_tokens=int(body.get("inputTokens", 0)),
+            output_tokens=int(body.get("outputTokens", 0)),
+        )
+        return reply.model_dump(mode="json")
 
 
 def _cost_minor(header: str | None) -> int:

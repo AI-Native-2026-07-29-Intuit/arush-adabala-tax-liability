@@ -76,3 +76,21 @@ def auth_headers(configured: str, tenant_id: str) -> dict[str, str]:
         "Authorization": f"Bearer {bearer_token(configured)}",
         "X-Tenant": tenant_id,
     }
+
+
+def parse_bearer(header_value: str | None) -> str:
+    """Extract the raw token from an ``Authorization`` header value.
+
+    Case-insensitive on the scheme because RFC 7235 says the scheme is, and a client that sends
+    ``bearer`` rather than ``Bearer`` is correct even though it is unusual - rejecting it would
+    be this server inventing a stricter rule than the standard for no benefit.
+
+    :param header_value: The raw header, or ``None`` when absent.
+    :returns: The token, or ``""`` when the header is missing or not a bearer credential.
+    """
+    if not header_value:
+        return ""
+    scheme, _, token = header_value.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()

@@ -18,12 +18,21 @@ dependency uses, including httpx and the MCP SDK itself) and ``structlog``'s
 ``PrintLoggerFactory(file=sys.stderr)`` for this server's own structured lines. Pinning only one
 of the two leaves the other free to print, which is the subtle version of the same outage.
 
-**The RAG pipeline is imported inside the lifespan, not at module scope.** Importing
-:mod:`taxcalc_ai.rag` loads an 80 MB sentence-transformer and raises if ``LANGSMITH_API_KEY`` is
-unset. At module scope that cost and that requirement would be paid by *everything* that touches
-this module - the schema tests, the description gate, a ``--help`` - and one missing credential
-would stop a server whose other three tools need no corpus at all. Inside the lifespan it is
-still loaded exactly once per process, at startup, which is the property that mattered.
+**The RAG pipeline is imported on first use, on a worker thread.** Importing
+:mod:`taxcalc_ai.rag` loads an 80 MB sentence-transformer, reaches out to the model hub to check
+for updates, and raises if ``LANGSMITH_API_KEY`` is unset. None of that belongs at module scope,
+where every consumer of this module - the schema tests, the description gate, a ``--help`` -
+would pay it and one missing credential would stop a server whose other three tools need no
+corpus at all.
+
+It does not belong in the lifespan either, which is where it was first put and where it was
+measurably wrong: on the SSE transport the lifespan runs as part of serving the first client's
+handshake, so that client waited through the whole model load - and, when the hub was
+unreachable, through five network retries before the local cache was used. A tool the caller had
+not asked for delayed the connection for the ones they had. :func:`rag_entrypoint` therefore
+imports on first call, and its only caller invokes it inside ``asyncio.to_thread``, so the load
+happens off the event loop and blocks nothing else. Still once per process - module imports are
+cached - just paid by the first request that actually wants retrieval.
 
 **Tool argument schemas are hardened after registration.** See
 :func:`enforce_strict_tool_schemas` - FastMCP's generated top-level argument model ignores
@@ -33,6 +42,7 @@ unknown keys, and this server does not want that.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -40,8 +50,11 @@ from dataclasses import dataclass
 from typing import Final
 
 import httpx
+import psycopg
+import redis
 import structlog
 from mcp.server.fastmcp import FastMCP
+from psycopg.rows import TupleRow
 
 from taxcalc_mcp_server import __version__
 from taxcalc_mcp_server.settings import Settings
@@ -76,15 +89,84 @@ class AppCtx:
     :ivar http: The one shared client, based at the order service. Tools that call a *different*
         host (``llm.chat``) pass an absolute URL through the same client, reusing its connection
         pool and timeout policy rather than opening a second one.
-    :ivar rag_fn: The W7 D3 :func:`taxcalc_ai.rag.retrieve_and_generate` pipeline, bound once at
-        startup. Held as a value rather than imported at call time so a test can substitute a
-        fake without monkey-patching a module attribute.
+    :ivar rag_fn: The retrieval pipeline, as ``(question, tenant_id, top_k) -> raw result``. Held
+        as a value rather than imported at call time so a test or the latency gate can substitute
+        a canned pipeline without monkey-patching a module attribute - and, because
+        :func:`rag_entrypoint` hides the pipeline's clients behind this signature, without a
+        database either.
     :ivar settings: The validated configuration, read once at boot.
     """
 
     http: httpx.AsyncClient
-    rag_fn: Callable[..., dict[str, object]]
+    rag_fn: Callable[[str, str, int], dict[str, object]]
     settings: Settings
+
+
+#: Environment variables the W7 D3 pipeline's clients are built from.
+PG_DSN_ENV: Final[str] = "TAXCALC_AI_PG_DSN"
+REDIS_URL_ENV: Final[str] = "TAXCALC_AI_REDIS_URL"
+
+#: Lazily-opened pipeline clients, cached for the life of the process. A per-call Postgres
+#: connection would spend a TCP handshake and a TLS negotiation on every question asked.
+_RAG_CLIENTS: dict[str, object] = {}
+
+
+def _rag_clients() -> tuple[object, psycopg.Connection[TupleRow], redis.Redis]:
+    """Open (once) and return the three clients the W7 D3 pipeline is injected with.
+
+    :returns: The Anthropic client, the corpus connection, and the Redis client.
+    :raises KeyError: if :data:`PG_DSN_ENV` or :data:`REDIS_URL_ENV` is unset. Deliberately not
+        defaulted to a localhost DSN: a default turns a misconfigured deployment into a process
+        that connects somewhere plausible and wrong, which is discovered much later than one
+        that refuses.
+    """
+    if not _RAG_CLIENTS:
+        from anthropic import Anthropic
+
+        _RAG_CLIENTS["anthropic"] = Anthropic()
+        _RAG_CLIENTS["conn"] = psycopg.connect(os.environ[PG_DSN_ENV])
+        _RAG_CLIENTS["redis"] = redis.from_url(os.environ[REDIS_URL_ENV])
+        log.info("rag.clients.opened")
+    conn = _RAG_CLIENTS["conn"]
+    r = _RAG_CLIENTS["redis"]
+    assert isinstance(conn, psycopg.Connection)  # noqa: S101 - narrowing a heterogeneous cache
+    assert isinstance(r, redis.Redis)  # noqa: S101
+    return _RAG_CLIENTS["anthropic"], conn, r
+
+
+def rag_entrypoint(question: str, tenant_id: str, top_k: int) -> dict[str, object]:
+    """Run the W7 D3 pipeline for one question, opening its clients and its model on first use.
+
+    **This function is the injection seam, and its narrow signature is the point.** Everything
+    the pipeline needs that is *not* part of the question - the Anthropic client, the corpus
+    connection, the Redis handle, the 80 MB encoder - is resolved in here. So a caller that wants
+    to substitute a canned pipeline (the fixture-replay gate, a unit test) replaces this one
+    callable and needs no database, no Redis and no API key. When those dependencies were reached
+    for inside the tool handler instead, a fully stubbed pipeline still demanded a live Postgres,
+    which made the latency gate impossible to run anywhere but production.
+
+    Synchronous on purpose: the pipeline is synchronous, and its only caller runs it through
+    ``asyncio.to_thread``. That is what makes the deferred import safe here - the model load
+    happens on a worker thread rather than on the event loop.
+
+    :param question: The question to answer.
+    :param tenant_id: Whose corpus to search.
+    :param top_k: Retained for symmetry with the tool's arguments; the pipeline's own stage sizes
+        govern retrieval width, and the tool truncates the citation list to ``top_k`` afterwards.
+    :returns: The pipeline's raw result - ``text``, ``citations``, ``rerank_timed_out`` and
+        ``coverage``.
+    """
+    from taxcalc_ai.rag import retrieve_and_generate
+
+    anthropic, conn, r = _rag_clients()
+    del top_k  # named for the caller's benefit; see the parameter docs
+    return retrieve_and_generate(
+        question,
+        tenant_id,
+        anthropic=anthropic,
+        conn=conn,
+        r=r,
+    )
 
 
 @asynccontextmanager
@@ -98,10 +180,6 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppCtx]:
     :yields: The :class:`AppCtx` every tool reads its dependencies from.
     """
     s = Settings()
-    # Imported here rather than at module scope - see the module docstring. Still once per
-    # process: the lifespan runs a single time, before the first request is served.
-    from taxcalc_ai.rag import retrieve_and_generate as rag_fn
-
     # The JWT is added per call from the caller's context, not baked in here - one client
     # serving requests from several callers must not carry one caller's credential.
     client = httpx.AsyncClient(
@@ -110,7 +188,7 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppCtx]:
     )
     log.info("lifespan.start", orders_svc=s.normalised_orders_url(), project=s.langsmith_project)
     try:
-        yield AppCtx(http=client, rag_fn=rag_fn, settings=s)
+        yield AppCtx(http=client, rag_fn=rag_entrypoint, settings=s)
     finally:
         await client.aclose()
         log.info("lifespan.stop")

@@ -39,8 +39,9 @@ from uuid import UUID
 from langsmith import traceable
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from taxcalc_mcp_server.app import ctx, log, mcp
+from taxcalc_mcp_server.app import ctx, mcp
 from taxcalc_mcp_server.errors import _map_http
+from taxcalc_mcp_server.observability import observe
 from taxcalc_mcp_server.tenancy import auth_headers
 
 #: Scale every money value is carried at, matching the Java side's `BigDecimal` discipline
@@ -243,23 +244,15 @@ async def _get_order(args: GetOrderArgs) -> dict[str, object]:
         when the JWT may not read it.
     """
     c = ctx()
-    log.info("tool.invoke.start", tool="orders.get_order", tenant_id=args.tenant_id)
-
-    r = await c.http.get(
-        f"/orders/{args.order_id}",
-        headers=auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id),
-    )
-    if r.status_code != 200:
-        log.info(
-            "tool.invoke.end",
-            tool="orders.get_order",
-            tenant_id=args.tenant_id,
-            http_status=r.status_code,
+    async with observe("orders.get_order", args.tenant_id) as span:
+        r = await c.http.get(
+            f"/orders/{args.order_id}",
+            headers=auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id),
         )
-        raise _map_http(r.status_code, r.text)
-
-    log.info("tool.invoke.end", tool="orders.get_order", tenant_id=args.tenant_id, http_status=200)
-    return OrderView.model_validate(r.json()).model_dump(mode="json")
+        span["http_status"] = r.status_code
+        if r.status_code != 200:
+            raise _map_http(r.status_code, r.text)
+        return OrderView.model_validate(r.json()).model_dump(mode="json")
 
 
 @mcp.tool(name="orders.get_order", description=_DESC_GET_ORDER)
@@ -300,39 +293,23 @@ async def _create_refund(args: CreateRefundArgs) -> dict[str, object]:
     :raises McpError: Mapped from the upstream status - notably 4090 for a conflicting refund.
     """
     c = ctx()
-    log.info(
-        "tool.invoke.start",
-        tool="orders.create_refund",
-        tenant_id=args.tenant_id,
-        idempotency_key=str(args.idempotency_key),
-    )
+    async with observe("orders.create_refund", args.tenant_id) as span:
+        span["idempotency_key"] = str(args.idempotency_key)
 
-    payload: dict[str, object] = {
-        "orderId": args.order_id,
-        "amount": str(args.amount),
-        "reason": args.reason,
-        "idempotencyKey": str(args.idempotency_key),
-    }
-    headers = auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id)
-    headers["Idempotency-Key"] = str(args.idempotency_key)
+        payload: dict[str, object] = {
+            "orderId": args.order_id,
+            "amount": str(args.amount),
+            "reason": args.reason,
+            "idempotencyKey": str(args.idempotency_key),
+        }
+        headers = auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id)
+        headers["Idempotency-Key"] = str(args.idempotency_key)
 
-    r = await c.http.post(f"/orders/{args.order_id}/refunds", json=payload, headers=headers)
-    if r.status_code != 200:
-        log.info(
-            "tool.invoke.end",
-            tool="orders.create_refund",
-            tenant_id=args.tenant_id,
-            http_status=r.status_code,
-        )
-        raise _map_http(r.status_code, r.text)
-
-    log.info(
-        "tool.invoke.end",
-        tool="orders.create_refund",
-        tenant_id=args.tenant_id,
-        http_status=200,
-    )
-    return RefundView.model_validate(r.json()).model_dump(mode="json")
+        r = await c.http.post(f"/orders/{args.order_id}/refunds", json=payload, headers=headers)
+        span["http_status"] = r.status_code
+        if r.status_code != 200:
+            raise _map_http(r.status_code, r.text)
+        return RefundView.model_validate(r.json()).model_dump(mode="json")
 
 
 @mcp.tool(name="orders.create_refund", description=_DESC_CREATE_REFUND)

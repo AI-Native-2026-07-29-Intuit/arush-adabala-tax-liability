@@ -15,7 +15,7 @@ catches that mistake at startup rather than at the first ``tools/list``.
 from __future__ import annotations
 
 from taxcalc_mcp_server.app import enforce_strict_tool_schemas, log, mcp
-from taxcalc_mcp_server.tools import _resources, orders  # noqa: F401 - registration
+from taxcalc_mcp_server.tools import _resources, llm, orders, rag  # noqa: F401 - registration
 
 
 def main() -> None:
