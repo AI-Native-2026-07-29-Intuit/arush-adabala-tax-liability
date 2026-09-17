@@ -103,7 +103,10 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20", "SLF", "S"]
 [tool.ruff.lint.per-file-ignores]
 # Tests assert on values the linter reads as hard-coded credentials (S105/S106) and use `assert`
 # (S101), which is what a test is made of.
-"tests/*" = ["S101", "S105", "S106"]
+"tests/*" = ["S101", "S105", "S106", "SLF001"]
+# SLF001: a test that only exercises a module's public surface is not a unit test of that
+# module's behaviour - `_doc_id_of`'s tolerance for an unexpected id shape is exactly the kind
+# of decision that deserves a direct assertion rather than being reached through three layers.
 # The replay script is an operator/CI entrypoint: it reports its verdict on stdout and exits
 # with a status code. A gate whose output only reached a log handler would be invisible in the
 # Actions UI.
