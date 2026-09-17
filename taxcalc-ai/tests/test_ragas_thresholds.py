@@ -91,10 +91,20 @@ MINIMUM_GOLDEN_ROWS: Final[int] = 50
 _SPEND_CAP_MARKERS: Final[tuple[str, ...]] = ("usage limit", "credit balance", "quota")
 
 #: One message for both unavailable paths, so the CI report reads the same either way.
+#: One message for both unavailable paths, so the CI report reads the same either way.
+#:
+#: The remediation is deliberately NOT "raise the spend limit" alone, which is what this said
+#: until the capture below revealed the actual error. An Anthropic workspace usage limit is
+#: PERIODIC: the error names the instant access returns, so waiting costs nothing and raising the
+#: limit is the option for someone who needs the number sooner. Telling a reader to go change a
+#: billing setting when the constraint clears by itself is advice that costs money for no reason
+#: - and the date is in `{detail}`, which is why this points at it rather than repeating it.
 _UNAVAILABLE: Final[str] = (
     "evaluator unavailable ({detail}). This run evaluated NOTHING - the golden set and the "
-    "floors are unchanged and untested. Raise the workspace spend limit in the Anthropic "
-    "console (Settings -> Limits), then re-run to record a real baseline."
+    "floors are unchanged and untested. If the detail above names a date on which access "
+    "returns, the limit is periodic and re-running after it costs nothing; otherwise raise the "
+    "workspace limit in the Anthropic console (Settings -> Limits). Either way, re-run to "
+    "record a real baseline."
 )
 
 
