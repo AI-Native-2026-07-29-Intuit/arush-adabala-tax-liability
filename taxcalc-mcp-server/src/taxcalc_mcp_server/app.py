@@ -34,6 +34,10 @@ imports on first call, and its only caller invokes it inside ``asyncio.to_thread
 happens off the event loop and blocks nothing else. Still once per process - module imports are
 cached - just paid by the first request that actually wants retrieval.
 
+**Tool errors are raised as protocol errors, not returned as prose.** See
+:class:`StructuredErrorFastMCP` - the SDK's default behaviour discards the numeric code that the
+entire :mod:`taxcalc_mcp_server.errors` table exists to deliver.
+
 **Tool argument schemas are hardened after registration.** See
 :func:`enforce_strict_tool_schemas` - FastMCP's generated top-level argument model ignores
 unknown keys, and this server does not want that.
@@ -44,8 +48,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Final
 
@@ -53,8 +58,12 @@ import httpx
 import psycopg
 import redis
 import structlog
+from mcp import McpError, types
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import INVALID_PARAMS, ContentBlock, ErrorData
 from psycopg.rows import TupleRow
+from pydantic import ValidationError
 
 from taxcalc_mcp_server import __version__
 from taxcalc_mcp_server.settings import Settings
@@ -194,10 +203,137 @@ async def lifespan(_: FastMCP) -> AsyncIterator[AppCtx]:
         log.info("lifespan.stop")
 
 
+class StructuredErrorFastMCP(FastMCP):
+    """A :class:`FastMCP` that lets a tool's error *code* reach the client.
+
+    **The defect this fixes.** ``Tool.run`` wraps every exception a handler raises - the one
+    exception being the SDK's own ``UrlElicitationRequiredError`` - into a ``ToolError`` whose
+    payload is the English string ``"Error executing tool <name>: <message>"``. The MCP layer
+    then returns that as a successful result carrying ``isError: true``. So an
+    :class:`McpError` raised by :func:`taxcalc_mcp_server.errors._map_http` arrives at the
+    client with its ``code`` stripped off, and a caller wanting to know whether it was rate
+    limited (4290, back off and retry) or forbidden (4030, stop) has nothing to branch on but
+    prose. Everything the centralised error table buys is discarded one layer below it.
+
+    Verified rather than assumed: driving the stdio server as a subprocess and calling
+    ``orders.get_order`` for an id the upstream 404s returns ``result.isError`` and the text
+    ``'Error executing tool orders.get_order: {"error": "order not found"}'`` - no 4040 anywhere.
+
+    **The fix, and why it takes two pieces.** The error is swallowed at *two* layers, and both
+    have to be opened for the code to travel. ``Tool.run`` wraps it into a ``ToolError``, which
+    this class unwraps; the low-level ``CallToolRequest`` handler then catches whatever comes out
+    and turns it into an ``isError`` result, which :func:`install_structured_error_handler`
+    intercepts. Fixing only the first layer strips the ``"Error executing tool ..."`` prefix and
+    changes nothing else - the code is still gone - which is exactly what the smoke test showed
+    when only half the fix was in place.
+
+    The unwrapping happens here rather than in each handler because the wrapping happens below
+    every handler: there is no ``raise`` a tool could write that would survive it.
+
+    **The trade-off, stated plainly.** The MCP specification's ``isError`` convention exists so a
+    model can *see* a failure in-band and retry within its own loop. Raising a protocol error
+    instead means a strict client surfaces it as an exception. That is the right trade here
+    because the consumers are programmatic - the W7 D5 LangGraph router and any other MCP client
+    - and their retry logic is written against numeric codes, which the ``isError`` path cannot
+    carry. The message text is preserved either way, so nothing is lost but the ambiguity.
+    """
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, object]
+    ) -> Sequence[ContentBlock] | dict[str, object]:
+        """Dispatch a tool call, re-raising structured errors with their codes intact.
+
+        :param name: The tool to call.
+        :param arguments: The call's arguments.
+        :returns: Whatever the tool returned.
+        :raises McpError: carrying this server's numeric code, for an upstream failure mapped by
+            :func:`taxcalc_mcp_server.errors._map_http`, or ``INVALID_PARAMS`` for arguments that
+            failed schema validation.
+        """
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            cause = exc.__cause__
+            if isinstance(cause, McpError):
+                structured = cause
+            elif isinstance(cause, ValidationError):
+                # A rejected argument is a malformed request, and JSON-RPC already has a code for
+                # that. Using the standard one rather than inventing a private code means a
+                # generic MCP client handles it correctly knowing nothing about this server.
+                structured = McpError(ErrorData(code=INVALID_PARAMS, message=str(cause)))
+            else:
+                raise
+            # Recorded as well as raised: the layer above catches exceptions indiscriminately,
+            # so the ContextVar is how the error survives that catch. Same task, so it
+            # propagates - the low-level handler awaits this call inline.
+            _PENDING_ERROR.set(structured)
+            # `from None` deliberately: the ToolError wraps a message that already says what went
+            # wrong, and chaining it would put that noise in every mapped upstream failure.
+            raise structured from None
+
+
+def install_structured_error_handler(server: FastMCP) -> None:
+    """Let a structured tool error out past the low-level handler's blanket ``except``.
+
+    The SDK's ``CallToolRequest`` handler ends in ``except Exception as e: return
+    self._make_error_result(str(e))``, which converts any exception - including the
+    :class:`McpError` :class:`StructuredErrorFastMCP` just re-raised - into a successful result
+    carrying ``isError: true`` and a bare string. Its one exemption is the SDK's own
+    ``UrlElicitationRequiredError``, which it re-raises precisely so that ``_handle_request`` can
+    turn it into a coded error response. This function extends that same courtesy to this
+    server's errors.
+
+    The wrapper reads the error out of a :class:`~contextvars.ContextVar` rather than trying to
+    parse it back out of the result, because by then it is a string and the code is gone. Raising
+    it here lands in ``_handle_request``'s ``except McpError: response = err.error`` branch,
+    which emits a JSON-RPC error carrying the numeric code.
+
+    Idempotent: calling it twice does not stack wrappers, which matters because both transports
+    call it and a test may import both.
+
+    :param server: The server whose handler to wrap.
+    """
+    low = server._mcp_server  # noqa: SLF001 - no public handler registry in mcp 1.x
+    original = low.request_handlers.get(types.CallToolRequest)
+    if original is None or getattr(original, "_taxcalc_structured", False):
+        return
+
+    async def handler(req: types.CallToolRequest) -> types.ServerResult:
+        """Run the SDK's handler, then re-raise any structured error it absorbed.
+
+        :param req: The tool-call request.
+        :returns: The SDK's result when the call succeeded.
+        :raises McpError: carrying this server's numeric code.
+        """
+        _PENDING_ERROR.set(None)
+        result = await original(req)
+        pending = _PENDING_ERROR.get()
+        if pending is not None:
+            raise pending
+        return result
+
+    # The marker is set on the wrapper so a second call recognises its own work and does not
+    # stack another layer. Underscore-prefixed to keep it out of the way of anything the SDK
+    # might put on a handler; the lint exemption is for reading OUR OWN attribute, which is the
+    # one case the rule is not about.
+    handler._taxcalc_structured = True  # type: ignore[attr-defined]  # noqa: SLF001
+    low.request_handlers[types.CallToolRequest] = handler
+
+
+#: The structured error absorbed by the SDK's blanket ``except`` for the in-flight tool call.
+#: A ``ContextVar`` rather than an attribute because one process serves concurrent calls, and an
+#: attribute would let one request's error be reported against another's.
+_PENDING_ERROR: ContextVar[McpError | None] = ContextVar(
+    "taxcalc_mcp_pending_error", default=None
+)
+
+
 #: The server instance every ``@mcp.tool`` decorator in :mod:`taxcalc_mcp_server.tools` registers
 #: against. Module-level, so importing a tool module is what registers its tools - which is why
 #: both transports import the tool package before calling ``run``.
-mcp: Final[FastMCP] = FastMCP(name="taxcalc-mcp-server", lifespan=lifespan)
+mcp: Final[StructuredErrorFastMCP] = StructuredErrorFastMCP(
+    name="taxcalc-mcp-server", lifespan=lifespan
+)
 
 # `version` is not a FastMCP constructor argument in mcp 1.30 - it lives on the low-level server
 # underneath, and FastMCP does not forward it. Left unset, the `initialize` handshake reports the
@@ -244,6 +380,10 @@ def enforce_strict_tool_schemas(server: FastMCP) -> int:
        enforcing would be the worse of the two failures: it invites clients to trust a check
        that is not happening.
 
+    It also installs :func:`install_structured_error_handler`, so that the two things a client
+    needs in order to trust this server's tool contract - strict arguments and coded errors - are
+    turned on by one call that no transport can forget half of.
+
     Called once per transport entry point, after the tool modules are imported.
 
     :param server: The server whose registered tools to harden.
@@ -251,6 +391,7 @@ def enforce_strict_tool_schemas(server: FastMCP) -> int:
         were actually imported first. Zero means the decorators never ran, which on a transport
         entry point is a silent "server starts and publishes nothing" bug.
     """
+    install_structured_error_handler(server)
     tools = server._tool_manager.list_tools()  # noqa: SLF001 - no public accessor in mcp 1.x
     for tool in tools:
         tool.parameters["additionalProperties"] = False

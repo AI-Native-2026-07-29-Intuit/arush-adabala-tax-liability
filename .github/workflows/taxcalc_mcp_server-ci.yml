@@ -1,0 +1,187 @@
+# .github/workflows/taxcalc_mcp_server-ci.yml
+# The MCP server gate (W7 D4 Task 4). Two tiers, split by what they cost.
+#
+# per-pr        unit + schema + description gate + the 100-call stdio smoke + fixture replay.
+#               No Docker, no images, seconds to run. This is the tier a developer waits on,
+#               so it holds everything that can be checked without pulling a container.
+#
+# merge-to-main the Testcontainers E2E: Postgres + the W3 D1 Spring service + this server as
+#               three real processes. A minute or two of image pulls and JVM boot before the
+#               first assertion, which is why it is not paid on every push.
+#
+# The split is a statement about what each tier can catch. The PR tier catches everything inside
+# this codebase: a broken schema, a vague tool description, a corrupted stdio frame, a latency
+# regression. It cannot catch drift between this server and the Java one, because it supplies
+# its own stub upstream - and that is exactly what the merge tier exists for. Putting the E2E on
+# the PR tier would buy a little earlier detection of a rare failure at the cost of every
+# developer's feedback loop; leaving it off entirely would let integration drift reach main.
+name: taxcalc-mcp-server ci
+
+on:
+  # Path-scoped on both triggers, for the reason spelled out at length in python-ci.yml: this is
+  # NOT a required status check, so the filter is safe. A required check that is path-filtered
+  # strands PRs forever waiting on a context that never reports - which already happened in this
+  # repo to four Dependabot PRs. If this ever becomes required, the filter comes off first.
+  push:
+    branches: [main]
+    paths:
+      - "taxcalc-mcp-server/**"
+      - "taxcalc-ai/**"
+      - ".github/workflows/taxcalc_mcp_server-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "taxcalc-mcp-server/**"
+      # taxcalc-ai is a path dependency: a change to the sidecar can break this server's import
+      # or its RAG adapter without touching a single file under taxcalc-mcp-server/.
+      - "taxcalc-ai/**"
+      - ".github/workflows/taxcalc_mcp_server-ci.yml"
+
+concurrency:
+  group: taxcalc-mcp-server-ci-${{ github.ref }}
+  # A PR force-push cancels its own stale run; a push to main is left to finish, since a
+  # cancelled main run leaves the branch with no recorded verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege: both jobs read the tree and publish nothing.
+permissions:
+  contents: read
+
+jobs:
+  per-pr:
+    name: ruff + mypy + unit + schema + description + smoke + replay
+    # Pinned, not ubuntu-latest: `latest` moves under you, and a gate whose runner image
+    # changes silently is a gate that can go red for reasons unrelated to the diff.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: taxcalc-mcp-server
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv (pinned)
+        # SHA-pinned, carrying forward the W6 D1 discipline: a mutable tag on a third-party
+        # action is an unreviewed code-execution path into CI.
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Pin Python 3.12 via uv
+        run: uv python install 3.12
+
+      - name: uv sync --frozen (fail on lockfile drift)
+        # --frozen makes uv.lock the source of truth: if pyproject.toml asks for something the
+        # lockfile does not record, this fails rather than silently resolving a dependency set
+        # nobody has tested.
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: mypy --strict
+        # tests/ is type-checked too. Untyped tests are where `Any` creeps back in, and a test
+        # that does not type-check may not be exercising the signature it claims to.
+        run: uv run mypy --strict src/ tests/
+
+      - name: unit + schema + description gate + stdio smoke
+        env:
+          # Obvious non-secrets. The bearer is never used against a real service on this tier -
+          # the smoke test starts its own stub upstream - and LANGSMITH_API_KEY is present only
+          # because taxcalc_ai.rag raises at import without one.
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+          LANGSMITH_API_KEY: dummy-for-tests
+          LANGSMITH_TRACING: "false"
+        # The E2E is excluded by marker rather than by filename so that adding another E2E file
+        # does not require editing this line - and so a mis-marked test fails loudly on the
+        # merge tier instead of quietly never running.
+        run: uv run pytest -v -m "not e2e" --cov=src --cov-fail-under=70
+
+      - name: tool fixture replay (latency gate)
+        env:
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+          LANGSMITH_API_KEY: dummy-for-tests
+          LANGSMITH_TRACING: "false"
+        # No --compare-to on the PR tier: a PR runs once, so there is no previous run on the
+        # same tier to compare against, and comparing a PR's numbers to main's would report the
+        # runner's variance as the developer's regression. The PR tier asserts the fixtures
+        # still replay without error; the merge tier owns the p95 comparison.
+        run: uv run python -m taxcalc_mcp_server.scripts.replay --fixtures tests/fixtures/
+
+      - name: no plaintext credentials in the tree
+        # Cheap, and it runs on every PR because the cost of finding a committed key later is
+        # revocation and rotation across every consumer.
+        working-directory: .
+        run: |
+          # The prefix is ASSEMBLED, never written out. A gate that spells the literal it
+          # searches for is itself a hit for its own search - which is exactly how the
+          # equivalent line in the taxcalc-ai gate first failed the check it describes.
+          NEEDLE="lsv2""_pt_"
+          if grep -rIn "$NEEDLE" --exclude-dir=.git --exclude-dir=.venv . ; then
+            echo "::error::a LangSmith API key appears in the tree"
+            exit 1
+          fi
+          echo "no plaintext LangSmith keys found"
+
+      - name: wheel builds and exposes both console scripts
+        # The Claude Desktop launcher runs `uvx taxcalc-mcp-server`, which resolves the console
+        # script from the built wheel - so a packaging mistake breaks the desktop integration
+        # while every test still passes. Checked here rather than discovered by a user.
+        run: |
+          uv build
+          python -m zipfile -l dist/*.whl | grep -q taxcalc_mcp_server/transports/stdio.py
+          unzip -p dist/*.whl '*/entry_points.txt' | tee /dev/stderr | grep -q 'taxcalc-mcp-server ='
+          unzip -p dist/*.whl '*/entry_points.txt' | grep -q 'taxcalc-mcp-server-sse ='
+
+  merge-to-main:
+    name: Testcontainers E2E (MCP -> Spring -> Postgres)
+    if: github.ref == 'refs/heads/main'
+    needs: per-pr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: taxcalc-mcp-server
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Pin Python 3.12 via uv
+        run: uv python install 3.12
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: Testcontainers E2E
+        env:
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+          LANGSMITH_API_KEY: dummy-for-tests
+          LANGSMITH_TRACING: "false"
+        run: uv run pytest -v -m e2e
+
+      - name: assert the E2E actually ran
+        # The E2E skips itself, by design, when Docker or the order-service image is unavailable
+        # - which is right on a laptop and WRONG here, where a skip would let integration drift
+        # into main under a green tick. This step turns a skip on the merge tier into a failure.
+        # A gate that reports an absence as a pass is the one failure mode this repository has
+        # already been bitten by once.
+        env:
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+          LANGSMITH_API_KEY: dummy-for-tests
+          LANGSMITH_TRACING: "false"
+        run: |
+          uv run pytest -m e2e -q --no-header -rs > e2e.log 2>&1 || true
+          if grep -q 'SKIPPED' e2e.log; then
+            echo "::error::the E2E was SKIPPED on the merge tier; integration drift would go undetected"
+            cat e2e.log
+            exit 1
+          fi
+          echo "E2E executed (no skips)"

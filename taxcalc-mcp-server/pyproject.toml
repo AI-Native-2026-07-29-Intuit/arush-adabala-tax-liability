@@ -103,7 +103,11 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20", "SLF", "S"]
 [tool.ruff.lint.per-file-ignores]
 # Tests assert on values the linter reads as hard-coded credentials (S105/S106) and use `assert`
 # (S101), which is what a test is made of.
-"tests/*" = ["S101", "S105", "S106", "SLF001"]
+"tests/*" = ["S101", "S105", "S106", "SLF001", "S603", "S607"]
+# S603/S607: the test harness runs `docker` and `sys.executable` from fixed argument lists with
+# no shell and no caller-supplied input. Bandit cannot see that the argv is a literal, and the
+# alternative - hard-coding an absolute path to the docker binary - would break on every machine
+# that installs it somewhere else.
 # SLF001: a test that only exercises a module's public surface is not a unit test of that
 # module's behaviour - `_doc_id_of`'s tolerance for an unexpected id shape is exactly the kind
 # of decision that deserves a direct assertion rather than being reached through three layers.
@@ -119,4 +123,12 @@ markers = [
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # Starlette's TestClient reaches anyio through `anyio.abc.BlockingPortal`, an alias anyio has
+    # deprecated. It is raised inside starlette's own import chain, so nothing this project
+    # writes avoids it; the only alternatives are turning the whole error policy off or not
+    # testing the SSE middleware through a client. Scoped to the exact message, so every other
+    # DeprecationWarning - including any future anyio or starlette one - still fails the build.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]

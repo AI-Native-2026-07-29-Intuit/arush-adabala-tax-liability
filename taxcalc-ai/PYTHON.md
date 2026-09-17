@@ -797,11 +797,78 @@ from its output, with reasons:
      safeguard that isn't in the code is worse than no comment — it is what stopped this being
      noticed in review.
 
+## What W7 D4 adds
+
+W7 D4 adds no code to this sidecar. It adds a **consumer**: a sibling project,
+`taxcalc-mcp-server/`, which imports `taxcalc-ai` as a path dependency and publishes four MCP
+tools plus one read-only resource over two transports.
+
+```
+orders.get_order            read one order          -> taxcalc-orders (W3 D1)
+orders.create_refund        refund, idempotently    -> taxcalc-orders (W3 D1)
+llm.chat                    cost-tracked chat       -> llm-proxy (W3 D1)
+rag.retrieve_and_generate   grounded answer         -> taxcalc_ai.rag (this sidecar, in-process)
+taxcalc://catalogue         read-only resource      -> the tool catalogue + corpus shape
+```
+
+### What this means for this sidecar
+
+`retrieve_and_generate` is now a **published contract**, not just an internal entry point. Three
+consequences worth knowing before changing it:
+
+* **Its keyword-only signature was the right call.** W7 D3 pinned
+  `retrieve_and_generate(query_text, tenant_id, *, anthropic, conn, r, ...)` with everything
+  after `tenant_id` keyword-only, specifically so later days would be a wiring exercise rather
+  than a renegotiation. That held: the MCP adapter passes its three clients by keyword and adds
+  nothing positional.
+
+* **Its result keys are load-bearing outside this package.** The MCP layer reads `text`,
+  `citations[].chunk_id`, `citations[].score`, `coverage["jaccard"]` and `rerank_timed_out`.
+  Renaming any of them breaks a published tool. The adapter reads `coverage` with `.get(...)`
+  rather than `[...]` so a rename degrades one field instead of failing every grounded answer,
+  but that is damage limitation, not permission.
+
+* **`chunk_id`'s shape is parsed.** The MCP layer splits `chunk-{doc_id}-p{chunk_idx}` to
+  surface a `doc_id` on each citation, because "which documents did this rest on" is the
+  question a reviewer actually asks. `taxcalc_ai.chunker.chunk_id_for` is therefore a format
+  two projects depend on.
+
+* **Importing `taxcalc_ai.rag` is expensive and credential-dependent**, and that shaped the
+  consumer's architecture. It loads an ~80 MB sentence-transformer and raises at import without
+  `LANGSMITH_API_KEY`. The MCP server therefore imports it on *first use*, on a worker thread,
+  rather than at startup — the version that imported it in the server's lifespan made the first
+  SSE client wait through the model load and five model-hub retries before its connection was
+  established. Nothing to fix here; worth knowing if another consumer appears.
+
+* **The generation step is synchronous and CPU-bound.** The cross-encoder forward pass has no
+  await point, so an async consumer must run it through `asyncio.to_thread` or it blocks the
+  whole event loop. The MCP server does, under an `asyncio.wait_for` deadline that maps to a
+  distinct error code.
+
+### AI authoring discipline (W7 D4 additions)
+
+The full W7 D4 transcripts are in `taxcalc-mcp-server/PROMPT_JOURNAL.md`. Two deviations there
+are of the same species as the ones recorded above for W7 D2 and D3 — output that was wrong in a
+way that reads as correct:
+
+* **A synchronous `httpx.Client` inside an async lifespan.** Not a syntax error, not a type
+  error under the SDK's annotations, and it would have blocked the event loop on every call.
+* **`FastMCP(version=...)`, which is not a parameter in mcp 1.30.** Not a hallucination — it was
+  valid in an earlier 1.x. Output that is *out of date* rather than invented is the harder class
+  to catch, because it looks familiar to a reviewer who has seen the older API.
+
+And one from this repo's own reviewing, rather than from Claude: three defects in the MCP server
+were found by driving it and none by reading it — the tool error codes never reaching the client,
+a phantom `config` parameter in every published schema, and the lifespan model load. The lesson
+this repository keeps relearning is that a component that type-checks and lints is a component
+nobody has run.
+
 ## What this sidecar does NOT do (yet)
 
 * Production RAG retrieval strategy (re-ranking, hybrid search) — W7 D3. The `doc_chunks` table
   this day built is that lesson's input corpus.
-* MCP server publishing — W7 D4, which exposes `retrieve_chunks` as a tool.
+* MCP server publishing — done in W7 D4, in the sibling `taxcalc-mcp-server/` project rather
+  than here. See "What W7 D4 adds" above.
 * LangGraph orchestration — W7 D5, which reads the `taxcalc-ai-dev` LangSmith project for
   trace-driven debugging and regresses against today's RAGAS baseline.
 * Re-embedding the corpus. None of W7 D3–D5 re-embeds; they all assume today's exit criteria.

@@ -1,0 +1,37 @@
+{
+  "$comment": [
+    "Committed registration. The W7 D5 agent reads this at startup to learn the surface before",
+    "it connects, so the four tool names, the resource URI and the version must match what the",
+    "server actually publishes - tests/test_tool_descriptions.py asserts exactly that, because a",
+    "registration that drifts from the server is worse than none: it is a contract a client",
+    "trusts and the server does not honour.",
+    "No credential appears here. The stdio launcher reads its bearer from the environment and",
+    "the SSE entry declares only the auth SCHEME, not a token."
+  ],
+  "name": "taxcalc-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP surface for taxcalc-orders, llm-proxy, and the W7 D3 RAG pipeline.",
+  "transports": {
+    "stdio": {
+      "command": "uvx",
+      "args": ["taxcalc-mcp-server"]
+    },
+    "sse": {
+      "url": "https://mcp.taxcalc.internal/sse",
+      "auth": "bearer"
+    }
+  },
+  "tools": [
+    "orders.get_order",
+    "orders.create_refund",
+    "llm.chat",
+    "rag.retrieve_and_generate"
+  ],
+  "resources": [
+    "taxcalc://catalogue"
+  ],
+  "observability": {
+    "langsmith_project": "taxcalc-mcp-server"
+  },
+  "forward_hook": "week07_day5_multi_agent_capstone"
+}
