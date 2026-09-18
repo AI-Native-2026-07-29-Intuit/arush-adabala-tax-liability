@@ -28,7 +28,7 @@ reason, tenant ID, and an idempotency key to prevent duplicate refunds.
 Returns the created refund record.
 ```
 
-**Use as is / Modified / Rejected:** **Modified.**
+**Used as is / Modified / Rejected:** **Modified.**
 
 Claude wrote a restatement of the function signature. Every clause describes what the parameters
 are named, which the schema next to it already says, and not one of them helps a model decide
@@ -67,7 +67,7 @@ async def lifespan(_: FastMCP):
     client.close()
 ```
 
-**Use as is / Modified / Rejected:** **Modified**, in four places, three of which were defects
+**Used as is / Modified / Rejected:** **Modified**, in four places, three of which were defects
 rather than preferences.
 
 - `httpx.Client` is the **synchronous** client, inside an async lifespan, awaited by async
@@ -105,7 +105,7 @@ def test_create_refund_is_idempotent(mcp_server):
     assert first["result"] == second["result"]
 ```
 
-**Use as is / Modified / Rejected:** **Modified**, and the change is the whole value of the test.
+**Used as is / Modified / Rejected:** **Modified**, and the change is the whole value of the test.
 
 Two problems. `"amount": 10.00` is a **float literal** in the very test that is supposed to
 defend the money discipline — it would have been serialised as a JSON number, and the assertion

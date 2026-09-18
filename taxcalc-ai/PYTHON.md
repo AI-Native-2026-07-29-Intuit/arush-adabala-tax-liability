@@ -853,9 +853,27 @@ way that reads as correct:
 
 * **A synchronous `httpx.Client` inside an async lifespan.** Not a syntax error, not a type
   error under the SDK's annotations, and it would have blocked the event loop on every call.
+  Reason it survives review: `Client` and `AsyncClient` differ by one word in a line whose shape
+  is otherwise exactly right.
 * **`FastMCP(version=...)`, which is not a parameter in mcp 1.30.** Not a hallucination — it was
   valid in an earlier 1.x. Output that is *out of date* rather than invented is the harder class
   to catch, because it looks familiar to a reviewer who has seen the older API.
+* **`"amount": 10.00` — a float literal for money — inside the very test written to defend the
+  money discipline.** The assertion would have passed while proving the opposite of what it
+  claimed: a JSON number hands the exactness to whichever binary-fraction parser reads it first,
+  and loses the scale. Reason it survives review: the test is *about* money, so a reader's
+  attention goes to the assertion, not to the fixture above it.
+* **Structured logging defaulted to stdout.** On the stdio transport stdout *is* the protocol, so
+  one log line lands mid-frame and kills the session. Reason it survives review: the stdlib
+  `logging.basicConfig` line next to it already defaults to stderr, which makes the pair look
+  deliberate. Both paths are now pinned explicitly and `ruff`'s `T20` bans `print` package-wide.
+
+Two further patterns the W7 D4 brief warns about did **not** occur and were designed against from
+the start, which is worth recording so the absence is not mistaken for luck: the retrieval tool
+pre-shapes into a five-field DTO rather than returning the pipeline's raw rows (passing
+`chunk_text` through would restate the text the answer was just generated from, doubling the token
+cost of every grounded answer), and `idempotency_key` is a required field with **no default** — a
+generated one would make every retry a new key and therefore a second refund.
 
 And one from this repo's own reviewing, rather than from Claude: three defects in the MCP server
 were found by driving it and none by reading it — the tool error codes never reaching the client,
