@@ -16,6 +16,12 @@ argument validation and the schema enforcement run too.
 *The two operator scripts.* ``replay``'s regression arithmetic and ``healthcheck``'s status
 mapping are both small and both load-bearing: one decides whether a build fails, the other
 whether a container is restarted.
+
+*The structured log lines themselves.* ``tool.invoke.end`` is not decoration - it is the input
+to the Grafana dashboard and to the cost report, so a field that silently stops being emitted
+breaks a dashboard rather than a test. The assertions below treat the field set as the contract
+it is, which is also the only way to keep ``cost_usd_minor`` present on the three tools that do
+not set it themselves.
 """
 
 from __future__ import annotations
@@ -23,9 +29,11 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+import anyio
 import httpx
 import pytest
 from mcp import McpError
@@ -34,10 +42,28 @@ from mcp.shared.context import RequestContext
 from mcp.types import TextContent
 
 from taxcalc_mcp_server.app import AppCtx, enforce_strict_tool_schemas, mcp
+from taxcalc_mcp_server.observability import (
+    COST_SOURCE_NONE,
+    COST_SOURCE_PROXY,
+    COST_SOURCE_UNPRICED,
+)
 from taxcalc_mcp_server.scripts.healthcheck import HEALTHY_STATUSES, probe
-from taxcalc_mcp_server.scripts.replay import P95_REGRESSION_LIMIT, _percentiles, compare
+from taxcalc_mcp_server.scripts.replay import (
+    NOISE_FLOOR_MS,
+    P95_REGRESSION_LIMIT,
+    _percentiles,
+    compare,
+)
 from taxcalc_mcp_server.settings import Settings
-from taxcalc_mcp_server.tenancy import auth_headers, bearer_token, parse_bearer
+from taxcalc_mcp_server.tenancy import (
+    _REQUEST_JWT,
+    _REQUEST_TENANT,
+    auth_headers,
+    bearer_token,
+    cross_tenant_claim,
+    parse_bearer,
+    request_tenant,
+)
 from taxcalc_mcp_server.tools import _resources, llm, orders, rag  # noqa: F401 - registration
 
 
@@ -359,3 +385,480 @@ def test_healthcheck_treats_401_as_healthy() -> None:
 def test_healthcheck_fails_when_nothing_is_listening() -> None:
     """A connection refusal is unhealthy - port 1 has nothing behind it."""
     assert probe("http://127.0.0.1:1/sse") == 1
+
+
+# ---- The structured log contract ------------------------------------------------------------
+
+
+@contextmanager
+def captured_lines() -> Iterator[list[dict[str, Any]]]:
+    """Capture the structlog events emitted inside the block.
+
+    ``structlog.testing.capture_logs`` rather than ``capsys``: the real logger is constructed
+    with a reference to ``sys.stderr`` taken at configure time, so a captured-stdio fixture sees
+    nothing and the test passes for the wrong reason. This intercepts at the processor chain,
+    which is where the fields actually exist as data rather than as rendered JSON.
+
+    :yields: The list events are appended to, in emission order.
+    """
+    from structlog.testing import capture_logs
+
+    with capture_logs() as entries:
+        yield cast("list[dict[str, Any]]", entries)
+
+
+def _end_line(entries: list[dict[str, Any]], tool: str) -> dict[str, Any]:
+    """Return the single ``tool.invoke.end`` line ``tool`` emitted.
+
+    :param entries: Captured events.
+    :param tool: The tool whose line is wanted.
+    :returns: That line.
+    """
+    ends = [e for e in entries if e.get("event") == "tool.invoke.end" and e.get("tool") == tool]
+    assert len(ends) == 1, f"expected exactly one end line for {tool}, got {len(ends)}"
+    starts = [
+        e for e in entries if e.get("event") == "tool.invoke.start" and e.get("tool") == tool
+    ]
+    assert len(starts) == 1, f"expected exactly one start line for {tool}, got {len(starts)}"
+    return ends[0]
+
+
+def _ok_order_response(_: httpx.Request) -> httpx.Response:
+    """Answer any request with a valid order view.
+
+    :param _: The outbound request, ignored.
+    :returns: A 200 carrying the order the ``orders.*`` tools expect.
+    """
+    return httpx.Response(
+        200,
+        json={
+            "order_id": "ord-synth-9001",
+            "tenant_id": "tenant-a",
+            "total": "42.50",
+            "status": "paid",
+        },
+    )
+
+
+async def test_orders_end_line_carries_an_explicit_zero_cost() -> None:
+    """A tool that spends nothing still reports the field, as a true zero.
+
+    Absent would be worse than zero: a dashboard summing ``cost_usd_minor`` cannot tell a
+    missing key from a gap in collection, so every tool emits the number whether or not it has
+    one to report.
+    """
+    with captured_lines() as entries, dispatch_against(httpx.MockTransport(_ok_order_response)):
+        await _call("orders.get_order", {"order_id": "ord-synth-9001", "tenant_id": "tenant-a"})
+    line = _end_line(entries, "orders.get_order")
+    assert line["cost_usd_minor"] == 0
+    assert line["cost_source"] == COST_SOURCE_NONE
+    assert line["tenant_id"] == "tenant-a"
+    assert isinstance(line["duration_ms"], int)
+
+
+async def test_llm_end_line_prices_the_call_from_the_proxy_header() -> None:
+    """``X-Cost-Usd`` becomes integer minor units, and the source says where it came from."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"text": "hello", "resolvedModel": "m", "inputTokens": 1, "outputTokens": 2},
+            headers={"X-Cost-Usd": "0.0342"},
+        )
+
+    with captured_lines() as entries, dispatch_against(httpx.MockTransport(handler)):
+        await _call(
+            "llm.chat",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 16,
+                "tenant_id": "tenant-a",
+            },
+        )
+    line = _end_line(entries, "llm.chat")
+    # 3.42 cents truncates to 3: minor units are the smallest unit anyone bills in, and rounding
+    # up would invent spend that never happened.
+    assert line["cost_usd_minor"] == 3
+    assert line["cost_source"] == COST_SOURCE_PROXY
+
+
+async def test_rag_end_line_marks_its_cost_unpriced_rather_than_free() -> None:
+    """The retrieval tool spends real money this server cannot see, and says so.
+
+    Reporting :data:`COST_SOURCE_NONE` here would book the server's most expensive call as free,
+    which is the one direction a cost dashboard must never be wrong in.
+    """
+    raw = {
+        "text": "a",
+        "citations": [{"chunk_id": "chunk-doc-p1", "chunk_text": "x", "score": 0.5}],
+        "coverage": {"jaccard": 0.2},
+        "rerank_timed_out": False,
+    }
+    with captured_lines() as entries, dispatch_against(rag_result=raw):
+        await _call(
+            "rag.retrieve_and_generate",
+            {"question": "q?", "tenant_id": "tenant-a", "top_k": 1},
+        )
+    line = _end_line(entries, "rag.retrieve_and_generate")
+    assert line["cost_source"] == COST_SOURCE_UNPRICED
+    assert line["cost_usd_minor"] == 0
+
+
+async def test_a_failed_call_reports_the_error_code_and_still_reports_cost() -> None:
+    """The ``end`` line on the failure path carries both the code and the cost fields.
+
+    A rate-limited proxy call is the case that proves it: the proxy billed for the attempt, and a
+    dashboard built only from successful calls would show the spend nowhere.
+    """
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(429, json={"error": "slow down"}, headers={"X-Cost-Usd": "0.01"})
+    )
+    with (
+        captured_lines() as entries,
+        dispatch_against(transport),
+        pytest.raises(McpError),
+    ):
+        await _call(
+            "llm.chat",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 16,
+                "tenant_id": "tenant-a",
+            },
+        )
+    line = _end_line(entries, "llm.chat")
+    assert line["mcp_error_code"] == 4290
+    assert line["cost_usd_minor"] == 1, "a 429 that billed must still report what it cost"
+
+
+# ---- The tenant cross-check ----------------------------------------------------------------
+
+
+@contextmanager
+def as_bearer_for(tenant_id: str) -> Iterator[None]:
+    """Bind a validated-bearer identity for the block, then unbind it.
+
+    Reset through the ``ContextVar`` tokens rather than by setting ``""`` afterwards: a test that
+    leaves a value behind would silently arm the cross-check for every test that runs after it,
+    and the failure would appear in an unrelated one.
+
+    :param tenant_id: The ``tenant_id`` claim to present.
+    :yields: Nothing; the identity is bound for the block.
+    """
+    jwt_token = _REQUEST_JWT.set("header.payload.signature")
+    tenant = _REQUEST_TENANT.set(tenant_id)
+    try:
+        yield
+    finally:
+        _REQUEST_TENANT.reset(tenant)
+        _REQUEST_JWT.reset(jwt_token)
+
+
+async def test_a_bearer_scoped_to_another_tenant_is_refused_before_the_upstream_call() -> None:
+    """A cross-tenant call is refused as 4030, and no request leaves the process.
+
+    This is the half of the ``ContextVar`` mechanism that makes it worth having: the claim is
+    read by the instrument every handler already goes through, so no tool has to remember to
+    check it and none can be written that forgets.
+    """
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return _ok_order_response(request)
+
+    with (
+        captured_lines() as entries,
+        as_bearer_for("tenant-b"),
+        dispatch_against(httpx.MockTransport(handler)),
+        pytest.raises(McpError) as caught,
+    ):
+        await _call("orders.get_order", {"order_id": "ord-synth-9001", "tenant_id": "tenant-a"})
+    assert caught.value.error.code == 4030
+    assert calls == [], "the refusal must happen before the order service is called"
+    assert _end_line(entries, "orders.get_order")["mcp_error_code"] == 4030
+    # Neither tenant id appears in the caller-facing message: telling the caller which tenant
+    # their token IS scoped to is the enumeration this check exists to stop.
+    assert "tenant-a" not in caught.value.error.message
+    assert "tenant-b" not in caught.value.error.message
+
+
+async def test_a_bearer_scoped_to_the_requested_tenant_is_not_refused() -> None:
+    """The matching case must pass through untouched, or the check is an outage."""
+    with as_bearer_for("tenant-a"), dispatch_against(httpx.MockTransport(_ok_order_response)):
+        payload = await _call(
+            "orders.get_order", {"order_id": "ord-synth-9001", "tenant_id": "tenant-a"}
+        )
+    assert payload["order_id"] == "ord-synth-9001"
+
+
+async def test_an_unknown_tenant_claim_is_not_a_refusal() -> None:
+    """The stdio transport, and SSE with validation disabled, carry no claim - and must work.
+
+    ``jwks_url`` is empty by default, so "no local opinion" is the common case rather than the
+    exotic one. Treating it as a mismatch would break every stdio tool call.
+    """
+    with dispatch_against(httpx.MockTransport(_ok_order_response)):
+        payload = await _call(
+            "orders.get_order", {"order_id": "ord-synth-9001", "tenant_id": "tenant-a"}
+        )
+    assert payload["order_id"] == "ord-synth-9001"
+
+
+@pytest.mark.parametrize(
+    ("claim", "requested", "expected"),
+    [
+        ("tenant-b", "tenant-a", "tenant-b"),
+        ("tenant-a", "tenant-a", ""),
+        ("", "tenant-a", ""),
+    ],
+)
+def test_cross_tenant_claim_reports_only_a_real_disagreement(
+    claim: str, requested: str, expected: str
+) -> None:
+    """Unknown reads as agreement; only two known, differing values are a conflict."""
+    with as_bearer_for(claim):
+        assert cross_tenant_claim(requested) == expected
+
+
+# ---- Local JWKS validation ------------------------------------------------------------------
+#
+# The only tests in this file that mint real tokens. Worth the RSA keypair: `_validate` is the
+# code that decides whether a signature, an audience and an expiry are checked at all, and its
+# failure mode is silent - a middleware that accepts everything looks exactly like one that
+# accepts the right things until someone presents a token for the wrong audience. The keypair is
+# generated once per session because 2048-bit generation is the slowest thing in this suite.
+
+
+@pytest.fixture(scope="session")
+def signing_key() -> Any:
+    """Generate the RSA keypair every token in this section is signed with.
+
+    :returns: The private key; its public half is what the stubbed JWKS client hands back.
+    """
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def validating_settings() -> Settings:
+    """Settings with local validation switched ON.
+
+    :returns: Settings naming a JWKS URL that is never fetched - the client is stubbed - and the
+        audience the tokens below are minted for.
+    """
+    return Settings(
+        jwks_url="https://idp.invalid/.well-known/jwks.json",
+        jwt_audience="taxcalc-api",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_jwks(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Point :class:`PyJWKClient` at the test keypair instead of the network.
+
+    Patched at the client rather than by serving a JWKS document over HTTP: the key *resolution*
+    is PyJWT's code and is not what these tests are about, while the network call would make the
+    suite depend on a host that does not exist.
+
+    :param monkeypatch: Patcher.
+    :param request: Used to resolve the session-scoped keypair only for the tests that ask.
+    """
+    if "validating_settings" not in request.fixturenames:
+        return
+    from types import SimpleNamespace
+
+    from jwt import PyJWKClient
+
+    public_key = request.getfixturevalue("signing_key").public_key()
+    monkeypatch.setattr(
+        PyJWKClient,
+        "get_signing_key_from_jwt",
+        lambda _self, _token: SimpleNamespace(key=public_key),
+    )
+
+
+def _mint(key: Any, *, audience: str, tenant_id: str = "tenant-a", ttl_s: int = 300) -> str:
+    """Sign a bearer token.
+
+    :param key: The private key.
+    :param audience: The ``aud`` claim.
+    :param tenant_id: The ``tenant_id`` claim.
+    :param ttl_s: Seconds until expiry; negative mints an already-expired token.
+    :returns: The encoded JWT.
+    """
+    import time as _time
+
+    import jwt as pyjwt
+
+    return pyjwt.encode(
+        {
+            "sub": "user-1",
+            "aud": audience,
+            "tenant_id": tenant_id,
+            "exp": int(_time.time()) + ttl_s,
+        },
+        key,
+        algorithm="RS256",
+    )
+
+
+def _recording_middleware(settings: Settings, seen: dict[str, Any]) -> Any:
+    """Wrap a downstream app that records the identity the middleware bound.
+
+    The real SSE app is not used here: a request that passes the middleware opens an event stream
+    and never completes, so the assertion could never run. A one-line downstream app is what
+    makes the *accepted* path testable at all - and the accepted path is where tenant extraction
+    has to be proven.
+
+    :param settings: Configuration for the middleware.
+    :param seen: Dict the downstream app records into.
+    :returns: The wrapped ASGI app.
+    """
+    from starlette.responses import JSONResponse
+
+    from taxcalc_mcp_server.transports.sse import BearerMiddleware
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        seen["tenant"] = request_tenant()
+        seen["forwarded"] = bearer_token("")
+        await JSONResponse({"ok": True})(scope, receive, send)
+
+    return BearerMiddleware(downstream, settings=settings)
+
+
+def test_a_token_for_the_wrong_audience_is_refused_as_4030(
+    signing_key: Any, validating_settings: Settings
+) -> None:
+    """A validly-signed token minted for another service does not open a session here.
+
+    The audience claim is the difference between "this credential is genuine" and "this
+    credential was issued for us". A validator that checks the signature and not the audience
+    accepts every token the identity provider ever signed, for any service in the estate.
+    """
+    from starlette.testclient import TestClient
+
+    from taxcalc_mcp_server.transports.sse import build_app
+
+    token = _mint(signing_key, audience="some-other-service")
+    with TestClient(build_app(validating_settings)) as client:
+        response = client.get("/sse", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+    assert response.json()["code"] == 4030
+    # The refusal names neither the expected audience nor the issuer; PyJWT's own message does,
+    # which is why the exception text is logged rather than echoed.
+    assert "taxcalc-api" not in response.text
+
+
+def test_an_expired_token_is_refused_as_4030(
+    signing_key: Any, validating_settings: Settings
+) -> None:
+    """Expiry is enforced. An expired token that validates is the same as no expiry at all."""
+    from starlette.testclient import TestClient
+
+    from taxcalc_mcp_server.transports.sse import build_app
+
+    token = _mint(signing_key, audience="taxcalc-api", ttl_s=-60)
+    with TestClient(build_app(validating_settings)) as client:
+        response = client.get("/sse", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+    assert response.json()["code"] == 4030
+
+
+def test_a_valid_token_binds_its_tenant_claim_to_the_request(
+    signing_key: Any, validating_settings: Settings
+) -> None:
+    """The accepted path extracts ``tenant_id`` into the context and forwards the raw token."""
+    from starlette.testclient import TestClient
+
+    seen: dict[str, Any] = {}
+    token = _mint(signing_key, audience="taxcalc-api", tenant_id="tenant-z")
+    # Not used as a context manager: entering one drives the ASGI lifespan protocol, and the
+    # one-line downstream app below implements `http` only. Nothing here needs a startup event.
+    client = TestClient(_recording_middleware(validating_settings, seen))
+    response = client.get("/sse", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert seen["tenant"] == "tenant-z", "the claim must reach the handler without a parameter"
+    assert seen["forwarded"] == token, "the caller's own token is what gets forwarded upstream"
+
+
+def test_an_unsigned_none_algorithm_token_is_refused(
+    signing_key: Any, validating_settings: Settings
+) -> None:
+    """A token nominating ``alg: none`` validates against no key and must not be accepted.
+
+    The allow-list in the transport is what makes this true; without it PyJWT honours the
+    token's own header, and anyone can mint one of these in a browser console.
+    """
+    import jwt as pyjwt
+    from starlette.testclient import TestClient
+
+    from taxcalc_mcp_server.transports.sse import build_app
+
+    forged = pyjwt.encode(
+        {"aud": "taxcalc-api", "tenant_id": "tenant-a", "exp": 2000000000},
+        key="",
+        algorithm="none",
+    )
+    with TestClient(build_app(validating_settings)) as client:
+        response = client.get("/sse", headers={"Authorization": f"Bearer {forged}"})
+    assert response.status_code == 401
+    assert response.json()["code"] == 4030
+
+
+# ---- The noise floor under the p95 gate -----------------------------------------------------
+#
+# These exist because the gate was measurably flaky before the floor and the warmup: two
+# consecutive runs of the replay script, with no change between them, reported +18% and +44%.
+# The tests below pin the two properties that make it trustworthy - noise is ignored, and a
+# change that crosses into perceptible territory is not.
+
+
+def test_two_sub_millisecond_numbers_are_not_a_regression() -> None:
+    """A 0.25ms -> 0.40ms swing is jitter, not a regression, and must not fail a build.
+
+    This is exactly the shape the gate used to fire on: +60% growth on a call no caller could
+    tell apart from the original.
+    """
+    current = {"tools": {"llm.chat": {"p95": 0.40}}}
+    previous = {"tools": {"llm.chat": {"p95": 0.25}}}
+    assert compare(current, previous) == []
+
+
+def test_a_change_that_crosses_the_noise_floor_is_still_a_regression() -> None:
+    """The floor must not become a blind spot: a sub-millisecond baseline still gets compared.
+
+    A handler that went from 0.3ms to 3ms has regressed tenfold. Skipping the comparison because
+    the *baseline* was small is how a noise filter turns into a hole, so the floor is applied to
+    the pair and this case is reported.
+    """
+    current = {"tools": {"llm.chat": {"p95": 3.0}}}
+    previous = {"tools": {"llm.chat": {"p95": 0.3}}}
+    messages = compare(current, previous)
+    assert len(messages) == 1
+    assert "llm.chat" in messages[0]
+
+
+def test_a_regression_above_the_floor_is_reported_as_before() -> None:
+    """The ordinary case - both sides above the floor, growth beyond the limit - is unchanged."""
+    baseline = NOISE_FLOOR_MS * 10
+    current = {"tools": {"rag.retrieve_and_generate": {"p95": baseline * 1.5}}}
+    previous = {"tools": {"rag.retrieve_and_generate": {"p95": baseline}}}
+    assert len(compare(current, previous)) == 1
+
+
+def test_the_warmup_pass_is_recorded_in_the_report() -> None:
+    """The report says how many untimed calls preceded the samples.
+
+    Without it a reader cannot tell a report whose p95 includes each tool's first-call cost from
+    one whose p95 does not, and those two are not comparable numbers.
+    """
+    from taxcalc_mcp_server.scripts import replay
+
+    fixtures = replay.load_fixtures(Path("tests/fixtures"))
+    report = anyio.run(replay._run, fixtures, 2, 1)
+    assert report["warmup"] == 1
+    assert report["repeats"] == 2
+    for stats in report["tools"].values():
+        assert stats["samples"] == 2, "warmup calls must not become samples"

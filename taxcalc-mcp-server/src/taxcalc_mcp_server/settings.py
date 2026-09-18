@@ -47,11 +47,20 @@ class Settings(BaseSettings):
 
     #: Path on the LLM proxy that ``llm.chat`` posts to.
     #:
-    #: Configurable rather than hard-coded because this capstone's proxy is the Java service's
-    #: own ``LlmProxyController``, which serves ``POST /v1/completions`` - not the
-    #: ``/v1/chat/completions`` shape the generic lesson assumes. The MCP-facing schema
-    #: (``messages``/``max_tokens``) is unaffected: the adapter translates. See
-    #: :mod:`taxcalc_mcp_server.tools.llm`.
+    #: **Both proxy shapes are supported, and the path selects which one is spoken.** A path
+    #: ending in ``/chat/completions`` gets an OpenAI-shaped body (a real ``messages`` array,
+    #: ``max_tokens``, and a ``choices[0].message.content`` reply); anything else gets this
+    #: capstone's ``POST /v1/completions`` shape (``{prompt, model, feature}``, replying
+    #: ``{resolvedModel, inputTokens, outputTokens, text}``). See
+    #: :func:`taxcalc_mcp_server.tools.llm._wire_shape`.
+    #:
+    #: The default is ``/v1/completions`` because that is the route that exists in THIS repo -
+    #: ``llmproxy/LlmProxyController.java``, the only proxy the E2E can reach. Defaulting to the
+    #: generic ``/v1/chat/completions`` would ship a server whose one LLM tool 404s out of the
+    #: box. Point this at ``/v1/chat/completions`` and the chat-shaped upstream works for real,
+    #: with no code change. The MCP-facing schema (``messages``/``max_tokens``) is identical
+    #: either way: that is the contract, and the wire format below it is an implementation
+    #: detail of the deployment.
     llm_proxy_chat_path: str = Field(default="/v1/completions", min_length=1)
 
     #: LangSmith project every ``@traceable`` span lands in. Shares a project with the W7 D3 RAG

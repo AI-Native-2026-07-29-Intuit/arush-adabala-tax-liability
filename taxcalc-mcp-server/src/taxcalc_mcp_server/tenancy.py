@@ -49,6 +49,32 @@ def request_tenant() -> str:
     return _REQUEST_TENANT.get()
 
 
+def cross_tenant_claim(requested: str) -> str:
+    """Return the bearer's tenant claim when it disagrees with ``requested``, else ``""``.
+
+    This is the cross-check the module docstring promises, and the *only* reader of
+    :data:`_REQUEST_TENANT` outside the transport that sets it. It is phrased as a query rather
+    than as an assertion so the one caller -
+    :func:`taxcalc_mcp_server.observability.observe` - both logs the disagreement and refuses
+    the call; a function that raised on its own behalf would leave the log line to whoever
+    remembered to write it.
+
+    **Why an empty claim is not a mismatch.** The claim is empty on the stdio transport and
+    whenever local JWKS validation is disabled, which is the default. "Unknown" must read as
+    "no local opinion, let the service that owns the data decide" - treating it as a mismatch
+    would make every stdio tool call fail, and treating it as agreement is exactly what the
+    empty return value says.
+
+    :param requested: The tenant the tool was asked to act on.
+    :returns: The conflicting ``tenant_id`` claim, or ``""`` when there is no conflict - either
+        because the claim is unknown or because it matches.
+    """
+    claimed = _REQUEST_TENANT.get()
+    if claimed and claimed != requested:
+        return claimed
+    return ""
+
+
 def bearer_token(configured: str) -> str:
     """Resolve the token to forward: the per-request one when present, else the configured one.
 

@@ -77,3 +77,30 @@ def rag_timeout(message: str) -> McpError:
     :returns: An :class:`McpError` carrying :data:`RAG_TIMEOUT_CODE`.
     """
     return McpError(ErrorData(code=RAG_TIMEOUT_CODE, message=message[:MAX_MESSAGE_CHARS]))
+
+
+def tenant_mismatch(claimed: str, requested: str) -> McpError:
+    """Build the error raised when a validated bearer's tenant is not the one being acted on.
+
+    Separate from :func:`_map_http` because no upstream was reached: this is the local edge
+    refusing to *forward* a request it can already tell is cross-tenant. It shares 4030 with
+    every other credential refusal on purpose - the caller's correct response is identical, and
+    a distinct code would only tell an attacker probing tenant ids that the token was otherwise
+    good.
+
+    The message names neither tenant. A caller who sent one of them knows it, and telling them
+    the other is exactly the enumeration this check exists to stop.
+
+    :param claimed: The ``tenant_id`` claim carried by the validated bearer.
+    :param requested: The tenant the tool was asked to act on.
+    :returns: An :class:`McpError` carrying ``4030``.
+    """
+    # Both values are deliberately unused in the rendered text; they are parameters so the call
+    # site reads as the comparison it made, and so a future audit log can record them.
+    del claimed, requested
+    return McpError(
+        ErrorData(
+            code=STATUS_TO_CODE[403],
+            message="bearer token is scoped to a different tenant than this call acts on",
+        )
+    )

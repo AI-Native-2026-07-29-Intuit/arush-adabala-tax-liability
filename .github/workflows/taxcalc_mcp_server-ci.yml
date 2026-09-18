@@ -6,8 +6,15 @@
 #               so it holds everything that can be checked without pulling a container.
 #
 # merge-to-main the Testcontainers E2E: Postgres + the W3 D1 Spring service + this server as
-#               three real processes. A minute or two of image pulls and JVM boot before the
-#               first assertion, which is why it is not paid on every push.
+#               three real processes, plus the full `pipx install` of the built wheel driven
+#               over stdio. A minute or two of image pulls and JVM boot before the first
+#               assertion, and a full torch download for the install, which is why neither is
+#               paid on every push. `p95-gate` runs on
+#               the same tier and holds the latency comparison, because a p95 is only meaningful
+#               against a previous run on the SAME runner class and a PR has no such previous
+#               run. It is a separate job, not a step inside the E2E one, so an integration
+#               failure and a latency regression are two verdicts rather than one - a regression
+#               hidden behind a container that would not start is a regression nobody fixes.
 #
 # The split is a statement about what each tier can catch. The PR tier catches everything inside
 # this codebase: a broken schema, a vague tool description, a corrupted stdio frame, a latency
@@ -48,7 +55,8 @@ concurrency:
   # cancelled main run leaves the branch with no recorded verdict.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Least privilege: both jobs read the tree and publish nothing.
+# Least privilege: every job reads the tree and publishes nothing. The p95 gate writes only
+# to the Actions cache, which needs no token scope.
 permissions:
   contents: read
 
@@ -113,8 +121,11 @@ jobs:
 
       - name: mypy --strict
         # tests/ is type-checked too. Untyped tests are where `Any` creeps back in, and a test
-        # that does not type-check may not be exercising the signature it claims to.
-        run: uv run mypy --strict src/ tests/
+        # that does not type-check may not be exercising the signature it claims to. scripts/ is
+        # in the list for the same reason: the Inspector harness is not shipped in the wheel, but
+        # it is the thing that produces the evidence recorded in PROMPT_JOURNAL.md, and a harness
+        # that has quietly stopped compiling produces no evidence at all.
+        run: uv run mypy --strict src/ tests/ scripts/
 
       - name: unit + schema + description gate + stdio smoke
         env:
@@ -140,6 +151,53 @@ jobs:
         # still replay without error; the merge tier owns the p95 comparison.
         run: uv run python -m taxcalc_mcp_server.scripts.replay --fixtures tests/fixtures/
 
+      - name: money discipline - the brief's two greps, verbatim
+        # Both of the W7 D4 Task 2 grep gates, exactly as the brief writes them, plus two
+        # semantic checks the literal patterns do not cover.
+        #
+        # The first pattern matches the bare word anywhere, which means it also matches the
+        # PROSE explaining why money must not be a binary fraction. Rather than delete those
+        # explanations to turn the gate green - a check whose green state costs you the
+        # reasoning is a check that teaches people to delete reasoning - the name of the inexact
+        # binary type now lives in exactly one module, `numeric.py`, which is deliberately NOT
+        # under `tools/`. A tool validates, forwards and re-shapes; "is this type acceptable for
+        # this quantity" is answered once, centrally, for all of them. So the gate passes as
+        # written AND means something: a tool module naming that type is now a real finding.
+        run: |
+          set -uo pipefail
+          status=0
+
+          # (1) The brief's pattern, verbatim, over the directory it names.
+          if grep -RIn 'float\|amount: float' src/taxcalc_mcp_server/tools/ ; then
+            echo "::error::a tools/ module names the inexact binary type - it belongs in numeric.py"
+            status=1
+          fi
+
+          # (2) The brief's second pattern, verbatim. A bare except swallows KeyboardInterrupt
+          # and SystemExit along with the bug it was aimed at.
+          if grep -RIn 'except:' src/ tests/ ; then
+            echo "::error::bare except - name the exceptions being handled"
+            status=1
+          fi
+
+          # (3) Beyond the brief: a money-shaped field annotated as a binary fraction, anywhere
+          # in the package - including numeric.py, where the type IS named legitimately.
+          if grep -REn '\b(amount|total|price|cost|refund|balance|subtotal|fee|tax|usd)[a-z_]*[[:space:]]*:[[:space:]]*float\b' src/ tests/ ; then
+            echo "::error::a monetary field is annotated float - money is Decimal (see CLAUDE.md)"
+            status=1
+          fi
+
+          # (4) A money field passed through float(), which discards both exactness and scale.
+          if grep -REn 'float\([[:space:]]*[a-z_.]*(amount|total|price|cost|refund|balance)' src/ tests/ ; then
+            echo "::error::a monetary value is passed through float()"
+            status=1
+          fi
+
+          if [ "$status" -eq 0 ]; then
+            echo "money discipline holds: tools/ is clean, no float-typed money, no bare excepts"
+          fi
+          exit "$status"
+
       - name: no plaintext credentials in the tree
         # Cheap, and it runs on every PR because the cost of finding a committed key later is
         # revocation and rotation across every consumer.
@@ -155,15 +213,40 @@ jobs:
           fi
           echo "no plaintext LangSmith keys found"
 
-      - name: wheel builds and exposes both console scripts
-        # The Claude Desktop launcher runs `uvx taxcalc-mcp-server`, which resolves the console
-        # script from the built wheel - so a packaging mistake breaks the desktop integration
-        # while every test still passes. Checked here rather than discovered by a user.
+      - name: wheel builds, exposes both console scripts, and RESOLVES
+        # A packaging mistake breaks the Claude Desktop integration while every test still
+        # passes, so it is checked here rather than discovered by a user.
+        #
+        # The third assertion is the one that was missing, and its absence hid a real defect for
+        # a whole day. Inspecting entry_points.txt inside the zip proves the scripts were
+        # DECLARED; it says nothing about whether the wheel can be INSTALLED. It cannot, on its
+        # own: taxcalc-ai is resolved through [tool.uv.sources], that table is uv-local and is
+        # never written into wheel metadata, so the wheel ships a bare `taxcalc-ai` requirement
+        # and `pipx install ./dist/*.whl` fails with 'not found in the package registry'. A gate
+        # that checks the manifest and not the install is a gate that passes on a wheel nobody
+        # can install - which is exactly what happened.
+        #
+        # --dry-run keeps this on the PR tier. A real install pulls taxcalc-ai's full dependency
+        # graph, torch included, which is minutes and gigabytes; resolution is what can actually
+        # break here, and --dry-run proves resolution. The full install is paid once on the merge
+        # tier, below, where it also gets driven over JSON-RPC.
+        #
+        # --python points at a THROWAWAY venv, and that detail is the difference between a gate
+        # and a decoration. Resolving against this project's own .venv - which `uv sync` has
+        # already filled with taxcalc-ai as an editable install - satisfies the requirement
+        # before the resolver starts, so the dry run succeeds even when the wheel is
+        # uninstallable. Verified by negative control: in a clean environment and without
+        # --find-links, this command exits 1 with 'requirements are unsatisfiable'.
         run: |
           uv build
+          (cd ../taxcalc-ai && uv build)
           python -m zipfile -l dist/*.whl | grep -q taxcalc_mcp_server/transports/stdio.py
           unzip -p dist/*.whl '*/entry_points.txt' | tee /dev/stderr | grep -q 'taxcalc-mcp-server ='
           unzip -p dist/*.whl '*/entry_points.txt' | grep -q 'taxcalc-mcp-server-sse ='
+          uv venv "${RUNNER_TEMP}/wheelprobe"
+          uv pip install --dry-run --python "${RUNNER_TEMP}/wheelprobe/bin/python" \
+            --find-links ../taxcalc-ai/dist ./dist/*.whl \
+            | tee /dev/stderr | grep -q 'taxcalc-mcp-server==0.1.0'
 
   merge-to-main:
     name: Testcontainers E2E (MCP -> Spring -> Postgres)
@@ -230,3 +313,123 @@ jobs:
             exit 1
           fi
           echo "E2E executed (no skips)"
+
+      - name: pipx install puts taxcalc-mcp-server on $PATH and it answers JSON-RPC
+        # The Task 4 acceptance criterion, executed rather than asserted about. The PR tier
+        # proves the wheel RESOLVES; this proves it INSTALLS, lands both console scripts on
+        # $PATH, and that the installed executable actually serves - three separate claims, and
+        # only the last one catches an entry point that imports a module the wheel forgot to
+        # package. Paid on the merge tier because it pulls taxcalc-ai's whole dependency graph,
+        # torch included.
+        #
+        # --find-links is not optional and not a workaround: [tool.uv.sources] is uv-local
+        # configuration that never reaches wheel metadata, so the wheel's bare `taxcalc-ai`
+        # requirement has to be pointed at the sibling's own freshly built wheel. Without it
+        # pipx fails outright, which is the defect this step exists to keep fixed.
+        env:
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+          LANGSMITH_API_KEY: dummy-for-tests
+          LANGSMITH_TRACING: "false"
+        run: |
+          uv build
+          (cd ../taxcalc-ai && uv build)
+          pipx install ./dist/taxcalc_mcp_server-0.1.0-py3-none-any.whl \
+            --pip-args="--find-links $(cd ../taxcalc-ai/dist && pwd)"
+          command -v taxcalc-mcp-server
+          command -v taxcalc-mcp-server-sse
+          # Drive the installed executable over stdio. EOF on stdin ends the session, so the
+          # handshake reply is the whole test: a frame back means the console script resolved
+          # its imports, built the tool registry and wrote well-formed JSON-RPC to stdout.
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | taxcalc-mcp-server 2>/dev/null > handshake.json
+          cat handshake.json
+          python -c "import json,sys; r=json.load(open('handshake.json')); assert r['jsonrpc']=='2.0', r; assert r['result']['serverInfo']['name']=='taxcalc-mcp-server', r; print('installed executable served:', r['result']['serverInfo'])"
+          pipx uninstall taxcalc-mcp-server
+
+  p95-gate:
+    name: fixture replay p95 vs the previous main run
+    # Merge tier only, for the reason in the header: the comparison needs a previous run on this
+    # same runner class, and a PR's single run has none. `needs: per-pr` because a replay whose
+    # fixtures no longer load, or whose tools raise, is a correctness failure that the PR tier
+    # already reports - running the latency gate on top of that would report the same break
+    # twice under a less obvious name.
+    if: github.ref == 'refs/heads/main'
+    needs: [per-pr]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: taxcalc-mcp-server
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore the previous run's p95 baseline
+        # `restore-keys` is the whole mechanism: the exact key carries this commit's SHA and can
+        # never hit, so the prefix match returns the most recently saved cache under
+        # `replay-p95-<os>-`, which is the previous successful run of this job on main. That
+        # gives a rolling baseline with no artefact plumbing and no API call to find the last
+        # green run.
+        #
+        # A miss is NOT a failure. The first run of this gate, and the first after a cache
+        # eviction, has nothing to compare against - the replay script says so out loud and
+        # exits 0, which is the honest verdict rather than a red build about GitHub's cache
+        # retention. Paths are relative to the workspace, not to `working-directory`.
+        id: baseline
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: taxcalc-mcp-server/.replay-baseline
+          key: replay-p95-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            replay-p95-${{ runner.os }}-
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Pin Python 3.12 via uv
+        run: uv python install 3.12
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: replay the fixtures and compare p95 against the baseline
+        env:
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+          LANGSMITH_API_KEY: dummy-for-tests
+          LANGSMITH_TRACING: "false"
+        # Fails the build when any tool's p95 is more than 15% above the baseline's. The
+        # threshold and the arithmetic live in the script, not in this YAML, so they are unit
+        # tested (`test_regression_beyond_the_limit_is_reported` and its three siblings) rather
+        # than only exercised by a red build.
+        # --repeats 100 rather than the default 20. A p95 over 20 samples is the second-slowest
+        # call, so it tracks whatever the runner was doing rather than what the handler costs;
+        # 100 samples put the p95 far enough from the tail to be a property of the code. The
+        # script's warmup pass is what removes each tool's one-off first-call cost, which at 20
+        # samples WAS the p95 - `orders.create_refund` reported 12-56ms against a 0.26ms median
+        # until the warmup landed. Together they are what make a 15% threshold meaningful here;
+        # without them this gate reported +18% and +44% between two identical runs.
+        run: |
+          uv run python -m taxcalc_mcp_server.scripts.replay \
+            --fixtures tests/fixtures/ \
+            --repeats 100 \
+            --compare-to .replay-baseline/latest.json
+
+      - name: Promote this run's report to the baseline
+        # Deliberately NOT `if: always()`. A run that regressed must not overwrite the baseline:
+        # laundering the slow numbers in would make the next run green against them, and the
+        # regression would be permanent and invisible - the gate would have converted one red
+        # build into a silently slower server. Both this step and the cache save below are
+        # skipped when the comparison fails, so the last GOOD numbers stay the baseline until a
+        # run beats them or comes within the limit.
+        run: |
+          mkdir -p .replay-baseline
+          cp .replay/latest.json .replay-baseline/latest.json
+
+      - name: Save the baseline for the next run
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: taxcalc-mcp-server/.replay-baseline
+          key: replay-p95-${{ runner.os }}-${{ github.sha }}

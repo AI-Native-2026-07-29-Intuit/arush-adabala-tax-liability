@@ -18,6 +18,26 @@ absolute threshold in milliseconds is a number about the CI runner, not about th
 red when GitHub changes instance types and green when they change back, and within two such
 cycles nobody believes it. A 15% regression against the previous run on the same tier is a
 statement about the diff.
+
+**Why a ratio alone is not enough, and what the warmup and the noise floor are for.** These
+handlers answer in a few hundred *microseconds* - there is no network in the measurement - and at
+that magnitude a 15% ratio is inside the run-to-run noise. Two consecutive runs of this script on
+an idle laptop, with no code change between them, reported +18% and +44%. A gate that fires on
+that is worse than no gate: it trains people to re-run the build until it goes green, and then a
+real regression goes green too. Two things make the comparison mean something:
+
+*A warmup pass per fixture, discarded.* The first call to a tool pays for imports, Pydantic's
+validator construction and the first pass through httpx's transport stack. With twenty samples
+that one-off cost *is* the p95 - which is why ``orders.create_refund`` was reporting a p95 of
+12-56 ms against a median of 0.26 ms. Timing only warm calls is what makes the tail a property of
+the handler rather than of the interpreter's startup.
+
+*A noise floor, applied to the pair.* A change that leaves a call under a millisecond is not a
+latency regression any caller can perceive, and the ratio between two sub-millisecond numbers is
+mostly timer resolution. So a comparison is skipped only when *both* sides are under
+:data:`NOISE_FLOOR_MS` - if the new number crosses the floor, it is compared no matter how small
+the baseline was, because 0.3 ms to 3 ms is exactly the regression this gate exists to catch.
+The skips are listed rather than passed over, so a run where nothing could be compared says so.
 """
 
 from __future__ import annotations
@@ -45,6 +65,16 @@ DEFAULT_REPORT: Final[Path] = Path(".replay/latest.json")
 #: Fraction by which a tool's p95 may regress before the merge-to-main tier fails. See the module
 #: docstring for why this is a ratio rather than a millisecond budget.
 P95_REGRESSION_LIMIT: Final[float] = 0.15
+
+#: Below this, in milliseconds, a change is noise rather than a regression. Applied to the
+#: baseline and the current value together - see the module docstring. One millisecond is chosen
+#: because it is roughly where these in-process handlers stop being dominated by interpreter
+#: jitter, and because no consumer of a tool call can perceive a change that stays under it.
+NOISE_FLOOR_MS: Final[float] = 1.0
+
+#: Untimed calls per fixture before sampling starts. One is enough: the costs being excluded are
+#: paid exactly once per tool, on its first call.
+DEFAULT_WARMUP: Final[int] = 1
 
 
 @dataclass(frozen=True)
@@ -189,23 +219,31 @@ def _percentiles(samples: Sequence[float]) -> dict[str, float]:
     return {"p50": pick(0.50), "p95": pick(0.95), "p99": pick(0.99)}
 
 
-async def _run(fixtures: list[Fixture], repeats: int) -> dict[str, Any]:
+async def _run(fixtures: list[Fixture], repeats: int, warmup: int) -> dict[str, Any]:
     """Replay every fixture ``repeats`` times and build the report.
 
     :param fixtures: The fixtures to replay.
     :param repeats: How many times to replay each. More than one because a single sample per
         fixture makes a p95 a synonym for "the slowest call", which is dominated by whatever the
         interpreter happened to be doing.
+    :param warmup: Untimed calls per fixture before sampling. See the module docstring: the
+        first call to a tool pays one-off costs that, in a twenty-sample run, become the p95.
     :returns: The report.
     """
     settings = Settings()
     per_tool: dict[str, list[float]] = {}
     for fixture in fixtures:
+        for _ in range(warmup):
+            # Awaited for its side effects only - the elapsed time is deliberately dropped. A
+            # failure still raises, so a fixture that cannot replay fails here rather than
+            # producing a report built from a warmup that silently errored.
+            await _replay_once(fixture, settings)
         for _ in range(repeats):
             per_tool.setdefault(fixture.tool, []).append(await _replay_once(fixture, settings))
     return {
         "fixtures": len(fixtures),
         "repeats": repeats,
+        "warmup": warmup,
         "tools": {
             tool: {"samples": len(samples), **_percentiles(samples)}
             for tool, samples in sorted(per_tool.items())
@@ -223,24 +261,78 @@ def compare(current: dict[str, Any], previous: dict[str, Any]) -> list[str]:
     :param previous: The previous run's report.
     :returns: Human-readable regression messages; empty when nothing regressed.
     """
-    messages: list[str] = []
+    return [v.message for v in _verdicts(current, previous) if v.regressed]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What the gate concluded about one tool.
+
+    Three states, not two, and the third is the one worth naming: a comparison that was
+    deliberately not made. A gate that skipped every tool and a gate that compared every tool and
+    found nothing both exit 0, and an operator has to be able to tell those apart - so the state
+    is carried as data rather than inferred from whether a message string is empty.
+
+    :ivar tool: The tool compared.
+    :ivar regressed: True when this is a failure the build should stop on.
+    :ivar skipped: True when no comparison was made, for the reason in :attr:`message`.
+    :ivar message: Human-readable detail; empty only for a clean pass.
+    """
+
+    tool: str
+    regressed: bool
+    skipped: bool
+    message: str
+
+
+def _verdicts(current: dict[str, Any], previous: dict[str, Any]) -> list[Verdict]:
+    """Return one :class:`Verdict` per tool that had a baseline to compare against.
+
+    :param current: This run's report.
+    :param previous: The previous run's report.
+    :returns: The verdicts, in report order.
+    """
+    verdicts: list[Verdict] = []
     for tool, stats in current.get("tools", {}).items():
         before = previous.get("tools", {}).get(tool)
         if before is None:
             continue
         baseline = float(before["p95"])
         now = float(stats["p95"])
-        # A baseline at or below zero cannot be a denominator, and a sub-millisecond baseline
-        # makes the ratio a measure of timer resolution rather than of the change.
+        # A baseline at or below zero cannot be a denominator.
         if baseline <= 0.0:
+            verdicts.append(
+                Verdict(tool, False, True, f"{tool}: SKIPPED, baseline p95 is {baseline:.3f}ms")
+            )
+            continue
+        # Both sides under the floor: the ratio between two sub-millisecond numbers is timer
+        # resolution, not a change anyone can feel. A `now` that crosses the floor is compared
+        # however small the baseline was - see the module docstring.
+        if max(baseline, now) < NOISE_FLOOR_MS:
+            verdicts.append(
+                Verdict(
+                    tool,
+                    False,
+                    True,
+                    f"{tool}: SKIPPED, p95 {baseline:.3f}ms -> {now:.3f}ms, both under the "
+                    f"{NOISE_FLOOR_MS:.0f}ms noise floor",
+                )
+            )
             continue
         growth = (now - baseline) / baseline
         if growth > P95_REGRESSION_LIMIT:
-            messages.append(
-                f"{tool}: p95 {baseline:.3f}ms -> {now:.3f}ms (+{growth:.1%}, "
-                f"limit +{P95_REGRESSION_LIMIT:.0%})"
+            verdicts.append(
+                Verdict(
+                    tool,
+                    True,
+                    False,
+                    f"{tool}: p95 {baseline:.3f}ms -> {now:.3f}ms (+{growth:.1%}, "
+                    f"limit +{P95_REGRESSION_LIMIT:.0%})",
+                )
             )
-    return messages
+        else:
+            verdicts.append(Verdict(tool, False, False, ""))
+    return verdicts
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -254,7 +346,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--fixtures", type=Path, required=True, help="Directory of *.json fixtures."
     )
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT, help="Where to write JSON.")
-    parser.add_argument("--repeats", type=int, default=20, help="Replays per fixture.")
+    parser.add_argument("--repeats", type=int, default=20, help="Timed replays per fixture.")
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=DEFAULT_WARMUP,
+        help="Untimed replays per fixture before sampling starts.",
+    )
     parser.add_argument(
         "--compare-to",
         type=Path,
@@ -266,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     enforce_strict_tool_schemas(mcp)
     fixtures = load_fixtures(args.fixtures)
     try:
-        report = anyio.run(_run, fixtures, args.repeats)
+        report = anyio.run(_run, fixtures, args.repeats, args.warmup)
     except RuntimeError as exc:
         print(f"REPLAY FAILED: {exc}")
         return 1
@@ -288,13 +386,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    regressions = compare(report, json.loads(args.compare_to.read_text()))
+    verdicts = _verdicts(report, json.loads(args.compare_to.read_text()))
+    regressions = [v.message for v in verdicts if v.regressed]
+    skipped = [v.message for v in verdicts if v.skipped]
+    # Printed on both outcomes, and before the verdict: a reader has to be able to see WHICH
+    # tools the green tick covers. A gate that skipped every tool is reported as such rather
+    # than as a pass.
+    for message in skipped:
+        print(f"  {message}")
     if regressions:
         print("P95 REGRESSION:")
         for message in regressions:
             print(f"  {message}")
         return 1
-    print(f"p95 within +{P95_REGRESSION_LIMIT:.0%} of the previous run for every tool")
+    compared = len(verdicts) - len(skipped)
+    if compared == 0:
+        print(
+            f"p95 comparison covered NO tools: all {len(verdicts)} are below the "
+            f"{NOISE_FLOOR_MS:.0f}ms noise floor. Nothing regressed, and nothing was proven."
+        )
+        return 0
+    print(
+        f"p95 within +{P95_REGRESSION_LIMIT:.0%} of the previous run for "
+        f"{compared} of {len(verdicts)} tools ({len(skipped)} under the noise floor)"
+    )
     return 0
 
 

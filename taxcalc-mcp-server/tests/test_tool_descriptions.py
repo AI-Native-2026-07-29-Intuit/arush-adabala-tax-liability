@@ -140,3 +140,84 @@ def test_registration_contains_no_credential() -> None:
     needles = ("lsv2" + "_pt_", "Bearer " + "ey", "eyJhbGci" + "Oi")
     for needle in needles:
         assert needle not in raw, f"mcp.json contains what looks like a credential: {needle}"
+
+
+def test_the_committed_launch_command_actually_starts_the_server() -> None:
+    """The ``stdio`` command in ``mcp.json`` starts a server that answers ``tools/list``.
+
+    **The defect this guards against shipped once and was caught by a DONE WHEN check, not by
+    this suite.** Both launch configs originally said ``uvx taxcalc-mcp-server``, which is the
+    idiomatic way to run a published MCP server and cannot work here: this project depends on
+    ``taxcalc-ai``, a sibling published to no registry. ``uv`` resolves it through
+    ``[tool.uv.sources]`` while working inside the project, but the built wheel carries a bare
+    ``Requires-Dist: taxcalc-ai``, so ``uvx`` and ``pipx install ./dist/*.whl`` both fail with
+    "taxcalc-ai was not found in the package registry".
+
+    Every test in this repository passed throughout, because they all run the server as a Python
+    module inside the project. The one thing none of them did was run the command a *user* would
+    run. This test does, from a working directory outside the repo, so the documented launch path
+    is exercised rather than asserted.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    registration = json.loads(MCP_JSON.read_text())
+    stdio = registration["transports"]["stdio"]
+    args = list(stdio["args"])
+
+    # The committed `--directory` value is relative to the repository root, which is where the
+    # W7 D5 agent runs. Resolved to an absolute path here so the command can be launched from
+    # somewhere else entirely - which is the whole point of the test.
+    repo_root = MCP_JSON.resolve().parent.parent
+    if "--directory" in args:
+        target = args.index("--directory") + 1
+        args[target] = str(repo_root / args[target])
+    argv = [stdio["command"], *args]
+
+    env = {
+        **os.environ,
+        "TAXCALC_MCP_BEARER_JWT": "dummy-for-tests",
+        "LANGSMITH_API_KEY": "dummy-for-tests",
+        "LANGSMITH_TRACING": "false",
+    }
+    with tempfile.TemporaryDirectory() as elsewhere:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            bufsize=1,
+            cwd=elsewhere,
+        )
+        try:
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+            proc.stdin.write(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {"name": "launch-check", "version": "1"},
+                        },
+                    }
+                )
+                + "\n"
+            )
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            assert line, "the documented launch command produced no JSON-RPC output"
+            reply = json.loads(line)
+            assert reply["result"]["serverInfo"]["name"] == "taxcalc-mcp-server", reply
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+            for pipe in (proc.stdin, proc.stdout):
+                if pipe is not None:
+                    pipe.close()

@@ -12,24 +12,42 @@ the W7 D5 agent branches on exactly that number to apply exponential backoff. Fo
 generic 5030 it would be indistinguishable from "the server broke", and the agent's correct
 response to those two is opposite: back off and retry one, stop immediately on the other.
 
-**This capstone's proxy is not the generic one.** The Java service's ``LlmProxyController``
-serves ``POST /v1/completions`` taking ``{prompt, model, feature}``, not a ``/v1/chat/completions``
-endpoint taking a ``messages`` array. The MCP-facing schema keeps the ``messages`` shape anyway -
-that is the shape an LLM client naturally produces, and it is what the W7 D5 agent will emit -
-and this module translates at the boundary. Putting the translation here rather than pushing the
-proxy's shape up into the tool schema is the whole point of an adapter: the upstream's wire
-format is an implementation detail, and changing it should not change the published contract.
+**Two upstream wire shapes, one published contract.** The MCP-facing schema is always
+``messages``/``max_tokens`` - that is the shape an LLM client naturally produces and what the
+W7 D5 agent emits - and :func:`_wire_shape` picks the body this module actually sends from the
+configured :attr:`Settings.llm_proxy_chat_path`:
+
+* ``/v1/chat/completions`` (the OpenAI-compatible shape): the ``messages`` array goes out intact,
+  ``max_tokens`` is a real upstream ceiling, and the reply is read from
+  ``choices[0].message.content`` with ``usage.prompt_tokens``/``usage.completion_tokens``.
+* anything else, default ``/v1/completions`` (this capstone's ``LlmProxyController``): the turns
+  are flattened into the single ``prompt`` field that record accepts, tagged with ``feature`` for
+  cost attribution, and the reply is read from ``text`` with ``inputTokens``/``outputTokens``.
+
+The default is the second one because it is the route that exists in this repo; the first is
+supported so pointing the setting at a generic proxy needs no code change. Keeping the
+translation *here* rather than pushing either proxy's shape up into the tool schema is the whole
+point of an adapter: the upstream wire format is a deployment detail, and swapping it must not
+change what a client sees in ``tools/list``.
+
+**Why ``max_tokens`` is not always an upstream ceiling.** On the chat shape it is forwarded and
+enforced by the proxy. On this repo's ``/v1/completions``, ``CompletionRequest`` is a three-field
+record with no token ceiling, and Spring Boot ignores unknown JSON properties by default - so a
+forwarded ``maxTokens`` would be silently dropped rather than rejected. It is still validated
+here (1..4096) and recorded on the span, because a bound the caller declared is worth checking
+and worth seeing even when the upstream cannot honour it; claiming it was enforced would be the
+only real mistake available.
 """
 
-from decimal import Decimal
 from typing import Annotated, Final, Literal
 
 from langsmith import traceable
 from pydantic import BaseModel, ConfigDict, Field
 
-from taxcalc_mcp_server.app import ctx, mcp
+from taxcalc_mcp_server.app import TRACE_PROJECT, ctx, mcp
 from taxcalc_mcp_server.errors import _map_http
-from taxcalc_mcp_server.observability import observe
+from taxcalc_mcp_server.numeric import as_minor_units, as_token_count
+from taxcalc_mcp_server.observability import COST_SOURCE_PROXY, observe
 from taxcalc_mcp_server.tenancy import auth_headers
 from taxcalc_mcp_server.tools.orders import TENANT_PATTERN
 
@@ -94,12 +112,34 @@ _DESC_CHAT: Final[str] = (
 _CHAT_ARGS: Final = ChatArgs.model_fields
 
 
+#: Path suffix that marks an upstream as speaking the OpenAI-compatible chat shape. Matched on
+#: the suffix rather than the whole path so a proxy mounted under a prefix
+#: (``/internal/v1/chat/completions``) is still recognised.
+CHAT_COMPLETIONS_SUFFIX: Final[str] = "/chat/completions"
+
+
+def _wire_shape(path: str) -> Literal["chat", "completions"]:
+    """Decide which upstream body shape the configured proxy path expects.
+
+    Derived from the path rather than carried in a second setting, because two settings that must
+    agree are two settings that can disagree: a deployment pointed at ``/v1/chat/completions``
+    with the shape flag left on ``completions`` would send a ``prompt`` field to an endpoint that
+    reads ``messages`` and get an empty completion with a 200, which is the worst available
+    failure - billed, logged as success, and wrong.
+
+    :param path: The configured :attr:`Settings.llm_proxy_chat_path`.
+    :returns: ``"chat"`` for an OpenAI-compatible endpoint, ``"completions"`` otherwise.
+    """
+    return "chat" if path.rstrip("/").endswith(CHAT_COMPLETIONS_SUFFIX) else "completions"
+
+
 def _flatten(messages: list[ChatMessage]) -> str:
     """Render a message list as the single prompt this capstone's proxy accepts.
 
     Role-labelled and newline-separated rather than concatenated, so the model can still tell a
-    system instruction from a user turn. Lossy by nature - the proxy's contract has one prompt
-    field - but lossy in a way that preserves the distinction that matters.
+    system instruction from a user turn. Lossy by nature - the ``/v1/completions`` contract has
+    one prompt field - but lossy in a way that preserves the distinction that matters. Only the
+    ``completions`` shape needs this; the chat shape forwards the turns intact.
 
     :param messages: The conversation, oldest first.
     :returns: The flattened prompt.
@@ -107,7 +147,59 @@ def _flatten(messages: list[ChatMessage]) -> str:
     return "\n\n".join(f"{m.role}: {m.content}" for m in messages)
 
 
-@traceable(name="llm.chat", project_name="taxcalc-mcp-server")
+def _request_body(args: ChatArgs, shape: Literal["chat", "completions"]) -> dict[str, object]:
+    """Build the upstream JSON body for the shape this deployment speaks.
+
+    :param args: Validated arguments.
+    :param shape: From :func:`_wire_shape`.
+    :returns: The body to post.
+    """
+    if shape == "chat":
+        return {
+            "messages": [{"role": m.role, "content": m.content} for m in args.messages],
+            "max_tokens": args.max_tokens,
+        }
+    return {
+        "prompt": _flatten(args.messages),
+        "feature": COST_FEATURE,
+    }
+
+
+def _parse_reply(body: dict[str, object], shape: Literal["chat", "completions"]) -> ChatReply:
+    """Read the upstream response into the published DTO.
+
+    Defensive ``.get`` chains rather than indexing throughout: a proxy that answers 200 with a
+    body missing ``usage`` should cost the caller a zero token count, not an exception that
+    surfaces as a 5030 and hides the answer it did return.
+
+    :param body: The decoded JSON response.
+    :param shape: From :func:`_wire_shape`.
+    :returns: The pre-shaped reply.
+    """
+    if shape == "chat":
+        choices = body.get("choices")
+        first = choices[0] if isinstance(choices, list) and choices else {}
+        message = first.get("message", {}) if isinstance(first, dict) else {}
+        usage = body.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        return ChatReply(
+            text=str(message.get("content", "")) if isinstance(message, dict) else "",
+            model=str(body.get("model", "")),
+            input_tokens=as_token_count(usage.get("prompt_tokens", 0)),
+            output_tokens=as_token_count(usage.get("completion_tokens", 0)),
+        )
+    # `resolvedModel` first, `model` as the fallback: `CompletionResponse` carries both, and the
+    # resolved dated snapshot ("claude-haiku-4-5-20251001") is the one that answers "did these
+    # two replies come from the same model". The bare id the caller asked for cannot.
+    return ChatReply(
+        text=str(body.get("text", "")),
+        model=str(body.get("resolvedModel") or body.get("model", "")),
+        input_tokens=as_token_count(body.get("inputTokens", 0)),
+        output_tokens=as_token_count(body.get("outputTokens", 0)),
+    )
+
+
+@traceable(name="llm.chat", project_name=TRACE_PROJECT)
 async def _chat(args: ChatArgs) -> dict[str, object]:
     """Forward a conversation to the LLM proxy. Traced; called only by the tool handler.
 
@@ -115,6 +207,9 @@ async def _chat(args: ChatArgs) -> dict[str, object]:
     :returns: A :class:`ChatReply` dumped in JSON mode.
     :raises McpError: 4290 on a proxy rate limit - the code the W7 D5 agent backs off on - and
         4030 when the JWT lacks the proxy's scope.
+
+    The request and reply shapes come from :func:`_wire_shape`, so this body is the same whether
+    the deployment points at ``/v1/completions`` or ``/v1/chat/completions``.
     """
     c = ctx()
     async with observe("llm.chat", args.tenant_id) as span:
@@ -123,55 +218,35 @@ async def _chat(args: ChatArgs) -> dict[str, object]:
         # An absolute URL through the SAME client as the order calls: the base_url is the order
         # service, so this one line is what keeps a second connection pool, a second timeout
         # policy and a second thing to close from existing.
-        url = f"{c.settings.normalised_llm_proxy_url()}{c.settings.llm_proxy_chat_path}"
+        path = c.settings.llm_proxy_chat_path
+        shape = _wire_shape(path)
+        # Recorded so an operator reading a span knows which body actually went out. Without it,
+        # "the reply text was empty" and "we spoke the wrong dialect at this endpoint" look
+        # identical in the logs.
+        span["wire_shape"] = shape
+        span["max_tokens"] = args.max_tokens
+
+        url = f"{c.settings.normalised_llm_proxy_url()}{path}"
         r = await c.http.post(
             url,
-            json={
-                "prompt": _flatten(args.messages),
-                "maxTokens": args.max_tokens,
-                "feature": COST_FEATURE,
-            },
+            json=_request_body(args, shape),
             headers=auth_headers(c.settings.bearer_jwt.get_secret_value(), args.tenant_id),
         )
         span["http_status"] = r.status_code
         # The proxy reports the call's cost in a response header. Echoed into this server's own
-        # structured log - as integer minor units, per the W6 D4 money discipline, never a
-        # float - so the Grafana dashboard can aggregate MCP-attributed spend without joining
+        # structured log - as integer minor units, per the W6 D4 money discipline, never an
+        # inexact binary value - so Grafana can aggregate MCP-attributed spend without joining
         # against the proxy's logs. A missing header means "the proxy did not price this call",
         # which is a 0 here and a question for the proxy's own metrics, not an error for the
         # caller. Recorded BEFORE the status check so a rate-limited call still reports what it
         # cost - a 429 that billed is exactly the case an operator wants to see.
-        span["cost_usd_minor"] = _cost_minor(r.headers.get("X-Cost-Usd"))
+        span["cost_usd_minor"] = as_minor_units(r.headers.get("X-Cost-Usd"))
+        span["cost_source"] = COST_SOURCE_PROXY
         if r.status_code != 200:
             raise _map_http(r.status_code, r.text)
 
         body = r.json()
-        reply = ChatReply(
-            text=body.get("text", ""),
-            model=body.get("modelId", ""),
-            input_tokens=int(body.get("inputTokens", 0)),
-            output_tokens=int(body.get("outputTokens", 0)),
-        )
-        return reply.model_dump(mode="json")
-
-
-def _cost_minor(header: str | None) -> int:
-    """Parse ``X-Cost-Usd`` into integer minor units (cents).
-
-    Integer, not float, for the same reason refunds are ``Decimal``: this number is summed across
-    every request in a dashboard, and summing floats accumulates error in the direction nobody
-    audits. Parsed defensively because a missing or malformed header must never fail a tool call
-    that otherwise succeeded - the caller got their answer, and a log field is not worth an error.
-
-    :param header: The raw header value, or ``None``.
-    :returns: Cents, rounded down; ``0`` when absent or unparseable.
-    """
-    if not header:
-        return 0
-    try:
-        return int(Decimal(header) * 100)
-    except (ArithmeticError, ValueError):
-        return 0
+        return _parse_reply(body if isinstance(body, dict) else {}, shape).model_dump(mode="json")
 
 
 @mcp.tool(name="llm.chat", description=_DESC_CHAT)

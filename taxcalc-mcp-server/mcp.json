@@ -5,6 +5,20 @@
     "server actually publishes - tests/test_tool_descriptions.py asserts exactly that, because a",
     "registration that drifts from the server is worse than none: it is a contract a client",
     "trusts and the server does not honour.",
+    "",
+    "THE STDIO COMMAND IS `uv run --directory`, NOT `uvx taxcalc-mcp-server`, AND THAT IS NOT A",
+    "STYLE CHOICE. This server depends on taxcalc-ai, a sibling project in this repository that",
+    "is published to no package registry. uv resolves it through [tool.uv.sources] while working",
+    "inside the project, but the BUILT WHEEL carries a bare `Requires-Dist: taxcalc-ai`, so",
+    "`uvx taxcalc-mcp-server` and `pipx install ./dist/*.whl` both fail with 'taxcalc-ai was not",
+    "found in the package registry'. `uv run --directory` runs the project in place, where the",
+    "path source applies, and works from any working directory. Publishing taxcalc-ai would make",
+    "uvx viable; until then this is the command that actually starts the server.",
+    "",
+    "`directory` is relative to the repository root, which is where the W7 D5 agent runs. Claude",
+    "Desktop has no working directory of its own and needs an absolute path - see",
+    "configs/claude_desktop_config.json.",
+    "",
     "No credential appears here. The stdio launcher reads its bearer from the environment and",
     "the SSE entry declares only the auth SCHEME, not a token."
   ],
@@ -13,8 +27,13 @@
   "description": "MCP surface for taxcalc-orders, llm-proxy, and the W7 D3 RAG pipeline.",
   "transports": {
     "stdio": {
-      "command": "uvx",
-      "args": ["taxcalc-mcp-server"]
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "taxcalc-mcp-server",
+        "taxcalc-mcp-server"
+      ]
     },
     "sse": {
       "url": "https://mcp.taxcalc.internal/sse",

@@ -2338,11 +2338,28 @@ database and the gate could not run anywhere but production. All of it now resol
   the property the E2E asserts and exactly the one that regresses — a refactor that drops the
   `Authorization` header is caught. **It is not a trust boundary and must not be deployed as
   one**; the service that owns the data verifies the token against the real issuer.
-* **`llm.chat` targets this capstone's real proxy, not the generic one.** The Java
-  `LlmProxyController` serves `POST /v1/completions` taking `{prompt, model, feature}`, not a
-  `/v1/chat/completions` endpoint taking a `messages` array. The MCP-facing schema keeps the
-  `messages` shape an LLM client naturally emits and the adapter translates; the path is a
-  setting.
+* **`llm.chat` speaks both proxy dialects, selected by the configured path.** The Java
+  `LlmProxyController` serves `POST /v1/completions` taking `{prompt, model, feature}`, while the
+  generic shape the brief names is `/v1/chat/completions` taking a `messages` array. Both are
+  implemented: `_wire_shape` reads `llm_proxy_chat_path`, and a path ending `/chat/completions`
+  gets a real `messages` array plus `max_tokens` and parses `choices[0].message.content`, while
+  anything else gets the Java record's three fields and parses `text`/`inputTokens`. The MCP-facing
+  schema is `messages`/`max_tokens` either way — that is the contract, and the wire format below it
+  is a deployment detail. The dialect is derived from the path rather than carried in a second
+  setting, because the failure mode of the two disagreeing is a **200 with an empty completion**:
+  billed, logged as success, and wrong. `tests/test_llm_wire_shapes.py` drives both through real
+  MCP dispatch and asserts the two upstreams parse into an identical DTO. The default stays
+  `/v1/completions` because that is the route that exists in this repo; defaulting to the generic
+  path would ship a server whose one LLM tool 404s out of the box.
+* **The name of the inexact binary type lives in one module, and it is not under `tools/`.**
+  `numeric.py` is where this package's three kinds of number are told apart: money is `Decimal`
+  and never a binary fraction (`is_inexact_binary`), a retrieval score is a `RelevanceScore` and
+  correctly *is* one, and a token count or a cost in minor units is an `int` because it gets
+  summed. The W7 D4 money gate greps `tools/` for that type's name and expects nothing, which now
+  holds literally — a tool validates, forwards and re-shapes, and "is this type acceptable for
+  this quantity" is answered once, centrally, for all four tools. The alternative was deleting the
+  docstrings that explain the rule in order to turn a grep green, and a check whose green state
+  costs you the reasoning is a check that teaches people to delete reasoning.
 * **`mcp` is pinned `>=1.2,<2`.** mcp 2.x renames `FastMCP` to `MCPServer` and changes the
   decorator and lifespan surfaces. Everything downstream — the committed `mcp.json`, the Claude
   Desktop launcher, the W7 D5 agent — is written against the v1 contract, so the pin is what
@@ -2528,7 +2545,45 @@ TAXCALC_MCP_PORT=8080 uv run taxcalc-mcp-server-sse &
 curl -s http://127.0.0.1:8080/sse                                  # -> {"code":4030,...}, HTTP 401
 curl -sN -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/sse   # -> event: endpoint
 
-# The wheel is what `uvx taxcalc-mcp-server` resolves, so a packaging mistake breaks the Claude
-# Desktop integration while every test still passes.
+# Package it. A packaging mistake breaks the Claude Desktop integration while every test passes.
 uv build && unzip -p dist/*.whl '*/entry_points.txt'
+# `pipx install ./dist/*.whl` ALONE FAILS, and not by accident: taxcalc-ai is a path dependency
+# declared in [tool.uv.sources], that table is uv-local and never reaches wheel metadata, so the
+# wheel carries a bare `taxcalc-ai` requirement no index can satisfy. Build the sibling's wheel
+# and point pip at it. This is what puts both console scripts on $PATH:
+(cd ../taxcalc-ai && uv build)
+pipx install ./dist/taxcalc_mcp_server-0.1.0-py3-none-any.whl \
+      --pip-args="--find-links ../taxcalc-ai/dist"
+which taxcalc-mcp-server taxcalc-mcp-server-sse
+# Claude Desktop therefore launches `uv run --directory <repo>/taxcalc-mcp-server --frozen
+# taxcalc-mcp-server` rather than `uvx taxcalc-mcp-server`: running from the project directory
+# is what lets uv read pyproject.toml, honour the path source and pin from uv.lock. See the
+# committed configs/claude_desktop_config.json and mcp.json, which both explain it in place.
+
+# Confirm the four tool spans reach LangSmith. Each @traceable handler opens one `chain` run in
+# the project named by TAXCALC_MCP_LANGSMITH_PROJECT (default `taxcalc-mcp-server` - note the
+# settings prefix; the bare LANGSMITH_PROJECT in .env.example does not change it).
+LANGSMITH_TRACING=true uv run python -m taxcalc_mcp_server.scripts.replay \
+      --fixtures tests/fixtures/ --repeats 2
+uv run python -c "from langsmith import Client; \
+      print({r.name for r in Client().list_runs(project_name='taxcalc-mcp-server', limit=50)})"
+# -> {'orders.get_order', 'orders.create_refund', 'llm.chat', 'rag.retrieve_and_generate'}
 ```
+
+**Local-environment note, no repo change** (same Zscaler class as the W5 D4 and observability
+notes above): behind TLS interception the LangSmith SDK cannot verify `api.smith.langchain.com`
+— the CA is in the macOS keychain, not in `certifi`'s bundle — and the failure mode is the one
+that matters: `list_runs` raises a loud `SSLError`, but the **trace export is a background
+thread and fails silently**, so the replay exits 0, prints its latency table, and lands nothing.
+A green run is not evidence the spans arrived; the project listing is. Build a bundle once and
+point both variables at it:
+
+```bash
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > /tmp/roots.pem
+security find-certificate -a -p /Library/Keychains/System.keychain >> /tmp/roots.pem
+cat "$(python -c 'import certifi;print(certifi.where())')" /tmp/roots.pem > /tmp/ca-bundle.pem
+export SSL_CERT_FILE=/tmp/ca-bundle.pem REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem
+```
+
+CI is unaffected — GitHub runners have no interception — and both tiers set
+`LANGSMITH_TRACING=false`, so no build depends on the vendor being reachable.

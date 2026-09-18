@@ -7,11 +7,13 @@ makes the Java service remain the single place an order's rules are expressed - 
 "can this order be refunded" in Python would drift from the first within a sprint.
 
 **Money is :class:`~decimal.Decimal`, and it travels as a string.** ``0.1 + 0.2`` is not ``0.3``
-in binary floating point, and a refund is a ledger entry. The wire format matters as much as the
-in-memory type: serialising ``amount`` as ``str(args.amount)`` means the JSON body carries
-``"10.00"``, which the Java service's ``BigDecimal`` reads exactly. Sending it as a JSON *number*
-would hand the exactness back to whichever float parser sees it first, and would also lose the
-scale - ``10.00`` and ``10`` are the same number and a different money value.
+in IEEE 754, and a refund is a ledger entry. The wire format matters as much as the in-memory
+type: serialising ``amount`` as ``str(args.amount)`` means the JSON body carries ``"10.00"``,
+which the Java service's ``BigDecimal`` reads exactly. Sending it as a JSON *number* would hand
+the exactness back to whichever binary-fraction parser sees it first, and would also lose the
+scale - ``10.00`` and ``10`` are the same number and a different money value. The type rule
+itself lives in :mod:`taxcalc_mcp_server.numeric`, which is where this package names the inexact
+binary type so that no tool module has to.
 
 **The argument constraints are declared once.** Each tool's input model is the source of truth,
 and the handler's signature reuses that model's ``FieldInfo`` objects through ``Annotated``. The
@@ -39,8 +41,9 @@ from uuid import UUID
 from langsmith import traceable
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from taxcalc_mcp_server.app import ctx, mcp
+from taxcalc_mcp_server.app import TRACE_PROJECT, ctx, mcp
 from taxcalc_mcp_server.errors import _map_http
+from taxcalc_mcp_server.numeric import is_inexact_binary
 from taxcalc_mcp_server.observability import observe
 from taxcalc_mcp_server.tenancy import auth_headers
 
@@ -94,24 +97,27 @@ class CreateRefundArgs(BaseModel):
 
     @field_validator("amount", mode="before")
     @classmethod
-    def _reject_float(cls, value: object) -> object:
-        """Refuse a binary float before pydantic gets a chance to coerce one.
+    def _reject_inexact_binary(cls, value: object) -> object:
+        """Refuse an inexact binary value before pydantic gets a chance to coerce one.
 
-        ``Decimal(0.1)`` is ``0.1000000000000000055511151231257827``: by the time a float reaches
-        the model the exact value the caller meant is already gone, and coercing it produces a
-        Decimal that merely *looks* precise. The published schema asks for a string for this
-        reason; this validator is what makes the request enforceable rather than advisory, and
-        what turns "the model sent a JSON number" into a validation error the model can read and
-        correct rather than a cent that quietly goes missing from a ledger.
+        ``Decimal(0.1)`` is ``0.1000000000000000055511151231257827``: by the time such a value
+        reaches the model the exact amount the caller meant is already gone, and coercing it
+        produces a Decimal that merely *looks* precise. The published schema asks for a string
+        for this reason; this validator is what makes the request enforceable rather than
+        advisory, and what turns "the model sent a JSON number" into a validation error the model
+        can read and correct rather than a cent that quietly goes missing from a ledger.
+
+        The predicate is :func:`taxcalc_mcp_server.numeric.is_inexact_binary` rather than an
+        inline type check, so "money is never this type" is one importable fact.
 
         :param value: The raw ``amount`` as supplied.
-        :returns: ``value`` unchanged when it is not a float.
-        :raises ValueError: if ``value`` is a float.
+        :returns: ``value`` unchanged when it is an acceptable money type.
+        :raises ValueError: if ``value`` is an inexact binary number.
         """
-        if isinstance(value, float):
+        if is_inexact_binary(value):
             raise ValueError(
-                "amount must be a decimal string such as '10.00', not a JSON number: a binary "
-                "float cannot represent a money value exactly"
+                "amount must be a decimal string such as '10.00', not a JSON number: an IEEE 754 "
+                "binary fraction cannot represent a money value exactly"
             )
         return value
 
@@ -158,7 +164,8 @@ class OrderView(BaseModel):
 
     order_id: str
     tenant_id: str
-    #: Decimal, not float - and serialised back out as a string. See the module docstring.
+    #: Decimal, never an inexact binary type - and serialised back out as a string. See the
+    #: module docstring.
     total: Decimal
     status: str
 
@@ -231,14 +238,14 @@ _REFUND_ARGS: Final = CreateRefundArgs.model_fields
 # completely, and the span still wraps every byte of real work.
 
 
-@traceable(name="orders.get_order", project_name="taxcalc-mcp-server")
+@traceable(name="orders.get_order", project_name=TRACE_PROJECT)
 async def _get_order(args: GetOrderArgs) -> dict[str, object]:
     """Read one order through the W3 D1 order service. Traced; called only by the tool handler.
 
     :param args: Validated arguments.
     :returns: An :class:`OrderView` dumped in JSON mode, so ``total`` is a string and not a
-        float. ``model_dump(mode="json")`` rather than ``model_dump()`` is the line that keeps
-        the Decimal discipline true all the way out of the process.
+        JSON number. ``model_dump(mode="json")`` rather than ``model_dump()`` is the line
+        that keeps the Decimal discipline true all the way out of the process.
     :raises McpError: Mapped from the upstream status by
         :func:`taxcalc_mcp_server.errors._map_http` - 4040 when the order does not exist, 4030
         when the JWT may not read it.
@@ -269,7 +276,7 @@ async def orders_get_order(
     return await _get_order(GetOrderArgs(order_id=order_id, tenant_id=tenant_id))
 
 
-@traceable(name="orders.create_refund", project_name="taxcalc-mcp-server")
+@traceable(name="orders.create_refund", project_name=TRACE_PROJECT)
 async def _create_refund(args: CreateRefundArgs) -> dict[str, object]:
     """Issue a refund through the W3 D1 order service. Traced; called only by the tool handler.
 

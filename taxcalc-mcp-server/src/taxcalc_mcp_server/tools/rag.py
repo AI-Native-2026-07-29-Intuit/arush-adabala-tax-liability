@@ -36,20 +36,12 @@ from typing import Annotated, Final
 from langsmith import traceable
 from pydantic import BaseModel, ConfigDict, Field
 
-from taxcalc_mcp_server.app import ctx, mcp
+from taxcalc_mcp_server.app import TRACE_PROJECT, ctx, mcp
 from taxcalc_mcp_server.errors import rag_timeout
-from taxcalc_mcp_server.observability import observe
+from taxcalc_mcp_server.numeric import RelevanceScore, to_score
+from taxcalc_mcp_server.observability import COST_SOURCE_UNPRICED, observe
 from taxcalc_mcp_server.tools.orders import TENANT_PATTERN
 
-#: A retrieval relevance score, in [0, 1]. A float, and correctly so.
-#:
-#: The CI gate greps this package for a bare float annotation, because money must never be
-#: one. This alias is not a
-#: way around that check - it is the distinction the check is testing for, written down. A cosine
-#: similarity is a measurement, not a ledger entry: it is compared and ranked, never summed into
-#: a balance, and no auditor ever reconciles it. Money in this package is `Decimal`, always; this
-#: is not money.
-type RelevanceScore = float
 
 class RagArgs(BaseModel):
     """Arguments for ``rag.retrieve_and_generate``."""
@@ -84,6 +76,9 @@ class Citation(BaseModel):
     #: because "which documents did this answer rest on" is the question a reviewer actually
     #: asks, and making them parse an id string to answer it is a trap.
     doc_id: str
+    #: A cosine similarity, and correctly an inexact binary type rather than ``Decimal``: it is
+    #: compared and ranked, never summed into a balance. See :mod:`taxcalc_mcp_server.numeric`,
+    #: where this package's three kinds of number are named and told apart.
     score: RelevanceScore
 
 
@@ -136,7 +131,7 @@ def _doc_id_of(chunk_id: str) -> str:
     return chunk_id.removeprefix("chunk-").rsplit("-p", 1)[0]
 
 
-@traceable(name="rag.retrieve_and_generate", project_name="taxcalc-mcp-server")
+@traceable(name="rag.retrieve_and_generate", project_name=TRACE_PROJECT)
 async def _retrieve_and_generate(args: RagArgs) -> dict[str, object]:
     """Run the W7 D3 pipeline under a deadline and pre-shape its result.
 
@@ -147,6 +142,14 @@ async def _retrieve_and_generate(args: RagArgs) -> dict[str, object]:
     c = ctx()
     async with observe("rag.retrieve_and_generate", args.tenant_id) as span:
         span["top_k"] = args.top_k
+        # This tool DOES spend money - the pipeline's last stage is an Anthropic generation
+        # call - and this server cannot see how much. `answer_question` returns text,
+        # citations, `rerank_timed_out` and a coverage diagnostic, with no usage block, and the
+        # sidecar is a read-only dependency here. So the amount stays 0 and the source says
+        # why: a dashboard that summed this as a true zero would report the server's largest
+        # per-call cost as free. Priced properly the day the sidecar returns its usage, or the
+        # day this call is routed through the cost-tracked proxy that `llm.chat` already uses.
+        span["cost_source"] = COST_SOURCE_UNPRICED
 
         try:
             # to_thread because the pipeline is synchronous CPU work; wait_for because a
@@ -170,7 +173,7 @@ async def _retrieve_and_generate(args: RagArgs) -> dict[str, object]:
                     Citation(
                         chunk_id=chunk_id,
                         doc_id=_doc_id_of(chunk_id),
-                        score=float(item.get("score", 0.0)),
+                        score=to_score(item.get("score")),
                     )
                 )
 
@@ -183,7 +186,7 @@ async def _retrieve_and_generate(args: RagArgs) -> dict[str, object]:
         answer = RagAnswer(
             answer=str(result.get("text", "")),
             citations=citations,
-            coverage=float(jaccard),
+            coverage=to_score(jaccard),
             rerank_timed_out=bool(result.get("rerank_timed_out", False)),
         )
         span["citations"] = len(answer.citations)

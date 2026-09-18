@@ -82,6 +82,17 @@ structlog.configure(
 #: The structured logger every tool emits its ``tool.invoke.start`` / ``tool.invoke.end`` pair on.
 log: Final[structlog.stdlib.BoundLogger] = structlog.get_logger("taxcalc-mcp-server")
 
+#: The LangSmith project every ``@traceable`` tool span lands in.
+#:
+#: Read from the environment HERE, at module import, because ``@traceable(project_name=...)`` is
+#: evaluated when the decorator is applied - which happens while the tool modules are being
+#: imported, long before the lifespan constructs its own :class:`Settings`. A decorator cannot
+#: read a value that does not exist yet, which is why the four tools previously hard-coded the
+#: string and why :attr:`Settings.langsmith_project` had no effect on where a span actually went.
+#: One module-level read fixes that without making every tool module construct settings of its
+#: own: :class:`Settings` has a default for every field, so this cannot raise at import.
+TRACE_PROJECT: Final[str] = Settings().langsmith_project
+
 #: Connect-phase timeout, in seconds. Much tighter than the overall deadline: failing to
 #: establish a TCP connection within two seconds means the service is down or unroutable, and
 #: spending the rest of the budget waiting does not change that answer.
@@ -236,7 +247,37 @@ class StructuredErrorFastMCP(FastMCP):
     because the consumers are programmatic - the W7 D5 LangGraph router and any other MCP client
     - and their retry logic is written against numeric codes, which the ``isError`` path cannot
     carry. The message text is preserved either way, so nothing is lost but the ambiguity.
+
+    **It also accepts the ``version`` that FastMCP does not.** See :meth:`__init__`.
     """
+
+    def __init__(self, *, name: str, version: str, **kwargs: object) -> None:
+        """Construct a FastMCP server that reports *its own* version in the handshake.
+
+        ``version`` is not a ``FastMCP`` constructor argument in mcp 1.30. The low-level
+        ``mcp.server.lowlevel.Server`` underneath does take one - it is the value that lands in
+        the ``initialize`` reply's ``serverInfo`` - but ``FastMCP.__init__`` constructs that
+        server itself and forwards ``name``, ``instructions``, ``website_url``, ``icons`` and
+        ``lifespan`` only. Left unset, the handshake defaults to the version of the *mcp
+        package*, so a client asking "which build of taxcalc-mcp-server am I talking to" is told
+        ``1.30.0``. That is not cosmetic: the committed ``mcp.json`` pins ``0.1.0``, and a client
+        comparing the registration against the handshake would find them disagreeing on every
+        deploy.
+
+        Accepting it here, rather than assigning to ``mcp._mcp_server.version`` at the call site,
+        keeps the private reach-through inside the class that owns the server object - and lets
+        the construction read as ``StructuredErrorFastMCP(name=..., version=..., lifespan=...)``,
+        which is the signature the rest of this project (and ``mcp.json``) is written against.
+        When a future SDK forwards ``version`` natively, this method is the one line that changes.
+
+        :param name: The server name published in ``serverInfo``.
+        :param version: This server's own version, published in ``serverInfo``.
+        :param kwargs: Forwarded to :class:`FastMCP` unchanged.
+        """
+        super().__init__(name=name, **kwargs)  # type: ignore[arg-type]
+        # No public setter in mcp 1.x. Reaching for it from inside the subclass rather than from
+        # module scope is what keeps this out of SLF001's way and out of the call site's.
+        self._mcp_server.version = version
 
     async def call_tool(
         self, name: str, arguments: dict[str, object]
@@ -332,16 +373,8 @@ _PENDING_ERROR: ContextVar[McpError | None] = ContextVar(
 #: against. Module-level, so importing a tool module is what registers its tools - which is why
 #: both transports import the tool package before calling ``run``.
 mcp: Final[StructuredErrorFastMCP] = StructuredErrorFastMCP(
-    name="taxcalc-mcp-server", lifespan=lifespan
+    name="taxcalc-mcp-server", version=__version__, lifespan=lifespan
 )
-
-# `version` is not a FastMCP constructor argument in mcp 1.30 - it lives on the low-level server
-# underneath, and FastMCP does not forward it. Left unset, the `initialize` handshake reports the
-# version of the *mcp package* as this server's version, so a client asking "which build of
-# taxcalc-mcp-server am I talking to" is told "1.30.0". That is not a cosmetic difference: the
-# committed mcp.json pins "version": "0.1.0", and a client that compares the two would find them
-# disagreeing on every deploy. Setting it here keeps one version number for the server.
-mcp._mcp_server.version = __version__  # noqa: SLF001 - no public setter in mcp 1.x
 
 
 def ctx() -> AppCtx:

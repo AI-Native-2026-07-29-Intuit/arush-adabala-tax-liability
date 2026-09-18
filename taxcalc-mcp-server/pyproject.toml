@@ -115,6 +115,13 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20", "SLF", "S"]
 # with a status code. A gate whose output only reached a log handler would be invisible in the
 # Actions UI.
 "src/taxcalc_mcp_server/scripts/*.py" = ["T20"]
+# The Inspector harness (not shipped in the wheel) exists to PRINT a transcript - that transcript
+# is the artefact, recorded in PROMPT_JOURNAL.md, so T20 is the rule this script is built to
+# break. SLF001: it borrows `tests.stub_orders._Handler`, the same stub the test suite serves the
+# seeded order from; a second copy of that handler would be a second contract to keep in step.
+# S603/S607 are NOT waived here - the one `subprocess.run` carries its own noqa with its reason,
+# which is the convention this project holds everywhere else.
+"scripts/*.py" = ["T20", "SLF001"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"

@@ -29,6 +29,7 @@ from uuid import uuid4
 
 import pytest
 
+from taxcalc_mcp_server import __version__
 from tests.stub_orders import SEEDED_ORDER, StubState, start_stub, stop_stub
 
 #: How many request/response pairs the smoke drives. See the module docstring.
@@ -48,6 +49,11 @@ class StdioClient:
         """
         self._proc = proc
         self._next_id = 0
+        #: The ``initialize`` reply's ``serverInfo``, captured by :meth:`handshake`. Kept because
+        #: the handshake happens once, in the fixture, and the frame is gone by the time a test
+        #: runs - so a test that wants to assert on what the server called itself has no way to
+        #: ask again.
+        self.server_info: dict[str, Any] = {}
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send one request and read exactly one reply.
@@ -84,6 +90,19 @@ class StdioClient:
         self._proc.stdin.write(frame + "\n")
         self._proc.stdin.flush()
 
+    def handshake(self) -> None:
+        """Run the ``initialize`` exchange, retaining ``serverInfo`` for later assertion."""
+        reply = self.request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "smoke", "version": "1"},
+            },
+        )
+        self.server_info = reply["result"]["serverInfo"]
+        self.notify("notifications/initialized", {})
+
 
 @pytest.fixture
 def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[StdioClient]:
@@ -113,15 +132,7 @@ def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[StdioClient]:
         bufsize=1,
     )
     client = StdioClient(proc)
-    client.request(
-        "initialize",
-        {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "smoke", "version": "1"},
-        },
-    )
-    client.notify("notifications/initialized", {})
+    client.handshake()
     try:
         yield client
     finally:
@@ -138,9 +149,17 @@ def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[StdioClient]:
 
 
 def test_handshake_reports_this_servers_own_version(server: StdioClient) -> None:
-    """``initialize`` names the server and its version, not the SDK's."""
-    reply = server.request("tools/list", {})
-    assert "tools" in reply["result"]
+    """``initialize`` names the server and *its own* version, not the mcp package's.
+
+    The version is not a ``FastMCP`` constructor argument in mcp 1.30, so it is supplied through
+    :class:`~taxcalc_mcp_server.app.StructuredErrorFastMCP`'s own ``__init__`` onto the low-level
+    server. Asserted over a real handshake rather than by reading the attribute back, because the
+    attribute being set is not the claim - the claim is that the value reaches ``serverInfo`` in
+    the reply a client parses. Left unset it would read ``1.30.0`` here and disagree with the
+    ``0.1.0`` pinned in the committed ``mcp.json``.
+    """
+    assert server.server_info["name"] == "taxcalc-mcp-server"
+    assert server.server_info["version"] == __version__
 
 
 def test_all_four_tools_are_listed_over_the_wire(server: StdioClient) -> None:

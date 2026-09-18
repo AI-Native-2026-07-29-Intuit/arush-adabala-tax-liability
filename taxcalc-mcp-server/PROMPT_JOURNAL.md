@@ -157,3 +157,104 @@ code, and none of them would have failed a type check, a linter, or a reading:
 3. **The first SSE client paid for a tool it had not called.** The lifespan imported the RAG
    pipeline, so the first connection blocked on an 80 MB model load plus five model-hub retries
    before the local cache was used.
+
+## The MCP Inspector run
+
+The deliverable is exercised with `npx @modelcontextprotocol/inspector`. The Inspector's default
+mode is a browser UI, so the evidence it leaves behind is a screenshot or a claim — neither of
+which survives a rebase or tells a reviewer what actually came back. This is the same tool in
+`--cli` mode (Inspector 2.7.0), which uses the same client library over the same stdio transport
+and writes its results to stdout, so the run is a transcript that anyone can regenerate:
+
+```
+uv run python scripts/inspector_session.py
+```
+
+That script starts `tests.stub_orders` on a fixed port, writes a throwaway session config in the
+`mcpServers` shape Claude Desktop uses, and runs four Inspector sessions against
+`uv run python -m taxcalc_mcp_server.transports.stdio`. The stub rather than the real Spring
+service on purpose: what the Inspector run is evidence *for* is that the MCP surface works —
+tools registered, resource readable, a call round-tripping. That the order service itself is
+correct is `tests/test_e2e_mcp_to_spring.py`'s job, and it proves it against the real container.
+
+Recorded run, elisions marked `[…]` — the interleaved JSON lines are the server's own structured
+logs arriving on **stderr**, which is what the stdout/stderr split in `app.py` exists to produce:
+
+```
+$ npx @modelcontextprotocol/inspector --cli --method tools/list
+{
+  "tools": [
+    { "name": "orders.get_order",           "description": "Fetch a single order by id […]" },
+    { "name": "orders.create_refund",       […] },
+    { "name": "llm.chat",                   […] },
+    { "name": "rag.retrieve_and_generate",  […] }
+  ]
+}
+{"transport": "stdio", "tools": 4, "event": "transport.start", "level": "info", …}
+{"orders_svc": "http://127.0.0.1:8791", "project": "taxcalc-mcp-server", "event": "lifespan.start", …}
+
+$ npx @modelcontextprotocol/inspector --cli --method resources/list
+{
+  "resources": [
+    {
+      "name": "catalogue",
+      "uri": "taxcalc://catalogue",
+      "mimeType": "application/json"
+    }
+  ]
+}
+
+$ npx @modelcontextprotocol/inspector --cli --method tools/call \
+    --tool-name orders.get_order --tool-arg order_id=ord-synth-9001 tenant_id=tenant-a
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"order_id\": \"ord-synth-9001\",\n  \"tenant_id\": \"tenant-a\",\n  \"total\": \"42.50\",\n  \"status\": \"paid\"\n}"
+    }
+  ],
+  "structuredContent": {
+    "order_id": "ord-synth-9001",
+    "tenant_id": "tenant-a",
+    "total": "42.50",
+    "status": "paid"
+  },
+  "isError": false
+}
+{"tool": "orders.get_order", "tenant_id": "tenant-a", "event": "tool.invoke.start", …}
+HTTP Request: GET http://127.0.0.1:8791/orders/ord-synth-9001 "HTTP/1.0 200 OK"
+{"tool": "orders.get_order", "tenant_id": "tenant-a", "duration_ms": 2, "http_status": 200, "event": "tool.invoke.end", …}
+
+$ npx @modelcontextprotocol/inspector --cli --method resources/read --uri taxcalc://catalogue
+{
+  "contents": [
+    {
+      "uri": "taxcalc://catalogue",
+      "mimeType": "application/json",
+      "text": "{ \"server\": \"taxcalc-mcp-server\", \"version\": \"0.1.0\", \"tools\": […],
+                \"corpus\": { \"tenants\": [\"tenant-a\", \"tenant-b\", \"tenant-c\"],
+                              \"size\": { \"chunks\": 100, \"documents\": 100,
+                                          \"chunks_per_tenant\": {\"tenant-a\": 36,
+                                                                  \"tenant-b\": 33,
+                                                                  \"tenant-c\": 31} },
+                              […] }}"
+    }
+  ]
+}
+```
+
+Four things this confirms that the unit suite does not, because each of them lives between the
+handler and a *real* client rather than inside the process: `tools/list` returns
+`orders.get_order` with its schema; `resources/list` returns `taxcalc://catalogue`;
+`tools/call` against the synthetic order `ord-synth-9001` returns the seeded payload with the
+money still a string; and `total` survives a third-party JSON parser as `"42.50"` rather than
+`42.5`.
+
+One detail the transcript records rather than asserts: `"version": "0.1.0"` in the catalogue and
+in the `initialize` handshake. `version` is not a `FastMCP` constructor argument in mcp 1.30 —
+it lives on the low-level server, which `FastMCP.__init__` does not forward — so left alone this
+server would introduce itself to every client as `1.30.0`, the version of the *SDK*, disagreeing
+with the `0.1.0` pinned in the committed `mcp.json` on every deploy.
+`StructuredErrorFastMCP.__init__` takes the `version` FastMCP will not and sets it, which keeps
+the reach-through in the class that owns the object and leaves the construction reading as
+`StructuredErrorFastMCP(name=…, version=…, lifespan=…)`.
