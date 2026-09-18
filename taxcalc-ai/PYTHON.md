@@ -677,7 +677,7 @@ task never runs at all.
 
 ### faithfulness is the gate; the other three metrics are diagnostics
 
-`tests/test_ragas_gate.py` raises `SystemExit` below `faithfulness = 0.85` and merely asserts
+`tests/test_ragas_gate.py` raises `SystemExit` below `FAITHFULNESS_GATE` and merely asserts
 the other three floors. Faithfulness measures whether the answer's claims are supported by the
 retrieved context, so a regression means the system is stating things the corpus does not say,
 to a user, in a tax product. The other three explain *why*: `context_precision` and

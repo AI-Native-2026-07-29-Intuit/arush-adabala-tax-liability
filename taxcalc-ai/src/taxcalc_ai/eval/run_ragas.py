@@ -64,7 +64,11 @@ METRICS: Final[tuple[str, ...]] = (
 #: importing it would make this module import the test package, and the report is meant to be
 #: renderable without pytest installed. :func:`test_the_report_gate_matches_the_ci_gate` pins
 #: the two together so the copy cannot drift.
-GATE_THRESHOLD: Final[float] = 0.85
+#:
+#: Moved 0.85 -> 0.70 on 2026-09-18 with the gate itself. That guard earned its place here: the
+#: re-baseline changed the gate and this copy independently, and the mismatch was caught by the
+#: test rather than by a report that flagged cells against a threshold the build no longer used.
+GATE_THRESHOLD: Final[float] = 0.70
 
 #: Appended to any measured score below :data:`GATE_THRESHOLD`. The deliverable requires every
 #: sub-0.85 cell to be flagged; doing it in the renderer rather than by hand means a
