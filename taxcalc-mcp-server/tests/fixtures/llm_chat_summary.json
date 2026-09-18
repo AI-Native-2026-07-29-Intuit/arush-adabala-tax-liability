@@ -1,0 +1,17 @@
+{
+  "tool": "llm.chat",
+  "arguments": {
+    "messages": [{"role": "user", "content": "Summarise the standard deduction rule."}],
+    "max_tokens": 256,
+    "tenant_id": "tenant-a"
+  },
+  "upstream": {
+    "status": 200,
+    "body": {
+      "text": "The standard deduction reduces taxable income by a fixed amount.",
+      "modelId": "claude-haiku-4-5",
+      "inputTokens": 18,
+      "outputTokens": 12
+    }
+  }
+}

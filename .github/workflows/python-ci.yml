@@ -183,7 +183,10 @@ jobs:
           LANGSMITH_PROJECT: taxcalc-ai-dev-ci
           LANGSMITH_TRACING: "false"
 
-      - name: RAGAS faithfulness >= 0.85 gate
+      # Named for the metric, not the number. The threshold lives in FAITHFULNESS_GATE and moved
+      # 0.85 -> 0.70 on 2026-09-18 when the gate was first actually measured; a step name carrying
+      # a copy of it is a fourth place to drift, and unlike the other three no test can pin it.
+      - name: RAGAS faithfulness gate
         # The W7 D3 gate. faithfulness is fatal (SystemExit); the other three metrics are
         # asserted floors that diagnose the cause rather than being the user-facing failure.
         #

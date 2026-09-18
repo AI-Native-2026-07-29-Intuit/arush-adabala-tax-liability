@@ -1,0 +1,19 @@
+{
+  "tool": "rag.retrieve_and_generate",
+  "arguments": {
+    "question": "What is the standard deduction for a sole trader?",
+    "tenant_id": "tenant-a",
+    "top_k": 3
+  },
+  "upstream": {"status": 200, "body": {}},
+  "rag_result": {
+    "text": "A sole trader claims the standard deduction against trading profit.",
+    "citations": [
+      {"chunk_id": "chunk-form-1040-p3", "chunk_text": "irrelevant to the DTO", "score": 0.91, "tenant_id": "tenant-a"},
+      {"chunk_id": "chunk-pub-501-p7", "chunk_text": "also dropped", "score": 0.77, "tenant_id": "tenant-a"},
+      {"chunk_id": "chunk-form-1040-p4", "chunk_text": "dropped too", "score": 0.64, "tenant_id": "tenant-a"}
+    ],
+    "coverage": {"dense_only": 2.0, "sparse_only": 1.0, "both": 3.0, "jaccard": 0.5},
+    "rerank_timed_out": false
+  }
+}

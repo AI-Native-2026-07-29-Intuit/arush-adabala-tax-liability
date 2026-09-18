@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+dist/
+# The fixture-replay report is a per-run artefact; the CI gate compares it against the previous
+# run's, which comes from the workflow's cache, not from the tree.
+.replay/
+# The baseline the merge-tier p95 gate compares against. Lives in the Actions cache between
+# runs and is only ever materialised inside a job.
+.replay-baseline/

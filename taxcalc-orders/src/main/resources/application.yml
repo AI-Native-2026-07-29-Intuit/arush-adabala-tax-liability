@@ -1,0 +1,39 @@
+# taxcalc-orders/src/main/resources/application.yml
+spring:
+  application:
+    name: taxcalc-orders
+  datasource:
+    # Overridden in every real context by SPRING_DATASOURCE_URL. The localhost default exists so
+    # `bootRun` works on a laptop with a local Postgres and is never what a container uses.
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    hikari:
+      # Small: this service has two endpoints and the E2E runs a handful of requests. A large
+      # pool against a Testcontainers Postgres just holds connections the database has to track.
+      maximum-pool-size: 5
+  flyway:
+    enabled: true
+    # Some Docker setups report a container ready before its port-forward actually accepts
+    # connections; retrying beats failing context startup on a transient refusal. Carried over
+    # from the root project, which learned it the hard way.
+    connect-retries: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Health only. This service is a test fixture on a network it does not control; exposing
+        # env or configprops would publish the datasource URL to anything that can reach the port.
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+server:
+  port: 8080
+
+logging:
+  level:
+    root: INFO
+    com.uptimecrew.tax_liability.orders: INFO

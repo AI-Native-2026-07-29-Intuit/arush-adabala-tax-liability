@@ -1,0 +1,45 @@
+{
+  "$comment": [
+    "Drop into ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) or",
+    "%APPDATA%/Claude/claude_desktop_config.json (Windows).",
+    "",
+    "REPLACE_WITH_ABSOLUTE_REPO_PATH must become the absolute path to this repository. Claude",
+    "Desktop launches the server with no working directory of its own, so a relative path has",
+    "nothing to resolve against.",
+    "",
+    "THE COMMAND IS `uv run --directory`, NOT `uvx taxcalc-mcp-server`. This server depends on",
+    "taxcalc-ai, a sibling project published to no registry: the built wheel carries a bare",
+    "`Requires-Dist: taxcalc-ai`, so uvx and pipx both fail to resolve it. `uv run --directory`",
+    "runs the project in place, where [tool.uv.sources] applies. Verified from an unrelated",
+    "working directory, and guarded by the 'documented launch command' step in CI.",
+    "",
+    "THE ENV VALUES BELOW ARE PLACEHOLDERS AND MUST STAY THAT WAY IN GIT. Claude Desktop reads",
+    "this file literally - it does not expand $VARS and it does not read a keychain - so the",
+    "only way a real token reaches the process is for something to write it into this file on",
+    "disk. A launcher script should rewrite it from the OS keychain (macOS Keychain, Windows",
+    "DPAPI) at each Claude Desktop start. Never commit a real token here.",
+    "",
+    "TAXCALC_MCP_BEARER_JWT is the credential forwarded to taxcalc-orders and llm-proxy.",
+    "TAXCALC_MCP_ORDERS_SVC_URL and TAXCALC_MCP_LLM_PROXY_URL select which services to reach.",
+    "LANGSMITH_API_KEY is required: taxcalc_ai.rag raises at import without it, so the RAG tool",
+    "is the one that fails without it - the other three work regardless."
+  ],
+  "mcpServers": {
+    "taxcalc-mcp-server": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "REPLACE_WITH_ABSOLUTE_REPO_PATH/taxcalc-mcp-server",
+        "taxcalc-mcp-server"
+      ],
+      "env": {
+        "TAXCALC_MCP_BEARER_JWT": "REPLACE_WITH_BEARER_FROM_KEYCHAIN",
+        "TAXCALC_MCP_ORDERS_SVC_URL": "https://taxcalc-orders.internal",
+        "TAXCALC_MCP_LLM_PROXY_URL": "https://llm-proxy.internal",
+        "LANGSMITH_API_KEY": "REPLACE_WITH_LANGSMITH_API_KEY_FROM_KEYCHAIN",
+        "LANGSMITH_PROJECT": "taxcalc-mcp-server"
+      }
+    }
+  }
+}

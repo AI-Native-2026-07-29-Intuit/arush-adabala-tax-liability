@@ -164,23 +164,32 @@ def test_a_nan_score_renders_as_not_measured_rather_than_as_nan() -> None:
 
 
 def test_measured_cells_below_the_gate_are_flagged_and_rolled_up() -> None:
-    """Every measured cell below 0.85 is flagged inline and listed, faithfulness distinctly.
+    """Every measured cell below the gate is flagged inline and listed, faithfulness distinctly.
 
-    The deliverable requires each sub-0.85 cell to be flagged. Doing that in the renderer is
+    The deliverable requires each sub-gate cell to be flagged. Doing that in the renderer is
     what makes it survive a regeneration - a hand-annotated table loses its annotations the
     first time anyone re-runs the harness.
+
+    **The fixture values are derived from :data:`GATE_THRESHOLD`, not written as literals.** They
+    used to be 0.72 and 0.91, chosen when the gate was 0.85 - and the 2026-09-18 re-baseline to
+    0.70 made 0.72 a *passing* score, so this test failed while the behaviour it checks was
+    perfectly intact. The threshold is explicitly allowed to move; a test of the flagging
+    mechanism must not encode a particular value of it.
     """
+    below = round(GATE_THRESHOLD - 0.10, 2)
+    above = round(GATE_THRESHOLD + 0.10, 2)
     scores = {
-        CONFIGURATIONS[0].name: dict.fromkeys(METRICS, 0.72),
-        CONFIGURATIONS[-1].name: dict.fromkeys(METRICS, 0.91),
+        CONFIGURATIONS[0].name: dict.fromkeys(METRICS, below),
+        CONFIGURATIONS[-1].name: dict.fromkeys(METRICS, above),
     }
     report = render_report(scores)
 
-    assert f"0.72{SUB_GATE_FLAG}" in report
-    # At or above the gate is not flagged; 0.85 itself passes, so the boundary is not off by one.
-    assert f"0.91{SUB_GATE_FLAG}" not in report
-    assert f"0.85{SUB_GATE_FLAG}" not in render_report(
-        {CONFIGURATIONS[0].name: dict.fromkeys(METRICS, 0.85)}
+    assert f"{below:.2f}{SUB_GATE_FLAG}" in report
+    # At or above the gate is not flagged; the gate value itself passes, so the boundary is not
+    # off by one.
+    assert f"{above:.2f}{SUB_GATE_FLAG}" not in report
+    assert f"{GATE_THRESHOLD:.2f}{SUB_GATE_FLAG}" not in render_report(
+        {CONFIGURATIONS[0].name: dict.fromkeys(METRICS, GATE_THRESHOLD)}
     )
 
     # faithfulness is called out as the one that fails a build; the other three are diagnostics.
@@ -190,11 +199,14 @@ def test_measured_cells_below_the_gate_are_flagged_and_rolled_up() -> None:
 
 
 def test_the_report_gate_matches_the_ci_gate() -> None:
-    """The renderer's 0.85 and ``test_ragas_gate.py``'s 0.85 are the same number.
+    """The renderer's threshold and ``test_ragas_gate.py``'s gate are the same number.
 
     The threshold is duplicated as a literal so the report can be rendered without pytest
     installed. This is the assertion that stops the copy drifting - a report flagging cells
     against 0.80 while the build fails at 0.85 would be worse than no flagging at all.
+
+    It earned its keep on 2026-09-18: the gate was re-baselined 0.85 -> 0.70 and this copy was
+    not, and this test is what caught the pair diverging.
     """
     from .test_ragas_gate import FAITHFULNESS_GATE
 

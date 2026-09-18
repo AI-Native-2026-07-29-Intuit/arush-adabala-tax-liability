@@ -2273,6 +2273,105 @@ tenant-isolation, 4 semantic-cache and 2 Great Expectations tests in their own s
 empty.
 
 
+## Week 7 Day 4 — Publishing the Capstone as an MCP Server: FastMCP, stdio + HTTP/SSE, four tools
+
+W3 D1 built REST services. W7 D3 built a retrieval pipeline. Today all of it lands behind **one
+MCP surface** that Claude Desktop and the W7 D5 multi-agent orchestrator both speak to: a new
+sibling project [`taxcalc-mcp-server/`](taxcalc-mcp-server/) that imports the sidecar as a path
+dependency and publishes four tools plus one read-only resource over two transports. Authoring
+transcripts in [`taxcalc-mcp-server/PROMPT_JOURNAL.md`](taxcalc-mcp-server/PROMPT_JOURNAL.md);
+the consumer's-eye view of what this means for the sidecar is in
+[`taxcalc-ai/PYTHON.md`](taxcalc-ai/PYTHON.md#what-w7-d4-adds).
+
+**Seven knobs, one contract.** Transports, schemas, error codes, the idempotency key, tracing,
+packaging and the CI tiers are a single composite surface that downstream LLM clients code
+against. Any one of them missing turns a green build into a double-debited refund, a
+stdout-corrupted stdio session, a tool description Claude silently skips, or a context-bloating
+DTO — seven checkboxes ticked independently is exactly the failure mode.
+
+| Artefact | What it is | Why it is shaped that way |
+|---|---|---|
+| [`app.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/app.py) | FastMCP + `@asynccontextmanager` lifespan, one shared `httpx.AsyncClient`, logging pinned to stderr twice | On stdio **stdout is the protocol**; one stray byte corrupts the frame a client is mid-parse of. Both the stdlib and structlog paths are redirected, and `ruff`'s `T20` bans `print` package-wide, because pinning one of the two leaves the other free to kill the session. |
+| `StructuredErrorFastMCP` + `install_structured_error_handler` | Lets a tool's numeric error code reach the client | **The defect this closes was silent.** `Tool.run` wraps every handler exception into an English `ToolError`, and the low-level handler turns whatever escapes into an `isError` result — so a 404 arrived as `'Error executing tool orders.get_order: {"error": "order not found"}'` with **no `4040` anywhere**. The whole centralised error table, discarded one layer below the code that built it. Both layers had to be opened; fixing only the first removes the prefix and changes nothing else. |
+| `enforce_strict_tool_schemas` | `additionalProperties: false` **and** `extra="forbid"` on the generated argument model | FastMCP builds the top-level argument model with `extra` at `"ignore"`, so a hallucinated or typo'd argument was silently dropped — and the published schema advertised nothing, so a well-behaved client could not detect it either. Advertising a rule without enforcing it would be the worse half: it invites clients to trust a check that is not happening. |
+| [`tools/orders.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/tools/orders.py) | `Decimal` money, a float-rejecting validator, a 2-dp scale rule, UUID v4 idempotency key | `Decimal(0.1)` is `0.1000000000000000055511151231257827` — by the time a float reaches the model the exact value is gone, so floats are refused outright rather than coerced. `10.001` is **rejected, not rounded**: rounding would refund a different amount than the caller asked for and tell nobody. On the wire it is `str(args.amount)`, so `BigDecimal` reads the scale too. |
+| The idempotency key | Travels as a JSON field **and** an `Idempotency-Key` header | The body field is what the order service persists; the header is what any proxy, retry middleware or service mesh in between reads. Body-only leaves an infrastructure retry — the kind this code never sees — free to replay the request as a second refund. The key has **no default**: a generated one would make every retry a new key, arriving at the exact double-debit it exists to prevent by being helpful. |
+| [`tools/rag.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/tools/rag.py) | A pre-shaped 5-field DTO over the W7 D3 pipeline, `to_thread` + `wait_for`, 5040 on a miss | The pipeline returns every citation's full `chunk_text`; passing it through restates the text the answer was just generated from, doubling the token cost of every grounded answer forever. The cross-encoder has no await point, so calling it from a coroutine stalls every other in-flight request on the process. |
+| [`transports/sse.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/transports/sse.py) | Raw-ASGI bearer middleware, JWKS validation **opt-in** | The bearer is captured at the `GET /sse` handshake, not at `POST /messages/`, because the **entire session runs inside the handshake's coroutine** and an asyncio task inherits the context it was created in — a `ContextVar` set during a POST is invisible to the tool call. `BaseHTTPMiddleware` runs downstream in a separate task and breaks exactly that, hence raw ASGI. Local JWKS validation defaults **off**: the Java services validate authoritatively, and a second validator on the wrong issuer is not defence in depth, it is an outage that looks like a broken service. |
+| [`scripts/replay.py`](taxcalc-mcp-server/src/taxcalc_mcp_server/scripts/replay.py) | Fixture replay, per-tool p50/p95/p99, ±15% p95 gate | Times **this server's own work** against canned upstreams, deliberately excluding the network: a change here cannot make the network faster, and a gate that fires on other teams' deploys stops being read. Compares p95 as a **ratio against the previous run**, because an absolute millisecond budget is a statement about the CI runner's instance type, not about the diff. |
+| [`tests/test_tool_descriptions.py`](taxcalc-mcp-server/tests/test_tool_descriptions.py) | ≥200 chars, `Use this`, `Do NOT`, a closing example, plus `mcp.json` drift | A tool that raises gets an error someone can act on. A tool whose description does not say *when* to use it simply never gets called — the model picks something else, answers worse, and **nothing logs a problem**. There is no stack trace for "the model did not consider this tool". |
+| [`taxcalc-orders/`](taxcalc-orders/) | A standalone Spring Boot order service: two endpoints, Postgres, Flyway, no JPA | Built because the course's `uptimecrew/taxcalc-orders:w3d1` image is not pullable here, and an E2E that skips is an E2E that proves nothing. Standalone rather than a slice of the monolith, which needs MongoDB, Redis, Kafka and an OAuth2 issuer to reach a healthy state — a nine-container test mostly exercising infrastructure. **Idempotency is a unique index on `(tenant_id, idempotency_key)`, not application code**: two retries arrive concurrently as a matter of course, so "check the key, then insert" lets both check, both find nothing, and both insert, debiting the ledger twice while every line of code looks correct in review. |
+| [`taxcalc_mcp_server-ci.yml`](.github/workflows/taxcalc_mcp_server-ci.yml) | PR tier (unit + schema + description + 100-call smoke + replay + wheel), merge tier (Testcontainers E2E) | The PR tier catches everything inside this codebase; it **cannot** catch drift between this server and the Java one, because it supplies its own stub upstream. That is what the merge tier is for. The merge tier also **fails on a skip** — the E2E skips itself when Docker or a JDK is unavailable, which is right on a laptop and wrong on `main`, where a skip would let integration drift through under a green tick. |
+
+### Three defects found by running it, none by reading it
+
+All three passed `ruff`, `mypy --strict` and a careful read. Each was caught by driving the real
+server over a real transport:
+
+1. **Tool error codes never reached the client** (above). The entire `_map_http` contract — the
+   thing the W7 D5 agent's backoff branches on — was being discarded by the SDK.
+2. **A phantom `config` parameter in every published schema.** Stacking `@mcp.tool` over
+   `@traceable` makes FastMCP derive the schema from langsmith's *wrapper* signature, so each
+   tool advertised an argument that does not exist and that a model could try to fill. Each tool
+   is now two functions: the outer owns the protocol boundary, the inner is traced.
+3. **The first SSE client paid for a tool it never called.** The lifespan imported the RAG
+   pipeline, so the first connection blocked on an 80 MB model load and five model-hub retries
+   before the handshake completed. The import moved to first use, on the worker thread the
+   pipeline already runs on.
+
+A fourth was found by the latency gate rather than by a test: the RAG tool reached for Postgres,
+Redis and an Anthropic key itself, so a **fully stubbed** pipeline still demanded a live
+database and the gate could not run anywhere but production. All of it now resolves behind
+`rag_entrypoint`'s `(question, tenant_id, top_k)` signature — the injection seam.
+
+### Honest gaps
+
+* **The order service is ours, not the course's image.** `uptimecrew/taxcalc-orders:w3d1`
+  returns `pull access denied` here, so [`taxcalc-orders/`](taxcalc-orders/) is a real
+  implementation of that contract rather than the course's binary. The E2E therefore proves this
+  capstone's two services agree with each other; it cannot prove agreement with an image nobody
+  here can run. Everything it asserts — cross-language field names, `BigDecimal` scale, the
+  `Idempotency-Key` header, a single ledger row — is real, and the service is deployable.
+* **The order service authenticates by presence, not by signature.** `TenantAuthFilter` requires
+  a bearer token and an `X-Tenant` header; it does not verify the signature, issuer, audience or
+  scopes, because doing so needs an identity provider in the test topology. Presence is exactly
+  the property the E2E asserts and exactly the one that regresses — a refactor that drops the
+  `Authorization` header is caught. **It is not a trust boundary and must not be deployed as
+  one**; the service that owns the data verifies the token against the real issuer.
+* **`llm.chat` speaks both proxy dialects, selected by the configured path.** The Java
+  `LlmProxyController` serves `POST /v1/completions` taking `{prompt, model, feature}`, while the
+  generic shape the brief names is `/v1/chat/completions` taking a `messages` array. Both are
+  implemented: `_wire_shape` reads `llm_proxy_chat_path`, and a path ending `/chat/completions`
+  gets a real `messages` array plus `max_tokens` and parses `choices[0].message.content`, while
+  anything else gets the Java record's three fields and parses `text`/`inputTokens`. The MCP-facing
+  schema is `messages`/`max_tokens` either way — that is the contract, and the wire format below it
+  is a deployment detail. The dialect is derived from the path rather than carried in a second
+  setting, because the failure mode of the two disagreeing is a **200 with an empty completion**:
+  billed, logged as success, and wrong. `tests/test_llm_wire_shapes.py` drives both through real
+  MCP dispatch and asserts the two upstreams parse into an identical DTO. The default stays
+  `/v1/completions` because that is the route that exists in this repo; defaulting to the generic
+  path would ship a server whose one LLM tool 404s out of the box.
+* **The name of the inexact binary type lives in one module, and it is not under `tools/`.**
+  `numeric.py` is where this package's three kinds of number are told apart: money is `Decimal`
+  and never a binary fraction (`is_inexact_binary`), a retrieval score is a `RelevanceScore` and
+  correctly *is* one, and a token count or a cost in minor units is an `int` because it gets
+  summed. The W7 D4 money gate greps `tools/` for that type's name and expects nothing, which now
+  holds literally — a tool validates, forwards and re-shapes, and "is this type acceptable for
+  this quantity" is answered once, centrally, for all four tools. The alternative was deleting the
+  docstrings that explain the rule in order to turn a grep green, and a check whose green state
+  costs you the reasoning is a check that teaches people to delete reasoning.
+* **`mcp` is pinned `>=1.2,<2`.** mcp 2.x renames `FastMCP` to `MCPServer` and changes the
+  decorator and lifespan surfaces. Everything downstream — the committed `mcp.json`, the Claude
+  Desktop launcher, the W7 D5 agent — is written against the v1 contract, so the pin is what
+  keeps that contract true. Moving to 2.x is a rewrite of `app.py` and both transports.
+
+**Result:** 73 Python tests green (75.38% coverage against a 70% floor), **6 Testcontainers E2E
+tests green** against Postgres + the real Spring service, and 13 JUnit 5 tests on the order
+service; zero `mypy --strict` errors across `src/` and `tests/`; zero `ruff` findings; the wheel
+builds and exposes both console scripts; all four tools replay with p95 under 1 ms except the
+first-call outlier on `orders.create_refund`.
+
+
 ## Build and Test
 
 ```bash
@@ -2414,4 +2513,77 @@ UV_SYSTEM_CERTS=1 uv sync
   security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain
 } > /tmp/ca-bundle.pem
 REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem SSL_CERT_FILE=/tmp/ca-bundle.pem uv run pytest tests/test_rerank.py
+
+# W7 D4 - the MCP server. A separate uv project; `cd` out of taxcalc-ai first.
+cd ../taxcalc-mcp-server
+uv sync --frozen
+uv run ruff check
+uv run mypy --strict src/ tests/
+# The PR tier. The E2E is excluded by MARKER, not filename, so a mis-marked test fails loudly
+# on the merge tier rather than quietly never running.
+TAXCALC_MCP_BEARER_JWT=dummy-for-tests LANGSMITH_API_KEY=dummy-for-tests \
+  uv run pytest -v -m "not e2e" --cov=src --cov-fail-under=70
+# The latency gate. Replays recorded tool calls against canned upstreams and writes
+# .replay/latest.json; add --compare-to to fail on a >15% p95 regression.
+TAXCALC_MCP_BEARER_JWT=dummy-for-tests LANGSMITH_API_KEY=dummy-for-tests \
+  uv run python -m taxcalc_mcp_server.scripts.replay --fixtures tests/fixtures/
+# The order service the E2E runs against (a standalone Gradle build; the root wrapper drives it).
+cd .. && ./gradlew -p taxcalc-orders test        # 13 JUnit 5 tests, no containers
+./gradlew -p taxcalc-orders bootJar              # the artefact the E2E's image copies in
+cd taxcalc-mcp-server
+# The merge tier: Postgres + taxcalc-orders + the MCP server, three real processes. Needs Docker
+# and a JDK; it builds the jar itself if missing and SKIPS with the exact cause if it cannot,
+# which CI treats as a failure.
+uv run pytest -v -m e2e
+
+# Drive the stdio server by hand, the way Claude Desktop does.
+npx @modelcontextprotocol/inspector uv run python -m taxcalc_mcp_server.transports.stdio
+# Or serve HTTP+SSE for the W7 D5 agent. An unauthenticated probe is REFUSED - that 401 is the
+# proof the bearer middleware is in front of the transport, and the healthcheck treats it as
+# healthy for exactly that reason.
+TAXCALC_MCP_PORT=8080 uv run taxcalc-mcp-server-sse &
+curl -s http://127.0.0.1:8080/sse                                  # -> {"code":4030,...}, HTTP 401
+curl -sN -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/sse   # -> event: endpoint
+
+# Package it. A packaging mistake breaks the Claude Desktop integration while every test passes.
+uv build && unzip -p dist/*.whl '*/entry_points.txt'
+# `pipx install ./dist/*.whl` ALONE FAILS, and not by accident: taxcalc-ai is a path dependency
+# declared in [tool.uv.sources], that table is uv-local and never reaches wheel metadata, so the
+# wheel carries a bare `taxcalc-ai` requirement no index can satisfy. Build the sibling's wheel
+# and point pip at it. This is what puts both console scripts on $PATH:
+(cd ../taxcalc-ai && uv build)
+pipx install ./dist/taxcalc_mcp_server-0.1.0-py3-none-any.whl \
+      --pip-args="--find-links ../taxcalc-ai/dist"
+which taxcalc-mcp-server taxcalc-mcp-server-sse
+# Claude Desktop therefore launches `uv run --directory <repo>/taxcalc-mcp-server --frozen
+# taxcalc-mcp-server` rather than `uvx taxcalc-mcp-server`: running from the project directory
+# is what lets uv read pyproject.toml, honour the path source and pin from uv.lock. See the
+# committed configs/claude_desktop_config.json and mcp.json, which both explain it in place.
+
+# Confirm the four tool spans reach LangSmith. Each @traceable handler opens one `chain` run in
+# the project named by TAXCALC_MCP_LANGSMITH_PROJECT (default `taxcalc-mcp-server` - note the
+# settings prefix; the bare LANGSMITH_PROJECT in .env.example does not change it).
+LANGSMITH_TRACING=true uv run python -m taxcalc_mcp_server.scripts.replay \
+      --fixtures tests/fixtures/ --repeats 2
+uv run python -c "from langsmith import Client; \
+      print({r.name for r in Client().list_runs(project_name='taxcalc-mcp-server', limit=50)})"
+# -> {'orders.get_order', 'orders.create_refund', 'llm.chat', 'rag.retrieve_and_generate'}
 ```
+
+**Local-environment note, no repo change** (same Zscaler class as the W5 D4 and observability
+notes above): behind TLS interception the LangSmith SDK cannot verify `api.smith.langchain.com`
+— the CA is in the macOS keychain, not in `certifi`'s bundle — and the failure mode is the one
+that matters: `list_runs` raises a loud `SSLError`, but the **trace export is a background
+thread and fails silently**, so the replay exits 0, prints its latency table, and lands nothing.
+A green run is not evidence the spans arrived; the project listing is. Build a bundle once and
+point both variables at it:
+
+```bash
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > /tmp/roots.pem
+security find-certificate -a -p /Library/Keychains/System.keychain >> /tmp/roots.pem
+cat "$(python -c 'import certifi;print(certifi.where())')" /tmp/roots.pem > /tmp/ca-bundle.pem
+export SSL_CERT_FILE=/tmp/ca-bundle.pem REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem
+```
+
+CI is unaffected — GitHub runners have no interception — and both tiers set
+`LANGSMITH_TRACING=false`, so no build depends on the vendor being reachable.

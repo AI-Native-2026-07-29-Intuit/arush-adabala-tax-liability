@@ -1,0 +1,10 @@
+// taxcalc-orders/settings.gradle
+//
+// A STANDALONE Gradle build, deliberately not a subproject of the root one. The root project is
+// a Spring Boot monolith that needs Postgres, MongoDB, Redis, Kafka and an OAuth2 issuer to
+// reach a healthy state; this service needs Postgres and nothing else. Making it a subproject
+// would couple its dependency graph and its plugin set to that build, and the whole point of
+// this service is that an end-to-end test can start it in seconds.
+//
+// Built with the root wrapper: `./gradlew -p taxcalc-orders bootJar`.
+rootProject.name = 'taxcalc-orders'

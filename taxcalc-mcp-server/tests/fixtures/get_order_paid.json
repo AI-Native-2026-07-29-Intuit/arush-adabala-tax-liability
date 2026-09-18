@@ -1,0 +1,8 @@
+{
+  "tool": "orders.get_order",
+  "arguments": {"order_id": "ord-synth-9001", "tenant_id": "tenant-a"},
+  "upstream": {
+    "status": 200,
+    "body": {"order_id": "ord-synth-9001", "tenant_id": "tenant-a", "total": "42.50", "status": "paid"}
+  }
+}
