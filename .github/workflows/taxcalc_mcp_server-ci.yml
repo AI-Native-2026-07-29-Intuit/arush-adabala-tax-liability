@@ -198,6 +198,32 @@ jobs:
           fi
           exit "$status"
 
+      - name: a tool span is visible in LangSmith
+        # The only check that proves tracing DELIVERS rather than that the decorator is written.
+        # tests/test_tracing.py substitutes the client's transport and asserts each tool emits
+        # one run, named after the tool, into the configured project - offline, on every PR. It
+        # cannot prove a trace ever left the process, and every way that breaks leaves both the
+        # decorator and that test untouched: a key scoped to another workspace, a misspelled
+        # project, an exit before the background uploader flushes.
+        #
+        # It SKIPS, loudly and by name, when the secret is absent - which is the case on a fork
+        # PR - rather than failing. A skip that said only "skipped" would be indistinguishable
+        # from a check that ran and found nothing, which is the failure this repo was bitten by
+        # once already in the RAGAS gate. LANGSMITH_TRACING is pinned here rather than left to
+        # the script's default: what CI traces should be readable in the pipeline, not inherited
+        # from a fallback inside a module.
+        run: uv run python -m taxcalc_mcp_server.scripts.assert_spans_visible
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          # TAXCALC_MCP_ prefix, NOT the bare LANGSMITH_PROJECT. The decorators take their
+          # project from Settings.langsmith_project, which carries the settings prefix; the bare
+          # variable the SDK honours by default moves nothing here. Setting the wrong one sends
+          # spans to one project and queries another, which fails every run while blaming
+          # delivery.
+          TAXCALC_MCP_LANGSMITH_PROJECT: taxcalc-mcp-server-ci
+          LANGSMITH_TRACING: "true"
+          TAXCALC_MCP_BEARER_JWT: dummy-for-tests
+
       - name: no plaintext credentials in the tree
         # Cheap, and it runs on every PR because the cost of finding a committed key later is
         # revocation and rotation across every consumer.
@@ -244,9 +270,20 @@ jobs:
           unzip -p dist/*.whl '*/entry_points.txt' | tee /dev/stderr | grep -q 'taxcalc-mcp-server ='
           unzip -p dist/*.whl '*/entry_points.txt' | grep -q 'taxcalc-mcp-server-sse ='
           uv venv "${RUNNER_TEMP}/wheelprobe"
-          uv pip install --dry-run --python "${RUNNER_TEMP}/wheelprobe/bin/python" \
-            --find-links ../taxcalc-ai/dist ./dist/*.whl \
-            | tee /dev/stderr | grep -q 'taxcalc-mcp-server==0.1.0'
+          resolved=$(uv pip install --dry-run \
+            --python "${RUNNER_TEMP}/wheelprobe/bin/python" \
+            --find-links ../taxcalc-ai/dist ./dist/*.whl 2>&1)
+          echo "$resolved"
+          # Assert on what uv actually PRINTS. A wheel installed from a local path is rendered
+          # `taxcalc-mcp-server @ file:///...whl`, never `taxcalc-mcp-server==0.1.0` - so the
+          # obvious-looking `==` pattern matches nothing and the step fails on every run, which
+          # is a gate that reports a defect it did not find. Verified against real output.
+          echo "$resolved" | grep -qE '^ \+ taxcalc-mcp-server( |==|@)'
+          # THE assertion. taxcalc-ai exists in no registry, so resolving it at all is proof the
+          # local wheelhouse satisfied the wheel's bare requirement. Without --find-links this
+          # same command exits 1 with 'requirements are unsatisfiable' - confirmed by negative
+          # control, which is the only way to know a passing gate can still fail.
+          echo "$resolved" | grep -q 'taxcalc-ai==0.1.0'
 
   merge-to-main:
     name: Testcontainers E2E (MCP -> Spring -> Postgres)
@@ -333,8 +370,23 @@ jobs:
         run: |
           uv build
           (cd ../taxcalc-ai && uv build)
-          pipx install ./dist/taxcalc_mcp_server-0.1.0-py3-none-any.whl \
-            --pip-args="--find-links $(cd ../taxcalc-ai/dist && pwd)"
+          wheelhouse="$(cd ../taxcalc-ai/dist && pwd)"
+          # pipx if the runner ships it, `uv tool install` otherwise. They are the same claim -
+          # install the wheel into its own environment and put its console scripts on PATH - and
+          # uv is already on this runner from the step above. Falling back rather than failing
+          # means a change in the runner image cannot turn a green packaging gate red for a
+          # reason that has nothing to do with the package.
+          if command -v pipx >/dev/null 2>&1; then
+            pipx install ./dist/taxcalc_mcp_server-0.1.0-py3-none-any.whl \
+              --pip-args="--find-links $wheelhouse"
+            uninstall_cmd="pipx uninstall taxcalc-mcp-server"
+          else
+            echo "pipx absent on this runner; using uv tool install, its direct equivalent"
+            uv tool install --find-links "$wheelhouse" \
+              ./dist/taxcalc_mcp_server-0.1.0-py3-none-any.whl
+            export PATH="$HOME/.local/bin:$PATH"
+            uninstall_cmd="uv tool uninstall taxcalc-mcp-server"
+          fi
           command -v taxcalc-mcp-server
           command -v taxcalc-mcp-server-sse
           # Drive the installed executable over stdio. EOF on stdin ends the session, so the
@@ -344,7 +396,7 @@ jobs:
             | taxcalc-mcp-server 2>/dev/null > handshake.json
           cat handshake.json
           python -c "import json,sys; r=json.load(open('handshake.json')); assert r['jsonrpc']=='2.0', r; assert r['result']['serverInfo']['name']=='taxcalc-mcp-server', r; print('installed executable served:', r['result']['serverInfo'])"
-          pipx uninstall taxcalc-mcp-server
+          $uninstall_cmd
 
   p95-gate:
     name: fixture replay p95 vs the previous main run
