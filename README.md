@@ -2666,12 +2666,12 @@ the journal; the sixth is procedural.
   LangGraph has no such key and the nearest equivalent is empty without a checkpointer.
 * `@deadline` is applied **beneath** `@traceable`, following the brief's prose rather than its
   snippet, for the reason measured above.
-* **The branch is cut from `w7d4-implementation`, not from `main`.** The brief assumes W7 D3 and
-  D4 are merged; on this repository they are not — `main` is at W7 D2, and both later days live
-  on their own branches. Branching from `main` would have produced a tree with no
-  `taxcalc-mcp-server/` and a W7 D2 sidecar, which is not a tree this deliverable can be built
-  in. The D5 branch therefore sits on D4, which is the same thing the brief intends once D3 and
-  D4 merge.
+* **The branch was cut from `w7d4-implementation` rather than `main`, and has since been rebased
+  onto `main`.** When this work started, `main` was at W7 D2 and both W7 D3 and W7 D4 were still
+  open PRs — so branching from `main` would have produced a tree with no `taxcalc-mcp-server/`
+  and a W7 D2 sidecar, which is not a tree this deliverable can be built in. D4 merged (PR #61)
+  while D5 was being written, so the deviation resolved itself: the branch is now rebased onto
+  `main` and adds exactly the four D5 commits, with no content from D3 or D4 in its diff.
 
 ### Running it
 
