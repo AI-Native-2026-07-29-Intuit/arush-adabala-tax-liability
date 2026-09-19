@@ -113,4 +113,13 @@ markers = [
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # Starlette's TestClient reaches anyio through `anyio.abc.BlockingPortal`, an alias anyio has
+    # deprecated. It is raised inside starlette's own import chain, so nothing this project
+    # writes avoids it; the only alternatives are turning the whole error policy off or not
+    # testing the HTTP surface through a client at all. Scoped to the exact message, so every
+    # other DeprecationWarning - including any future anyio or starlette one - still fails the
+    # build. The same waiver, for the same reason, as taxcalc-mcp-server's.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
