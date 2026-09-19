@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
@@ -184,7 +185,7 @@ def run_config(
     guard: BudgetGuard,
     session: Any,
     **extra: Any,
-) -> dict[str, Any]:
+) -> RunnableConfig:
     """Build the config every ``ainvoke`` / ``astream_events`` call site passes.
 
     One constructor, because all four values in it are easy to forget and expensive to omit:
@@ -207,7 +208,10 @@ def run_config(
     :param guard: The request's cost ceiling.
     :param session: The request's MCP client session.
     :param extra: Additional ``configurable`` entries.
-    :returns: The config mapping.
+    :returns: The config mapping, typed as ``RunnableConfig`` - the same type LangGraph passes
+        back to every node, so the producer here and the consumers in
+        :mod:`taxcalc_agent_svc.deps` are checked against one type rather than agreeing by
+        convention.
     """
     return {
         "configurable": {

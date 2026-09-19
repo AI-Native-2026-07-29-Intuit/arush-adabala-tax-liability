@@ -1,0 +1,126 @@
+# taxcalc-agent-svc/cfn/agent-svc-budget.yaml
+#
+# The monthly Anthropic budget and the hard cap that enforces it.
+#
+# **Why a BudgetAction and not only an alarm.** An alarm notifies; it does not stop anything. The
+# failure this guards is a runaway agent loop discovered on a Saturday - by which time the alarm
+# has fired twelve times into a channel nobody is reading and the spend is already spent. The
+# BudgetAction attaches a DENY policy to the agent's role at 100% of budget, so the spend STOPS
+# rather than being reported. That is a deliberate availability-for-cost trade: at 100% of a
+# monthly budget the service stops answering, and that is the correct outcome, because the
+# alternative is an unbounded bill.
+#
+# This is the THIRD layer of the same defence, and each catches what the others cannot:
+#   BudgetGuard        per REQUEST, in-process, immediate      - one runaway request
+#   recursion_limit    per RUN, in-process, immediate          - one structural loop
+#   BudgetAction       per MONTH, at AWS, hours of lag         - a slow leak no request exceeds
+# A per-request ceiling cannot see a million cheap requests; this can. It cannot see them
+# quickly, which is why the first two exist.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Monthly Anthropic spend budget for taxcalc-agent-svc, with a BudgetAction that attaches a DENY
+  policy to the service role at 100% of budget.
+
+Parameters:
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 4000
+    MinValue: 1
+    Description: Monthly Anthropic budget in USD.
+  ServiceRoleName:
+    Type: String
+    Default: taxcalc-agent-svc-role
+    Description: The role the DENY policy is attached to when the budget is fully consumed.
+  DenyPolicyArn:
+    Type: String
+    Default: arn:aws:iam::123456789012:policy/DenyLlmProxyInvoke
+    Description: >-
+      Policy denying llm-proxy invocation. A PARAMETER, not a literal: the account id differs per
+      environment, and a hard-coded ARN makes this template deployable in exactly one account.
+  BudgetsActionRoleArn:
+    Type: String
+    Default: arn:aws:iam::123456789012:role/AWSBudgetsActionExecution
+    Description: >-
+      The role AWS Budgets assumes to attach the policy. Required by the BudgetsAction resource -
+      the service cannot modify IAM on its own authority, which is the correct design.
+  NotificationEmail:
+    Type: String
+    Default: taxcalc-oncall@example.com
+    Description: Where the 80% forecast warning is sent, well before the cap fires.
+
+Resources:
+  AgentSvcMonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: taxcalc-agent-anthropic-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        CostFilters:
+          # Tag-scoped, so this budget tracks THIS service rather than the whole account. An
+          # account-wide budget would fire on unrelated spend and attach a DENY policy to a role
+          # that had not overspent - which is worse than no cap, because the outage is caused by
+          # something the on-call cannot connect to the service that went down.
+          TagKeyValue:
+            - 'user:ServiceName$taxcalc-agent-svc'
+      NotificationsWithSubscribers:
+        # A FORECASTED warning at 80%, deliberately before the hard cap. The DENY policy is not
+        # supposed to be the first anyone hears of it: a forecast breach is days of warning, and
+        # a cap that fires without one is an outage nobody had a chance to prevent.
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref NotificationEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref NotificationEmail
+
+  BudgetHardStop:
+    Type: AWS::Budgets::BudgetsAction
+    Properties:
+      BudgetName: taxcalc-agent-anthropic-monthly
+      ActionType: APPLY_IAM_POLICY
+      # `Value`/`Type`, NOT `ActionThresholdValue`/`ActionThresholdType`, and the Subscribers
+      # below take `Type` where the Budget resource above takes `SubscriptionType`. Two sibling
+      # resources in the same service spell the same concepts differently; cfn-lint caught all
+      # four mismatches, and a template that only ever reached `aws cloudformation deploy` would
+      # have found them as a rollback instead.
+      ActionThreshold:
+        Value: 100
+        Type: PERCENTAGE
+      # AUTOMATIC, not MANUAL. A manual approval model means the cap does nothing until a human
+      # approves it - which, on the Saturday this exists for, is the same as having no cap. The
+      # cost of automatic is a self-inflicted outage at 100% of budget; that is the trade being
+      # made knowingly, and RUNBOOK.md documents how to detach the policy to recover.
+      ApprovalModel: AUTOMATIC
+      ExecutionRoleArn: !Ref BudgetsActionRoleArn
+      NotificationType: ACTUAL
+      Subscribers:
+        - Type: EMAIL
+          Address: !Ref NotificationEmail
+      Definition:
+        IamActionDefinition:
+          PolicyArn: !Ref DenyPolicyArn
+          Roles:
+            - !Ref ServiceRoleName
+    DependsOn: AgentSvcMonthlyBudget
+
+Outputs:
+  BudgetName:
+    Description: The budget the BudgetAction is attached to.
+    Value: taxcalc-agent-anthropic-monthly
+  MonthlyLimitUsd:
+    Description: The monthly ceiling in USD.
+    Value: !Ref MonthlyBudgetUsd

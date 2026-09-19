@@ -1,0 +1,20 @@
+{"qid": "docs-only-01", "question": "what is the policy on taxpayer returns", "tenant_id": "tenant-a", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "policy"}
+{"qid": "docs-only-02", "question": "how do i claim a home office deduction", "tenant_id": "tenant-b", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "deduction"}
+{"qid": "docs-only-03", "question": "what is the standard deduction for a sole trader", "tenant_id": "tenant-c", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "deduction"}
+{"qid": "docs-only-04", "question": "which rule governs late filing penalties", "tenant_id": "tenant-a", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "penalt"}
+{"qid": "docs-only-05", "question": "where in the docs is the mileage allowance defined", "tenant_id": "tenant-b", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "mileage"}
+{"qid": "docs-only-06", "question": "how do i register for VAT", "tenant_id": "tenant-c", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "register"}
+{"qid": "docs-only-07", "question": "what is the policy on amended returns", "tenant_id": "tenant-a", "expected_nodes": ["retrieval_agent", "synthesis_agent"], "expected_answer_substring": "amend"}
+{"qid": "api-only-01", "question": "what is the status of order ord-synth-9001", "tenant_id": "tenant-b", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "ord-synth-9001"}
+{"qid": "api-only-02", "question": "show me order ord-synth-9002", "tenant_id": "tenant-c", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "ord-synth-9002"}
+{"qid": "api-only-03", "question": "refund ord-synth-9003 for 10.00", "tenant_id": "tenant-a", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "ord-synth-9003"}
+{"qid": "api-only-04", "question": "has order ord-synth-9004 shipped", "tenant_id": "tenant-b", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "ord-synth-9004"}
+{"qid": "api-only-05", "question": "what is the status of my latest filing", "tenant_id": "tenant-c", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "status"}
+{"qid": "api-only-06", "question": "issue a refund of 25.00 on ord-synth-9005", "tenant_id": "tenant-a", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "ord-synth-9005"}
+{"qid": "api-only-07", "question": "list the line items on order ord-synth-9006", "tenant_id": "tenant-b", "expected_nodes": ["api_agent", "synthesis_agent"], "expected_answer_substring": "ord-synth-9006"}
+{"qid": "both-01", "question": "look up order ord-synth-9001 and tell me the refund policy", "tenant_id": "tenant-c", "expected_nodes": ["retrieval_agent", "api_agent", "synthesis_agent"], "expected_answer_substring": "refund"}
+{"qid": "both-02", "question": "what is the status of ord-synth-9007 and which rule covers it", "tenant_id": "tenant-a", "expected_nodes": ["retrieval_agent", "api_agent", "synthesis_agent"], "expected_answer_substring": "rule"}
+{"qid": "both-03", "question": "how do i refund order ord-synth-9008", "tenant_id": "tenant-b", "expected_nodes": ["retrieval_agent", "api_agent", "synthesis_agent"], "expected_answer_substring": "refund"}
+{"qid": "both-04", "question": "check order ord-synth-9009 against the deduction policy", "tenant_id": "tenant-c", "expected_nodes": ["retrieval_agent", "api_agent", "synthesis_agent"], "expected_answer_substring": "deduction"}
+{"qid": "both-05", "question": "what is the refund policy and the status of ord-synth-9010", "tenant_id": "tenant-a", "expected_nodes": ["retrieval_agent", "api_agent", "synthesis_agent"], "expected_answer_substring": "refund"}
+{"qid": "both-06", "question": "show the docs for refunds and the status of order ord-synth-9011", "tenant_id": "tenant-b", "expected_nodes": ["retrieval_agent", "api_agent", "synthesis_agent"], "expected_answer_substring": "refund"}
