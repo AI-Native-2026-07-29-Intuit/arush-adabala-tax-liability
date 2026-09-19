@@ -86,6 +86,14 @@ module = ["langsmith.*", "ragas.*", "instructor.*", "mcp.*"]
 ignore_missing_imports = true
 follow_untyped_imports = true
 
+# `datasets` ships no py.typed, so --strict sees `Dataset` as an implicit re-export rather than
+# a public name. ignore_missing_imports alone is not enough for that (the package IS installed);
+# the attribute check is what has to be relaxed, and only for this one library.
+[[tool.mypy.overrides]]
+module = ["datasets", "datasets.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
 [tool.pydantic-mypy]
 init_typed = true
 warn_required_dynamic_aliases = true
@@ -112,6 +120,11 @@ markers = [
     "e2e: spins Docker containers via Testcontainers; runs on the merge-to-main CI tier only",
 ]
 testpaths = ["tests"]
+# `evals/` is not a package and is not installed, so the eval harness is only importable when it
+# is on the path. Declared here rather than relied on as a side effect of importing the CI gate:
+# a test that could only import `trajectory` because some earlier import happened to mutate
+# sys.path is a test that breaks when the formatter reorders imports - which it did.
+pythonpath = ["evals", "tests"]
 asyncio_mode = "auto"
 filterwarnings = [
     "error",
@@ -122,4 +135,28 @@ filterwarnings = [
     # other DeprecationWarning - including any future anyio or starlette one - still fails the
     # build. The same waiver, for the same reason, as taxcalc-mcp-server's.
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+# Three modules are excluded from the COVERAGE measurement, and each is excluded because CI
+# covers it by EXECUTION rather than by assertion - which is stronger evidence, not weaker.
+#
+#   scripts/smoke.py    invoked twice against a real Postgres by the checkpoint smoke, whose
+#                       verdict is a row count. A unit test of its argument parsing would raise
+#                       the percentage and prove nothing the smoke does not already prove.
+#   scripts/eval.py     run in both CI tiers as the gate itself. Its one piece of real logic -
+#                       `verdict`, which decides whether builds pass - is pure and IS unit
+#                       tested, in tests/test_eval_gate.py. What is omitted is argparse, stdout
+#                       formatting and process exit.
+#   retrievers.py       constructs the sidecar's three clients and nothing else. It cannot be
+#                       unit tested without Postgres, Redis and an API key, and it is exercised
+#                       for real by the merge-tier eval run.
+#
+# Counting them would leave the headline number measuring how much of the ENTRYPOINTS is
+# unit-tested, which is the least interesting question available and the easiest to game.
+omit = [
+    "src/taxcalc_agent_svc/scripts/smoke.py",
+    "src/taxcalc_agent_svc/scripts/eval.py",
+    "src/taxcalc_agent_svc/retrievers.py",
 ]

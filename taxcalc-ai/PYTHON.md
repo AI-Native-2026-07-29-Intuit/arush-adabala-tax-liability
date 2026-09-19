@@ -881,13 +881,67 @@ a phantom `config` parameter in every published schema, and the lifespan model l
 this repository keeps relearning is that a component that type-checks and lints is a component
 nobody has run.
 
+## What W7 D5 adds
+
+W7 D5 builds a third sibling project, `taxcalc-agent-svc/`, and consumes this sidecar the same
+way the W7 D4 MCP server does — as a **path dependency, read-only**. Nothing under `taxcalc-ai/`
+changes; the agent's retrieval node wraps `taxcalc_ai.rag.retrieve_and_generate` behind one
+narrow seam (`taxcalc_agent_svc.retrievers.run_pipeline`) so that a test of the graph needs
+neither a corpus nor a credential.
+
+What the agent adds on top of this sidecar:
+
+* A **Claude query rewrite** in front of retrieval, turning a conversational question into a
+  standalone search query. Best-effort by contract — a failed rewrite falls back to the original
+  question rather than failing the node, because a slightly worse query beats no retrieval.
+* **Pre-shaping to three fields.** Only `chunk_id`, `doc_id` and `score` cross into the graph
+  state. The chunk text and its embedding metadata are dropped, because every state slot is
+  serialised into a Postgres checkpoint row on *every* super-step — carrying embeddings through
+  would make each checkpoint hundreds of kilobytes of numbers nothing reads. This is the W7 D4
+  Section 9 discipline applied one layer up.
+* **A deadline.** Retrieval is bounded at 3 s and a miss lands `{"docs": []}`, so a slow
+  cross-encoder degrades the answer instead of hanging the request.
+* **A per-agent cost header.** Every Claude call from the retrieval node carries
+  `X-Agent: retrieval`, so the W3 D1 llm-proxy can emit `retrieval_cost_per_request` as its own
+  CloudWatch SLI rather than one undifferentiated number for three agents.
+
+### AI authoring discipline (W7 D5 additions)
+
+Two concrete deviations from Claude's output on W7 D5, both recorded in full in
+`taxcalc-agent-svc/PROMPT_JOURNAL.md`, and both chosen here because they are the kind that
+**survive a code review**:
+
+1. **Claude left the parallel state slots without reducers.** `docs: list[dict]` and
+   `tool_results: dict` were bare TypedDict fields. LangGraph's default channel is
+   last-write-wins, and the supervisor fans out to both workers in the same super-step — so
+   whichever leg finished second silently erased the other's contribution and synthesis answered
+   from half its evidence. No exception, no log line, and a diff that reads as perfectly ordinary
+   typing. Shipped with `Annotated[list[dict], operator.add]` on `docs` and a key-wise merger on
+   `tool_results`, because `operator.add` on a mapping raises `TypeError` at fan-in.
+
+2. **Claude used `PostgresSaver` and `graph.invoke` with async node bodies.** Both are the
+   idiomatic forms in every LangGraph example, and both are wrong the moment the nodes are
+   `async`: `invoke` raises `TypeError: No synchronous function provided`, and the sync
+   checkpointer fails inside `AsyncPregelLoop.__aenter__` at `await
+   self.checkpointer.aget_tuple(...)` — inherited from `BaseCheckpointSaver` as
+   `raise NotImplementedError` — before any node runs. Shipped with `AsyncPostgresSaver`,
+   `await cp.setup()` and `ainvoke`.
+
+A third, kept here because it is the sharpest illustration of the rule this file keeps
+restating: Claude's eval used `thread_id=f"eval-{sc.qid}"`, which is stable across runs. The
+checkpointer persists under it and `cost_usd_e5` carries `operator.add`, so the suite's second
+run resumed its own first run and reported exactly double the cost — a +100% regression in which
+nothing had changed. It was found by the cost gate failing a build, not by reading the code. The
+lesson this repository keeps relearning, now for the third week running: a component that
+type-checks and lints is a component nobody has run.
+
 ## What this sidecar does NOT do (yet)
 
 * Production RAG retrieval strategy (re-ranking, hybrid search) — W7 D3. The `doc_chunks` table
   this day built is that lesson's input corpus.
 * MCP server publishing — done in W7 D4, in the sibling `taxcalc-mcp-server/` project rather
   than here. See "What W7 D4 adds" above.
-* LangGraph orchestration — W7 D5, which reads the `taxcalc-ai-dev` LangSmith project for
-  trace-driven debugging and regresses against today's RAGAS baseline.
+* LangGraph orchestration — done in W7 D5, in the sibling `taxcalc-agent-svc/` project rather
+  than here. See "What W7 D5 adds" above.
 * Re-embedding the corpus. None of W7 D3–D5 re-embeds; they all assume today's exit criteria.
 * An `async` client. `LlmProxyClient` is still synchronous.

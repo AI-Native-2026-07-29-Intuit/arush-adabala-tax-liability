@@ -2587,3 +2587,136 @@ export SSL_CERT_FILE=/tmp/ca-bundle.pem REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem
 
 CI is unaffected — GitHub runners have no interception — and both tiers set
 `LANGSMITH_TRACING=false`, so no build depends on the vendor being reachable.
+
+## Week 7 Day 5 — Multi-Agent Capstone: LangGraph three-node + supervisor + Postgres checkpointer + SSE + eval gate
+
+W7 D3 built retrieval. W7 D4 published it behind MCP. W4 D4 built a React client that streams.
+Today all of it lands behind **one running multi-agent service**: a new sibling project
+[`taxcalc-agent-svc/`](taxcalc-agent-svc/) hosting a three-node LangGraph whose only tool surface
+is the W7 D4 MCP server, whose only retriever is the W7 D3 sidecar, and whose answers stream back
+into the W4 D4 `useChat` hook. Authoring transcripts in
+[`taxcalc-agent-svc/PROMPT_JOURNAL.md`](taxcalc-agent-svc/PROMPT_JOURNAL.md); the consumer's-eye
+view is in [`taxcalc-ai/PYTHON.md`](taxcalc-ai/PYTHON.md#what-w7-d5-adds); the on-call view is in
+[`taxcalc-agent-svc/RUNBOOK.md`](taxcalc-agent-svc/RUNBOOK.md).
+
+**The complexity is in the topology, not in the bodies.** Every node body is twenty lines that
+delegate to something already built and already tested. What is new — and what this day is
+actually about — is the composite contract around them: typed state with reducers, a supervisor
+as the single policy point, per-node deadlines, two independent runaway caps, a durable
+checkpointer, structured output at the end, end-to-end tracing, per-agent cost attribution, a
+trajectory eval gate, and a GitOps deploy with a budget hard cap. Ticked independently they are
+twelve checkboxes; missing any one turns a green build into a runaway loop, a double-debited
+refund, a checkpoint that never resumes, or a synthesis that fabricates citations.
+
+| Artefact | What it is | Why it is shaped that way |
+|---|---|---|
+| [`state.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/state.py) | `AgentState` TypedDict; `operator.add` on `docs`/`cost_usd_e5`/`visited_nodes`, a key-wise merger on `tool_results` | **The silent failure this closes.** The supervisor fans out to both workers in the same super-step, and LangGraph's default channel is last-write-wins — so a bare `docs: list[dict]` lets whichever leg finished second erase the other's contribution, with no exception and no log line. `operator.add` cannot be used on `tool_results`: `dict + dict` raises `TypeError` at fan-in, at runtime. This is also the one module without `from __future__ import annotations`, so the reducers stay *readable* off `__annotations__` rather than becoming `ForwardRef`s only a `get_type_hints` incantation can inspect. |
+| [`graph.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/graph.py) — `supervisor` | A named node returning `list[Send]`, not a conditional edge | It is keyword routing today, which looks like it belongs inline. It is a node because of what lands here next: per-tenant rate limits, tenant gates, and the cost check that decides a plan is too expensive *before* paying for it. Those are policy and need one home. On an **empty plan it defaults to retrieval**, never to an empty fan-out — a question the router does not understand should be grounded, and routing nowhere reliably produces a confident, well-formed, entirely ungrounded answer. |
+| [`nodes/_deadline.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/nodes/_deadline.py) | `@deadline(seconds, sentinel)` applied **beneath** `@traceable` | The ordering is load-bearing and was **measured, not reasoned about**. `asyncio.wait_for` schedules its argument as a Task, which runs in a *context copy*; with `@deadline` outermost the node's run tree dies with the cancelled task and `get_current_run_tree()` in the handler returns the **root** `chat_request` run. Probing both orders under a live tree: `traceable` outermost tags `retrieval_agent`, `deadline` outermost tags `chat_request`. The second is worse than no tag — the LangSmith query meant to isolate slow *nodes* returns slow *requests*, and the responsible node is invisible in both. |
+| [`nodes/api.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/nodes/api.py) | Catalogue discovery via `session.list_tools()`; tenancy and UUID5 idempotency injected as **schema-declared arguments** | `ClientSession.call_tool` in mcp 1.x has **no `headers` parameter**, and D4 hardens every tool schema against extra keys — so the obvious header approach raises `TypeError` and the obvious blind injection would be rejected. Both point at the same answer: read each tool's published `inputSchema`. Introspecting the live D4 catalogue, all four tools declare `tenant_id` and exactly one — `orders.create_refund` — declares `idempotency_key`, so the schema *is* the instruction. Tenancy is **overwritten after the model speaks**: a model that read a document naming another tenant must not be able to reach it. |
+| [`budgets.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/budgets.py) + `recursion_limit` | Two caps, neither subsuming the other | `recursion_limit` bounds **turns**, so it catches a loop that spends nothing. `BudgetGuard` bounds **dollars**, so it catches a run that is progressing but expensive — twenty-four legitimate super-steps each making a 4,000-token call is inside any turn limit and outside any sane budget. Both directions are tested against each other. Money is an `int` in 1e-5 USD minor units: a run summing forty binary fractions accumulates error in the very number the ceiling is compared against, in a direction nobody controls, and a budget that can be crossed without firing is not a budget. |
+| [`deps.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/deps.py) | Per-request dependencies on `config["configurable"]`, **not** in the state | Every state slot is msgpack-serialised into a checkpoint row on every super-step. Verified directly: `JsonPlusSerializer().dumps_typed({"sess": socket()})` raises `TypeError: Type is not msgpack serializable`. An MCP `ClientSession` owns exactly such a live transport, so a `__mcp_session` state slot takes down every request the moment a real checkpointer is attached — and passes cleanly in any test that compiled without one, which is the worst possible place for the difference to appear. |
+| [`sse.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/sse.py) | `astream_events(v2)` → `0:`/`2:`/`3:`, with `GraphRecursionError` and `BudgetExceeded` on **distinct** codes | They demand opposite responses. A recursion breach is a *bug* — the graph looped and will loop again. A budget breach is a *limit* — the run was legitimate and an operator may simply raise the ceiling. Collapsing both into "something went wrong" costs the reader the one fact that decides what to do next. Errors are emitted **into** the stream rather than raised out of it: past the first frame the 200 and the headers are already on the wire, and raising there truncates the body into a bare connection drop with no reason attached. |
+| [`evals/trajectory.py`](taxcalc-agent-svc/evals/trajectory.py) | 20 scenarios; trajectory ≥ 0.70, faithfulness ≥ 0.85, cost regression ≤ 15% | Three gates because each catches what the others cannot. Trajectory catches routing regressions — a supervisor that routed everything to both workers produces perfectly good answers at twice the cost, and faithfulness alone would call that healthy. Cost catches the change that improves both by spending three times as much: a prompt stuffing the whole corpus into context scores *better* on faithfulness while tripling the bill, and no quality metric will ever object. The match is **subset, not equality**, so a graph that grows a node does not fail twenty scenarios for doing more work on the way to the same answer. |
+| [`cfn/agent-svc-budget.yaml`](taxcalc-agent-svc/cfn/agent-svc-budget.yaml) | `AWS::Budgets::BudgetsAction`, `APPLY_IAM_POLICY`, `AUTOMATIC` at 100% | The third layer of the same defence, and the only one that sees a slow leak: a per-request ceiling cannot detect a million individually-cheap requests. `AUTOMATIC`, not `MANUAL` — a cap awaiting human approval on the Saturday it exists for is the same as no cap. The cost is a self-inflicted outage at 100% of budget; that trade is made knowingly and the recovery is in the runbook. |
+
+### Four things measured rather than assumed — each one changed the code
+
+Every one of these produces **no exception on the happy path**, which is why they are recorded
+rather than quietly fixed.
+
+1. **The decorator order decides which span gets blamed.** The brief's reference snippet lists
+   `@deadline` above `@traceable`; its prose says to apply `@deadline` *before* `@traceable`,
+   which — decorators applying bottom-up — is the opposite. Both orders produce the sentinel and
+   both tag some run, so the call site cannot distinguish them. A probe delegating to langsmith's
+   own `get_current_run_tree` under a live tree settles it: `traceable` outermost tags
+   `retrieval_agent`; `deadline` outermost tags `chat_request`. The prose is right.
+
+2. **`PostgresSaver` cannot serve async nodes.** Every node body here is `async`, so every call
+   site is `ainvoke`, so LangGraph drives the checkpointer's *async* interface — which the
+   synchronous saver inherits from `BaseCheckpointSaver` as `raise NotImplementedError`. It
+   fails inside `AsyncPregelLoop.__aenter__` before any node runs. `AsyncPostgresSaver` is not a
+   preference here; the sync one does not work at all.
+
+3. **A stable eval `thread_id` makes the cost gate fire forever.** Found by the gate failing a
+   build in which nothing had changed. `thread_id=f"eval-{qid}"` is stable across runs, the
+   checkpointer persists under it, and `cost_usd_e5` carries `operator.add` — so the second run
+   of the suite resumed the first and reported exactly double: 508 then 1016 (1e-5 USD), a +100%
+   "regression" caused entirely by the eval talking to itself. Namespacing the thread per run
+   gives 508, 508, 508 across three consecutive runs.
+
+4. **`cfn-lint` caught four property names the reference template had wrong.**
+   `AWS::Budgets::BudgetsAction` spells its threshold `Value`/`Type`, not
+   `ActionThresholdValue`/`ActionThresholdType`, and its subscribers take `Type` where the
+   sibling `AWS::Budgets::Budget` takes `SubscriptionType`. Two resources in one service
+   spelling the same concepts differently — found in the fast tier rather than as a stack
+   rollback, which is the entire argument for linting infrastructure in CI.
+
+### Where this deliverable departs from the letter of its spec
+
+Six places, all forced by the libraries as they actually behave. The first five are above or in
+the journal; the sixth is procedural.
+
+* `state["__mcp_session"]` → `config["configurable"]`, because state is checkpointed and a live
+  session is not serialisable.
+* `PostgresSaver` → `AsyncPostgresSaver`, and `graph.invoke` → `await graph.ainvoke`.
+* `session.call_tool(..., headers=...)` → schema-driven argument injection, because mcp 1.x has
+  no such parameter.
+* `state["__visited_nodes"]` → an explicit `visited_nodes` state slot with a reducer, because
+  LangGraph has no such key and the nearest equivalent is empty without a checkpointer.
+* `@deadline` is applied **beneath** `@traceable`, following the brief's prose rather than its
+  snippet, for the reason measured above.
+* **The branch is cut from `w7d4-implementation`, not from `main`.** The brief assumes W7 D3 and
+  D4 are merged; on this repository they are not — `main` is at W7 D2, and both later days live
+  on their own branches. Branching from `main` would have produced a tree with no
+  `taxcalc-mcp-server/` and a W7 D2 sidecar, which is not a tree this deliverable can be built
+  in. The D5 branch therefore sits on D4, which is the same thing the brief intends once D3 and
+  D4 merge.
+
+### Running it
+
+```bash
+# W7 D5 - the multi-agent service. A separate uv project; `cd` out of the others first.
+cd taxcalc-agent-svc && uv sync
+
+# The fast gates, in the order CI runs them.
+uv run ruff check
+uv run mypy --strict src/ tests/ evals/
+uv run pytest -v -m "not e2e" --cov=src --cov-fail-under=70
+
+# The container-backed durability proof: kills the first connection pool entirely before
+# building the second, so nothing but the database carries state across. Needs Docker.
+uv run pytest -v -m e2e
+
+# The trajectory eval. `--offline` stubs the node BODIES only - the supervisor, the fan-out
+# plan and the reducers are production code, so all twenty scenarios exercise real routing.
+# Faithfulness is not scorable against a canned answer, so the gate says NOT MEASURED out loud
+# rather than rendering an unmeasured metric as a green tick.
+uv run python -m taxcalc_agent_svc.scripts.eval --offline --gate --allow-unmeasured-faithfulness
+
+# The full gate, with RAGAS scored on real answers. Needs an Anthropic key, the MCP server
+# reachable over SSE, and the sidecar's Postgres + Redis.
+uv run python -m taxcalc_agent_svc.scripts.eval --gate
+
+# Prove the checkpointer against a throwaway Postgres: invoke twice on one thread_id and count
+# the rows. The second run's visited_nodes comes back LONGER than the first's - the reducer
+# appending onto the persisted list is the resume proving itself.
+docker run -d --name pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16-alpine
+TAXCALC_AGENT_POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  uv run python -m taxcalc_agent_svc.scripts.smoke --offline --thread-id t1
+
+# Serve it. The lifespan opens one MCP session and one checkpointer pool for the process.
+uv run taxcalc-agent-svc
+
+# The image. Context is the REPOSITORY ROOT - two path dependencies live beside this project
+# and a context rooted here could not see either.
+docker build -f taxcalc-agent-svc/Dockerfile -t taxcalc-agent-svc:dev .
+
+# The infrastructure lints CI runs in the fast tier.
+uv tool run cfn-lint taxcalc-agent-svc/cfn/agent-svc-budget.yaml
+docker build --check -f taxcalc-agent-svc/Dockerfile .
+
+# The money and durability greps.
+grep -RIn ': float ' taxcalc-agent-svc/src/taxcalc_agent_svc/budgets.py   # -> no output
+grep -RIn 'MemorySaver' taxcalc-agent-svc/src/                            # -> no output
+```

@@ -57,3 +57,4 @@ __pycache__/
 # cost-per-run baseline the CI gate compares against and must be in git to be a baseline at all.
 .env
 taxcalc-agent-svc/.venv/
+taxcalc-agent-svc/.coverage

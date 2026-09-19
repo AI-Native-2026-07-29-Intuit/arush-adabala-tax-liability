@@ -1,0 +1,390 @@
+{
+  "scenarios": 20,
+  "trajectory_match": 1.0,
+  "answer_substring_rate": 1.0,
+  "faithfulness": null,
+  "faithfulness_measured": false,
+  "mean_cost_usd_e5": 508,
+  "baseline_cost_usd_e5": 508,
+  "cost_regression": 0.0,
+  "rows": [
+    {
+      "qid": "docs-only-01",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the policy on taxpayer returns",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "what is the policy on taxpayer returns"
+    },
+    {
+      "qid": "docs-only-02",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: how do i claim a home office deduction",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "how do i claim a home office deduction"
+    },
+    {
+      "qid": "docs-only-03",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the standard deduction for a sole trader",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "what is the standard deduction for a sole trader"
+    },
+    {
+      "qid": "docs-only-04",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: which rule governs late filing penalties",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "which rule governs late filing penalties"
+    },
+    {
+      "qid": "docs-only-05",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: where in the docs is the mileage allowance defined",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "where in the docs is the mileage allowance defined"
+    },
+    {
+      "qid": "docs-only-06",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: how do i register for VAT",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "how do i register for VAT"
+    },
+    {
+      "qid": "docs-only-07",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the policy on amended returns",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 420,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "what is the policy on amended returns"
+    },
+    {
+      "qid": "api-only-01",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the status of order ord-synth-9001",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "what is the status of order ord-synth-9001"
+    },
+    {
+      "qid": "api-only-02",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: show me order ord-synth-9002",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "show me order ord-synth-9002"
+    },
+    {
+      "qid": "api-only-03",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: refund ord-synth-9003 for 10.00",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "refund ord-synth-9003 for 10.00"
+    },
+    {
+      "qid": "api-only-04",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: has order ord-synth-9004 shipped",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "has order ord-synth-9004 shipped"
+    },
+    {
+      "qid": "api-only-05",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the status of my latest filing",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "what is the status of my latest filing"
+    },
+    {
+      "qid": "api-only-06",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: issue a refund of 25.00 on ord-synth-9005",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "issue a refund of 25.00 on ord-synth-9005"
+    },
+    {
+      "qid": "api-only-07",
+      "match": 1.0,
+      "visited": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: list the line items on order ord-synth-9006",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 500,
+      "contexts": [],
+      "question": "list the line items on order ord-synth-9006"
+    },
+    {
+      "qid": "both-01",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: look up order ord-synth-9001 and tell me the refund policy",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 620,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "look up order ord-synth-9001 and tell me the refund policy"
+    },
+    {
+      "qid": "both-02",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the status of ord-synth-9007 and which rule covers it",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 620,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "what is the status of ord-synth-9007 and which rule covers it"
+    },
+    {
+      "qid": "both-03",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: how do i refund order ord-synth-9008",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 620,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "how do i refund order ord-synth-9008"
+    },
+    {
+      "qid": "both-04",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: check order ord-synth-9009 against the deduction policy",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 620,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "check order ord-synth-9009 against the deduction policy"
+    },
+    {
+      "qid": "both-05",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: what is the refund policy and the status of ord-synth-9010",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 620,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "what is the refund policy and the status of ord-synth-9010"
+    },
+    {
+      "qid": "both-06",
+      "match": 1.0,
+      "visited": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "expected": [
+        "retrieval_agent",
+        "api_agent",
+        "synthesis_agent"
+      ],
+      "answer": "offline: show the docs for refunds and the status of order ord-synth-9011",
+      "answer_substring_hit": true,
+      "cost_usd_e5": 620,
+      "contexts": [
+        "doc-1"
+      ],
+      "question": "show the docs for refunds and the status of order ord-synth-9011"
+    }
+  ]
+}
