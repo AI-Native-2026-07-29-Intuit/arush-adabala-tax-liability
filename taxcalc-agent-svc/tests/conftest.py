@@ -15,9 +15,31 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from langsmith import Client
 
 from taxcalc_agent_svc.budgets import BudgetGuard
 from taxcalc_agent_svc.settings import Settings
+
+
+@pytest.fixture
+def offline_langsmith_client() -> Client:
+    """A LangSmith client that cannot reach the network, for tests that need real run trees.
+
+    Two of this suite's claims - that ``deadline_exceeded`` lands on the node's own span, and
+    that the SSE bridge opens one root run with three named children - can only be asserted
+    against genuine ``RunTree`` objects, which exist only while tracing is enabled. Enabling it
+    naively makes the test suite phone home: the background uploader GETs ``/info`` and POSTs
+    ``/runs/multipart`` on every run, which fails noisily on a laptop behind a TLS-inspecting
+    proxy and would be a real outbound call on a runner that happens to have a key.
+
+    Two settings make it genuinely offline. ``api_url`` points at an unroutable port, and
+    ``info={}`` is supplied up front so the client never performs the capability GET it would
+    otherwise make before its first write. Used with ``tracing_context(enabled="local")``, which
+    builds the trees without ever scheduling an upload.
+
+    :returns: A client safe to hand to ``tracing_context``.
+    """
+    return Client(api_url="http://localhost:1", api_key="x", auto_batch_tracing=False, info={})
 
 
 class StubTool:
