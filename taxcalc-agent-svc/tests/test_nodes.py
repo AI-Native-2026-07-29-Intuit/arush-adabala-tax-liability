@@ -14,7 +14,7 @@ import json
 from typing import Any
 
 import pytest
-from conftest import StubCatalogue, StubTool
+from conftest import StubCatalogue, StubSession, StubTool
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
@@ -362,3 +362,41 @@ def test_the_seams_read_what_run_config_writes(settings: Any, guard: Any) -> Non
     assert mcp_session(cfg) == "a-session"
     assert cfg["recursion_limit"] == settings.recursion_limit
     assert cfg["configurable"]["thread_id"] == "t-1"
+
+
+async def test_a_session_provider_is_awaited_not_returned_raw() -> None:
+    """``open_session`` resolves the lazy provider the FastAPI app supplies.
+
+    Without this, the app would have to await the MCP session before entering the graph - which
+    reintroduces the eager-connection defect one layer down, failing docs-only questions because
+    a dependency they never touch was unreachable.
+    """
+    from taxcalc_agent_svc.deps import open_session
+    from taxcalc_agent_svc.graph import run_config
+
+    sentinel = object()
+
+    async def provider() -> object:
+        """Stand in for Dependencies.session.
+
+        :returns: The session.
+        """
+        return sentinel
+
+    from taxcalc_agent_svc.budgets import BudgetGuard
+    from taxcalc_agent_svc.settings import Settings
+
+    cfg = run_config("t-1", Settings(), guard=BudgetGuard(), session=provider)
+    assert await open_session(cfg) is sentinel
+
+
+async def test_a_live_session_passes_straight_through() -> None:
+    """The stub sessions the rest of this suite uses are not callable, and must not be called."""
+    from taxcalc_agent_svc.budgets import BudgetGuard
+    from taxcalc_agent_svc.deps import open_session
+    from taxcalc_agent_svc.graph import run_config
+    from taxcalc_agent_svc.settings import Settings
+
+    session = StubSession([], {})
+    cfg = run_config("t-1", Settings(), guard=BudgetGuard(), session=session)
+    assert await open_session(cfg) is session

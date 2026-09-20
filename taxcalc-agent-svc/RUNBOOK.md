@@ -3,6 +3,19 @@
 The five signals that should page someone, what each one means, what to do about it, and the
 30/60/90 plan. Written for whoever is holding the pager at 02:00 and has never read this code.
 
+**Probes.** `livenessProbe` -> `/healthz`, `readinessProbe` -> `/readyz`, and they are
+deliberately different endpoints. `/healthz` reaches no dependency: a liveness probe that checked
+downstreams would have Kubernetes *restart* a working pod whenever one blipped, hardest exactly
+when the downstream is already struggling. `/readyz` is gated on the checkpointer alone - without
+it no request of any shape can run - and *reports* the MCP session without gating on it, because
+a docs-only question routes `retrieval_agent -> synthesis_agent` and touches no tool. Taking the
+pod out of service for traffic it can still answer is a self-inflicted outage.
+
+**There is no deploy-ordering requirement.** The service starts and serves whether or not the MCP
+server and Postgres are up yet; both are opened on first use, with backoff, and `/readyz` reports
+the truth in the meantime. This was not true of the first version - see "What the deployment
+rehearsal found" below.
+
 **What this service is, in one paragraph.** A FastAPI process hosting a three-node LangGraph
 (`retrieval_agent`, `api_agent`, `synthesis_agent`) routed by a supervisor that fans out in
 parallel. Its only tool surface is the W7 D4 MCP server; its only retriever is the W7 D3 sidecar;
@@ -140,6 +153,34 @@ reconnect. The `thread_id` is what makes that reconnect a resume rather than a r
 
 ---
 
+## What the deployment rehearsal found
+
+Two defects, both found by trying to deploy this rather than by testing it, and both fixed on
+this branch.
+
+**1. The service could not start unless every dependency was already up.** The first lifespan
+opened the MCP SSE session and the Postgres checkpointer eagerly and let either failure
+propagate. Under Kubernetes that is a process that exits before it listens - `CrashLoopBackOff`,
+with exponential backoff, so a dependency that was briefly unreachable kept the service down long
+after it returned, and any rollout coinciding with an MCP blip failed outright. It also
+contradicted this service's own `/healthz` reasoning, one layer up where no probe configuration
+could soften it. Fixed in `runtime.py`: both dependencies are opened lazily behind a lock and a
+retry, and readiness is gated on the checkpointer alone.
+
+**2. The production image shipped ~4.7 GB of CUDA libraries to a CPU-only service.** `torch`
+arrives transitively through the W7 D3 reranker, and PyPI's Linux wheel bundles the whole NVIDIA
+CUDA runtime - which this service, running on CPU nodes, will never load. Measured: **9.19 GB**
+built from the unpinned lock, against a 1.2 GB virtualenv on macOS where PyPI's wheel is already
+CPU-only. Pinning the PyTorch CPU index for Linux removed all 43 `nvidia-*` packages and took the
+image to **4.48 GB - a 51% reduction**. That is time off every pull, every rollout and every
+image scan, and it is the difference between a node that can hold this image and one that evicts
+it.
+
+The remaining 4.48 GB is still dominated by `torch` itself plus `transformers`, `scipy` and
+`pyarrow`. The real fix is for the agent to reach the reranker over the network - it already
+reaches every *tool* that way through MCP - rather than linking a machine-learning stack into a
+web service's image. Recorded as a documented trade-off rather than smuggled into this branch.
+
 ## 30 / 60 / 90
 
 ### Day 30 — production hardening
@@ -153,6 +194,9 @@ reconnect. The `thread_id` is what makes that reconnect a resume rather than a r
 - **Per-tenant rate limits and cost ceilings**, also in `supervisor()` — a tenant on a small plan
   should get a smaller `cost_usd_e5` ceiling, decided before any worker runs.
 - **Rehearse the rollback** and fill in the record above.
+- **Move retrieval behind the network.** 4.48 GB of the image is a machine-learning stack this
+  service links but barely uses; calling the W7 D3 sidecar over HTTP would take the agent image
+  to roughly the size of the FastAPI app it actually is.
 
 ### Day 60 — scope expansion
 

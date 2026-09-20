@@ -2620,6 +2620,41 @@ refund, a checkpoint that never resumes, or a synthesis that fabricates citation
 | [`evals/trajectory.py`](taxcalc-agent-svc/evals/trajectory.py) | 20 scenarios; trajectory ≥ 0.70, faithfulness ≥ 0.85, cost regression ≤ 15% | Three gates because each catches what the others cannot. Trajectory catches routing regressions — a supervisor that routed everything to both workers produces perfectly good answers at twice the cost, and faithfulness alone would call that healthy. Cost catches the change that improves both by spending three times as much: a prompt stuffing the whole corpus into context scores *better* on faithfulness while tripling the bill, and no quality metric will ever object. The match is **subset, not equality**, so a graph that grows a node does not fail twenty scenarios for doing more work on the way to the same answer. |
 | [`cfn/agent-svc-budget.yaml`](taxcalc-agent-svc/cfn/agent-svc-budget.yaml) | `AWS::Budgets::BudgetsAction`, `APPLY_IAM_POLICY`, `AUTOMATIC` at 100% | The third layer of the same defence, and the only one that sees a slow leak: a per-request ceiling cannot detect a million individually-cheap requests. `AUTOMATIC`, not `MANUAL` — a cap awaiting human approval on the Saturday it exists for is the same as no cap. The cost is a self-inflicted outage at 100% of budget; that trade is made knowingly and the recovery is in the runbook. |
 
+### Two defects the deployment rehearsal found, which testing did not
+
+Standing the service up against a real Argo CD and a real cluster found two things that 123
+passing tests did not, because both are properties of *deploying* rather than of running.
+
+**The service could not start unless every dependency was already up.** The first lifespan opened
+the MCP session and the Postgres checkpointer eagerly and let either failure propagate — which
+under Kubernetes is a process that exits before it listens, so a briefly-unreachable dependency
+means `CrashLoopBackOff` with exponential backoff long after the dependency returns. It also
+contradicted this service's own `/healthz` docstring ("a health check that depends on every
+downstream turns one dependency's blip into a cascading restart") one layer up, where no probe
+configuration could soften it. [`runtime.py`](taxcalc-agent-svc/src/taxcalc_agent_svc/runtime.py)
+now opens both lazily behind a lock and a retry, and splits the probes: `/healthz` is liveness and
+reaches nothing; `/readyz` is readiness and is gated on the **checkpointer alone**, because a
+docs-only question routes `retrieval_agent -> synthesis_agent` and touches no tool — refusing that
+traffic because a different dependency is down throws away working capacity.
+
+**The image shipped ~4.7 GB of CUDA libraries to a CPU-only service.** `torch` arrives
+transitively through the W7 D3 reranker, and PyPI's Linux wheel bundles the entire NVIDIA CUDA
+runtime, which a service running on CPU nodes will never load. Measured rather than suspected —
+the macOS virtualenv is 1.2 GB because PyPI's macOS wheel is already CPU-only, while the Linux
+image was **9.19 GB**:
+
+| | image size | `nvidia-*` packages in the lock |
+|---|---|---|
+| unpinned (PyPI default) | 9.19 GB | 43 |
+| PyTorch CPU index, Linux only | **4.48 GB** | **0** |
+
+A 51% reduction, off every pull, every rollout and every image scan. `[[tool.uv.index]]` with
+`explicit = true` so the partial mirror cannot silently serve unrelated packages, and the source
+carries a `sys_platform == 'linux'` marker so macOS keeps PyPI's wheel. `torch` had to be declared
+as a direct dependency for the pin to bind at all — `[tool.uv.sources]` applies only to direct
+dependencies, so without that line the pin resolves in 28 ms and changes nothing, which is exactly
+what it did on the first attempt.
+
 ### Four things measured rather than assumed — each one changed the code
 
 Every one of these produces **no exception on the happy path**, which is why they are recorded

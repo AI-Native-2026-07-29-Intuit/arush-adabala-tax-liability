@@ -92,8 +92,37 @@ def budget_guard(config: RunnableConfig | None) -> BudgetGuard:
     return guard
 
 
+async def open_session(config: RunnableConfig | None) -> Any:
+    """Resolve the request's MCP session, awaiting a provider if one was supplied.
+
+    Two shapes are accepted on purpose, and the flexibility is the point rather than laziness:
+
+    * a **live session**, which is what the tests pass - a stub exposing ``list_tools`` and
+      ``call_tool``, so a unit test of argument shaping needs no transport at all;
+    * a **zero-argument async provider**, which is what the FastAPI app passes -
+      :meth:`taxcalc_agent_svc.runtime.Dependencies.session`, so the connection is opened on the
+      first request that actually needs a tool rather than on every request.
+
+    Without the second shape the app would have to await the MCP session before entering the
+    graph, which reintroduces the eager-connection defect one layer down: a docs-only question
+    routed entirely to ``retrieval_agent`` would fail because a dependency it never touches was
+    unreachable.
+
+    :param config: The LangGraph config passed to the node.
+    :returns: The session.
+    :raises KeyError: when no session or provider was supplied.
+    """
+    candidate = mcp_session(config)
+    if callable(candidate):
+        return await candidate()
+    return candidate
+
+
 def mcp_session(config: RunnableConfig | None) -> Any:
     """Read the request's MCP client session off the LangGraph config.
+
+    Returns the raw value - a session or a provider. Callers that need a usable session should
+    use :func:`open_session`, which resolves both shapes.
 
     Typed as :data:`~typing.Any` rather than ``ClientSession`` on purpose: the api node's tests
     drive it with a stub session exposing ``list_tools`` and ``call_tool``, and requiring the

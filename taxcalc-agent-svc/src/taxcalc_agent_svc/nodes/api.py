@@ -69,7 +69,7 @@ from anthropic.types import MessageParam, ToolParam, ToolResultBlockParam
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 
-from taxcalc_agent_svc.deps import AgentNode, budget_guard, mcp_session
+from taxcalc_agent_svc.deps import AgentNode, budget_guard, open_session
 from taxcalc_agent_svc.nodes._deadline import deadline
 from taxcalc_agent_svc.settings import Settings
 from taxcalc_agent_svc.state import AgentState
@@ -195,7 +195,7 @@ async def _api(
         to ``visited_nodes``.
     :raises BudgetExceeded: when the per-request ceiling is reached mid-loop.
     """
-    session = mcp_session(config)
+    session = await open_session(config)
     guard = budget_guard(config)
 
     # Per-agent header so the W3 D1 llm-proxy emits `api_cost_per_request` as its own CloudWatch

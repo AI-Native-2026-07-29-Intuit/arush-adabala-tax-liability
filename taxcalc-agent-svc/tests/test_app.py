@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from taxcalc_agent_svc import __version__
 from taxcalc_agent_svc.app import create_app
+from taxcalc_agent_svc.runtime import DependencyUnavailable
 from taxcalc_agent_svc.settings import Settings
 
 
@@ -54,6 +55,40 @@ class ScriptedGraph:
         return gen()
 
 
+class StubDeps:
+    """A stand-in for :class:`~taxcalc_agent_svc.runtime.Dependencies`.
+
+    Mirrors only the four members the HTTP layer touches, so a test cannot accidentally depend on
+    holder internals the routes never reach.
+    """
+
+    def __init__(self, graph: Any, *, graph_ready: bool = True, session_ready: bool = True) -> None:
+        """Construct the stub.
+
+        :param graph: The graph to hand back.
+        :param graph_ready: What ``/readyz`` should see for the checkpointer.
+        :param session_ready: What ``/readyz`` should see for the MCP session.
+        """
+        self._graph = graph
+        self.graph_ready = graph_ready
+        self.session_ready = session_ready
+        self.settings = Settings(postgres_url="postgresql://u:p@localhost:1/x")
+
+    async def graph(self) -> Any:
+        """Return the scripted graph.
+
+        :returns: The graph.
+        """
+        return self._graph
+
+    async def session(self) -> Any:
+        """Return a placeholder session.
+
+        :returns: An opaque object; the scripted graph never calls a tool.
+        """
+        return object()
+
+
 class Chunk:
     """A streamed model chunk."""
 
@@ -74,25 +109,26 @@ def client() -> Iterator[TestClient]:
     app = create_app()
     answer = json.dumps({"text": "hi", "citations": [], "confidence": 0.9})
 
+    scripted = ScriptedGraph(
+        [
+            {"event": "on_chat_model_stream", "data": {"chunk": Chunk("hi")}},
+            {
+                "event": "on_chain_end",
+                "name": "synthesis_agent",
+                "data": {"output": {"answer": answer}},
+            },
+        ]
+    )
+
     @contextlib.asynccontextmanager
     async def fake_lifespan(application: FastAPI) -> AsyncIterator[None]:
-        """Fill app state with fakes instead of opening real clients.
+        """Fill app state with a stub dependency holder instead of opening real clients.
 
         :param application: The app.
         :yields: Once, while serving.
         """
         application.state.settings = Settings(postgres_url="postgresql://u:p@localhost:1/x")
-        application.state.session = object()
-        application.state.graph = ScriptedGraph(
-            [
-                {"event": "on_chat_model_stream", "data": {"chunk": Chunk("hi")}},
-                {
-                    "event": "on_chain_end",
-                    "name": "synthesis_agent",
-                    "data": {"output": {"answer": answer}},
-                },
-            ]
-        )
+        application.state.deps = StubDeps(scripted)
         yield
 
     app.router.lifespan_context = fake_lifespan
@@ -152,3 +188,113 @@ def test_an_empty_question_is_rejected(client: TestClient) -> None:
         "/v1/chat/stream", json={"question": "", "tenant_id": "t", "thread_id": "t1"}
     )
     assert resp.status_code == 422
+
+
+def test_readyz_is_gated_on_the_graph_not_the_mcp_session() -> None:
+    """A docs-only question needs no tool, so MCP being down must not take the pod out of service.
+
+    This is the readiness split the deployment rehearsal forced. Gating readiness on every
+    dependency would refuse traffic the service can still answer - which is a self-inflicted
+    outage, and one that fires hardest exactly when a downstream is already struggling.
+    """
+    app = create_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Graph up, MCP down.
+
+        :param application: The app.
+        :yields: Once.
+        """
+        application.state.deps = StubDeps(None, graph_ready=True, session_ready=False)
+        yield
+
+    app.router.lifespan_context = lifespan
+    with TestClient(app) as c:
+        resp = c.get("/readyz")
+    assert resp.status_code == 200
+    assert resp.json() == {"graph": "up", "mcp": "down", "version": __version__}
+
+
+def test_readyz_reports_not_ready_without_a_checkpointer() -> None:
+    """Without the graph no request of any shape can run, so the pod is genuinely not ready."""
+    app = create_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Both down.
+
+        :param application: The app.
+        :yields: Once.
+        """
+        application.state.deps = StubDeps(None, graph_ready=False, session_ready=False)
+        yield
+
+    app.router.lifespan_context = lifespan
+    with TestClient(app) as c:
+        resp = c.get("/readyz")
+    assert resp.status_code == 503
+    assert resp.json()["graph"] == "down"
+
+
+def test_healthz_never_reaches_a_dependency() -> None:
+    """Liveness stays green with everything down.
+
+    A liveness probe that checked downstreams would have Kubernetes RESTART a working pod on a
+    downstream blip - turning a partial outage into a total one.
+    """
+    app = create_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Everything down.
+
+        :param application: The app.
+        :yields: Once.
+        """
+        application.state.deps = StubDeps(None, graph_ready=False, session_ready=False)
+        yield
+
+    app.router.lifespan_context = lifespan
+    with TestClient(app) as c:
+        assert c.get("/healthz").status_code == 200
+
+
+def test_an_unreachable_checkpointer_is_a_503_not_a_500(client: TestClient) -> None:
+    """The request was well-formed and the service is not broken - a dependency is unreachable.
+
+    That distinction is what tells an SRE to look at Postgres rather than at this code, and it is
+    why the handler maps DependencyUnavailable rather than letting it surface as a 500.
+    """
+    app = create_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """A holder whose graph cannot be built.
+
+        :param application: The app.
+        :yields: Once.
+        """
+
+        class Broken(StubDeps):
+            """Raises on graph()."""
+
+            async def graph(self) -> Any:
+                """Fail the way an unreachable Postgres does.
+
+                :raises DependencyUnavailable: always.
+                """
+                raise DependencyUnavailable("checkpointer unavailable: connection refused")
+
+        application.state.deps = Broken(None)
+        yield
+
+    app.router.lifespan_context = lifespan
+    with TestClient(app, raise_server_exceptions=False) as c:
+        resp = c.post(
+            "/v1/chat/stream",
+            json={"question": "q", "tenant_id": "t", "thread_id": "t1"},
+        )
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"]
+    assert resp.json()["error"] == "dependency_unavailable"

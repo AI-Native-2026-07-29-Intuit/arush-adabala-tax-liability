@@ -28,6 +28,11 @@ dependencies = [
     # The W7 D3 sidecar + W7 D4 MCP server as path deps (read-only library reuse):
     "taxcalc-ai",
     "taxcalc-mcp-server",
+    # Declared explicitly ONLY so the CPU index pin below binds. uv applies [tool.uv.sources] to
+    # direct dependencies, and torch arrives transitively through taxcalc-ai's reranker - so
+    # without this line the pin silently does nothing and the CUDA wheels come back. Nothing in
+    # this package imports torch.
+    "torch",
 ]
 
 [project.scripts]
@@ -52,9 +57,27 @@ dev = [
 [tool.uv]
 package = true
 
+# torch arrives transitively, through taxcalc-ai's cross-encoder reranker. On Linux the default
+# PyPI wheel bundles the whole CUDA runtime - and this service runs on CPU nodes and will never
+# see a GPU, so every one of those gigabytes is pulled on every rollout and scanned by every
+# image scanner for nothing. Measured: the image built from the unpinned lock is 9.3 GB, against
+# a 1.2 GB virtualenv on macOS, where PyPI's torch wheel is already CPU-only.
+#
+# `explicit = true` means the index is used ONLY for packages that name it below - without it,
+# every dependency would be resolved against the PyTorch index first, which hosts a partial
+# mirror and would silently change where unrelated packages come from.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
 taxcalc-ai = { path = "../taxcalc-ai", editable = true }
 taxcalc-mcp-server = { path = "../taxcalc-mcp-server", editable = true }
+# Scoped to Linux by marker. macOS gets PyPI's wheel, which is already CPU-only and which the
+# PyTorch CPU index does not publish for every version - pinning it unconditionally would break
+# local development on Apple Silicon to fix a Linux-only problem.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [build-system]
 requires = ["hatchling"]

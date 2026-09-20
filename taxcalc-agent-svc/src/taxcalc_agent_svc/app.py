@@ -1,13 +1,26 @@
 # taxcalc-agent-svc/src/taxcalc_agent_svc/app.py
 """FastAPI surface: the lifespan that owns the shared clients, and the one streaming endpoint.
 
-**One MCP session and one checkpointer pool, opened once, in the lifespan.** Both are expensive
-to establish - the MCP session is an SSE connection plus a protocol handshake, the checkpointer
-is a Postgres connection pool - and both are safe to share across concurrent requests. Opening
-them per request would pay a handshake and a TCP connect on every question asked, and would leak
-both when a request was cancelled mid-flight. What is emphatically *not* shared is the
-:class:`~taxcalc_agent_svc.budgets.BudgetGuard`: the ceiling is per request, and a process-wide
-guard would let a busy minute exhaust one caller's budget with another caller's spend.
+**One MCP session and one checkpointer pool, opened once and shared - but lazily, and not in a
+way that can stop the process from listening.** Both are expensive to establish and safe to
+share; opening them per request would pay a handshake and a TCP connect on every question asked.
+Opening them *eagerly, fatally, in the lifespan* - which is what this module did first - is the
+opposite mistake, and a deployment rehearsal is what surfaced it: a process that exits before it
+listens is ``CrashLoopBackOff``, so a dependency that was briefly unreachable keeps the service
+down long after it returns. :mod:`taxcalc_agent_svc.runtime` holds both behind a lock and a
+retry, and the lifespan's warmup is best-effort.
+
+What is emphatically *not* shared is the :class:`~taxcalc_agent_svc.budgets.BudgetGuard`: the
+ceiling is per request, and a process-wide guard would let a busy minute exhaust one caller's
+budget with another caller's spend.
+
+**Liveness and readiness answer different questions, and are different endpoints.** ``/healthz``
+is liveness: the process is up. It reaches no dependency, because a liveness probe that did
+would have Kubernetes *restart* a working pod whenever a downstream blipped. ``/readyz`` is
+readiness: the graph is compiled, which means the checkpointer is connected, which means a
+request can be served. The MCP session is reported there but does **not** gate it - a docs-only
+question runs ``retrieval_agent -> synthesis_agent`` and touches no tool, so refusing that
+traffic because a different dependency is down would throw away working capacity.
 
 **Errors are mapped by what the caller can do about them.**
 
@@ -33,13 +46,12 @@ from typing import Final
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from mcp import ClientSession
-from mcp.client.sse import sse_client
 from pydantic import BaseModel, ConfigDict, Field
 
 from taxcalc_agent_svc import __version__
 from taxcalc_agent_svc.budgets import BudgetExceeded, BudgetGuard
-from taxcalc_agent_svc.graph import build_taxcalc_agent_graph, run_config
+from taxcalc_agent_svc.graph import run_config
+from taxcalc_agent_svc.runtime import Dependencies, DependencyUnavailable
 from taxcalc_agent_svc.settings import Settings
 from taxcalc_agent_svc.sse import TRACE_HEADER, event_stream
 
@@ -85,30 +97,21 @@ def create_app() -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        """Open the MCP session and the checkpointer at startup; close both at shutdown.
+        """Construct the dependency holder, warm it best-effort, and close it at shutdown.
 
-        ``AsyncExitStack`` rather than nested ``async with`` blocks: the SSE client and the
-        ClientSession are two context managers that must both stay open for the life of the
-        process and be unwound in reverse order at shutdown. The stack does that unwinding
-        correctly even when one of them raises on the way out - which a hand-rolled ``finally``
-        chain reliably does not.
+        **Nothing here can prevent the process from listening.** ``warmup`` swallows a failure to
+        reach either dependency and logs it; the connection is retried on the first request that
+        needs it. That is the whole correction described in the module docstring - the previous
+        version awaited both connections and let either failure propagate out of the lifespan,
+        which under Kubernetes is a pod that never starts rather than one that starts degraded.
 
-        :param application: The app whose state the clients are stashed on.
+        :param application: The app whose state the holder is stashed on.
         :yields: Once, while the service is serving.
         """
         settings = Settings()
-        stack = contextlib.AsyncExitStack()
-
-        read, write = await stack.enter_async_context(sse_client(settings.mcp_sse_url))
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-
-        graph, closer = await build_taxcalc_agent_graph(settings)
-        stack.push_async_exit(closer)
-
+        deps = Dependencies(settings)
         application.state.settings = settings
-        application.state.session = session
-        application.state.graph = graph
+        application.state.deps = deps
         log.info(
             "lifespan.start",
             mcp=settings.mcp_sse_url,
@@ -116,26 +119,52 @@ def create_app() -> FastAPI:
             recursion_limit=settings.recursion_limit,
             cost_ceiling_usd_e5=settings.cost_ceiling_usd_e5,
         )
+        await deps.warmup()
         try:
             yield
         finally:
-            await stack.aclose()
+            await deps.aclose()
             log.info("lifespan.stop")
 
     application = FastAPI(title="taxcalc-agent-svc", version=__version__, lifespan=lifespan)
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
-        """Liveness and readiness probe.
+        """Liveness probe: is this process alive?
 
         Reports the build so an operator looking at a running pod can tell which one answered
-        without shelling into it. Deliberately does NOT call the MCP server or the database: a
-        health check that depends on every downstream turns one dependency's blip into a
-        cascading restart of a service that was working fine.
+        without shelling into it. Deliberately reaches NO dependency. A liveness probe that
+        checked downstreams would have Kubernetes restart a healthy pod whenever one of them
+        blipped - converting a partial outage into a total one, and doing it fastest precisely
+        when the downstream is already struggling.
 
         :returns: The service name and version.
         """
         return {"status": "ok", "service": "taxcalc-agent-svc", "version": __version__}
+
+    @application.get("/readyz")
+    async def readyz(request: Request) -> JSONResponse:
+        """Readiness probe: can this process serve a request?
+
+        Gated on the graph alone, which means on the checkpointer, because without it no request
+        of any shape can run. The MCP session is *reported* but not gated: a docs-only question
+        needs no tool, and taking the pod out of service for traffic it could still answer is a
+        self-inflicted outage.
+
+        Reads cached state rather than attempting to connect. A probe that opened connections
+        would become a source of load every few seconds against a dependency that is, by
+        hypothesis, already unwell.
+
+        :param request: The ASGI request, for the app state the lifespan filled.
+        :returns: 200 when the graph is up, 503 otherwise, with both dependencies' status.
+        """
+        deps: Dependencies = request.app.state.deps
+        body = {
+            "graph": "up" if deps.graph_ready else "down",
+            "mcp": "up" if deps.session_ready else "down",
+            "version": __version__,
+        }
+        return JSONResponse(status_code=200 if deps.graph_ready else 503, content=body)
 
     @application.post("/v1/chat/stream")
     async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
@@ -148,12 +177,17 @@ def create_app() -> FastAPI:
         :param request: The ASGI request, for the app state the lifespan filled.
         :returns: The streaming response.
         """
-        settings: Settings = request.app.state.settings
-        graph = request.app.state.graph
+        deps: Dependencies = request.app.state.deps
+        settings = deps.settings
+        # The graph is required for every request, so it is awaited here and its failure becomes
+        # a 503 before any byte of the stream is written - which is the only point at which a
+        # status code can still be set.
+        graph = await deps.graph()
+        # The MCP session is NOT awaited here. A docs-only question never touches a tool, and
+        # blocking every request on a dependency a third of them do not need would be the eager
+        # lifespan's mistake moved one layer down. The api node resolves it on demand.
         guard = BudgetGuard(settings.cost_ceiling_usd_e5)
-        cfg = run_config(
-            req.thread_id, settings, guard=guard, session=request.app.state.session
-        )
+        cfg = run_config(req.thread_id, settings, guard=guard, session=deps.session)
         stream = event_stream(graph, req.question, req.tenant_id, req.thread_id, cfg)
         return StreamingResponse(
             stream,
@@ -168,6 +202,26 @@ def create_app() -> FastAPI:
                 "X-Accel-Buffering": "no",
                 "Cache-Control": "no-cache",
             },
+        )
+
+    @application.exception_handler(DependencyUnavailable)
+    async def dependency_handler(
+        _request: Request, exc: DependencyUnavailable
+    ) -> JSONResponse:
+        """Map an unreachable dependency to 503 with ``Retry-After``.
+
+        503 and not 500: the request was well-formed and the service is not broken - something it
+        depends on is briefly unreachable, and the same request may well succeed shortly. That
+        distinction is what tells an SRE to look at the dependency rather than at this code.
+
+        :param _request: Unused.
+        :param exc: The failure.
+        :returns: The 503 response.
+        """
+        return JSONResponse(
+            status_code=503,
+            content={"error": "dependency_unavailable", "detail": str(exc)},
+            headers={"Retry-After": RETRY_AFTER_S},
         )
 
     @application.exception_handler(BudgetExceeded)
