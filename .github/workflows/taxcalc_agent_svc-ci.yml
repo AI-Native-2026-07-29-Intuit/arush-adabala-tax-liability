@@ -208,15 +208,20 @@ jobs:
           fi
           echo "no plaintext LangSmith keys found"
 
-      - name: lint the Dockerfile and the CloudFormation budget
+      - name: lint the Dockerfile and verify the CloudFormation budget
         working-directory: taxcalc-agent-svc
         run: |
           docker build --check -f Dockerfile ..
           uv tool install cfn-lint
-          # The BudgetsAction schema spells ActionThreshold and Subscribers differently from the
-          # sibling Budget resource. Both mismatches were caught here rather than as a stack
-          # rollback, which is the whole argument for linting infrastructure in the fast tier.
-          uv tool run cfn-lint cfn/agent-svc-budget.yaml
+          # Validates the budget template against AWS's OWN published resource schemas - the
+          # artefacts CloudFormation validates against server-side - and then proves that gate
+          # can fail, by asserting it rejects the four wrong property names this template
+          # originally had. A gate nobody has seen fail is a gate nobody knows works.
+          #
+          # FLOCI is deliberately NOT set here. The emulator implements no Budgets service at
+          # all, so it reports CREATE_COMPLETE for the broken template too - a convincing green
+          # tick that means nothing. See the script's header for the measurements.
+          ./scripts/verify-budget-stack.sh
 
       - name: the console script is declared and the wheel builds
         # A packaging mistake breaks the container's ENTRYPOINT while every test still passes.

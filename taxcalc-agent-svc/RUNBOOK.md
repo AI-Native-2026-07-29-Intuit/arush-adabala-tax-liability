@@ -84,6 +84,13 @@ aws budgets describe-budget-actions-for-budget --budget-name taxcalc-agent-anthr
 aws iam list-attached-role-policies --role-name taxcalc-agent-svc-role   # DenyLlmProxyInvoke present
 ```
 
+**Before trusting this section: the template is schema-verified, the *behaviour* is not.**
+`scripts/verify-budget-stack.sh` validates `cfn/agent-svc-budget.yaml` against AWS's published
+resource schemas and proves that gate can fail. Nothing local can show the action actually fires
+or that the DENY policy stops `llm-proxy` — the floci emulator implements no Budgets service and
+reports `CREATE_COMPLETE` even for a template real CloudFormation rejects. So the first time this
+alarm is real, **verify the policy actually attached** before assuming the runbook below worked.
+
 **Act.** Decide whether the spend was legitimate before restoring service. If it was a runaway,
 find it first — the per-request ceiling should have caught a single runaway request, so a monthly
 breach with no per-request breach means *volume*, not one bad request. To restore:

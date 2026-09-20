@@ -2698,6 +2698,53 @@ Argo CD's poll interval — a revert pushed just after a poll waits out the full
 to rely on auto-sync during an incident: push the revert, then `--hard-refresh` and `sync` rather
 than waiting five minutes for a tool to notice.
 
+### The BudgetAction, and why the emulator that "verified" it proves nothing
+
+The CloudFormation budget is the one artefact that cannot be exercised locally — firing it needs
+an AWS account and a month of real spend. The obvious substitute is
+[floci](https://github.com/floci-io/floci), the local AWS emulator this repo already uses for
+exactly this gap (W5 D4, W6 D1). **It is worthless here, and worse than worthless because it
+looks convincing.** Measured against floci 2.0.1:
+
+| probe | floci |
+|---|---|
+| `aws budgets describe-budgets` | `UnknownOperationException` |
+| `aws budgets describe-budget-actions-for-budget` | `UnknownOperationException` |
+| `cloudformation deploy` of the committed template | **`CREATE_COMPLETE`** |
+| `cloudformation deploy` of a template with the four property names `cfn-lint` rejects | **`CREATE_COMPLETE`** |
+| `cloudformation validate-template` on that broken template | accepted, silently |
+
+floci implements no Budgets service, so its CloudFormation treats `AWS::Budgets::*` as an opaque
+passthrough and reports success for anything. A green floci deploy proves the template is
+well-formed YAML whose parameters, `!Ref`s, `Outputs` and `DependsOn` resolve — and **nothing**
+about whether the resources are valid. That is this repo's recurring lesson in its third
+instance: *floci's most confident answer was its wrongest.*
+
+So the authority is AWS's **own published resource provider schemas**, the artefacts
+CloudFormation validates against server-side, which `cfn-lint` bundles — the same move as putting
+the W5 D4 template through AWS's `samtranslator` offline when floci disagreed. Read straight out
+of that schema:
+
+```
+AWS::Budgets::BudgetsAction
+  ActionThreshold : required ['Value','Type'],   additionalProperties: false
+  Subscriber      : required ['Type','Address'], additionalProperties: false
+```
+
+while the sibling `AWS::Budgets::Budget` spells the same concept `SubscriptionType` — which is
+precisely the mistake the template made in four places.
+
+[`scripts/verify-budget-stack.sh`](taxcalc-agent-svc/scripts/verify-budget-stack.sh) encodes
+this and runs in the PR tier. Its second step is the one that matters: it **reintroduces the
+four wrong names and asserts `cfn-lint` rejects them**, so the gate is proven able to fail rather
+than merely observed passing. It also fails loudly if the broken variant ever comes out identical
+to the template, since a negative control that has silently stopped breaking anything is the
+worst kind of green.
+
+What remains unverified, and is stated in the script's own output rather than buried: that AWS
+accepts the stack, that the action fires at 100%, and that the DENY policy actually stops
+`llm-proxy` invocation.
+
 ### Four things measured rather than assumed — each one changed the code
 
 Every one of these produces **no exception on the happy path**, which is why they are recorded
