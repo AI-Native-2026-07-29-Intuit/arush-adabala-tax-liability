@@ -58,3 +58,8 @@ __pycache__/
 .env
 taxcalc-agent-svc/.venv/
 taxcalc-agent-svc/.coverage
+
+# PR bodies are scratch: the PR itself is the durable copy, and they quote failure messages
+# verbatim - including, once, the very key prefix the secret-scan gates grep for, which is how a
+# committed one turned two CI tiers red. Same convention as taxcalc-mcp-server/PR_BODY.md.
+*/PR_BODY.md
