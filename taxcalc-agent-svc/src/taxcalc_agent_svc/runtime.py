@@ -54,6 +54,21 @@ log: Final[structlog.stdlib.BoundLogger] = structlog.get_logger("taxcalc-agent-s
 #: request that hangs until the client times out.
 OPEN_ATTEMPTS: Final[int] = 3
 
+#: Seconds between background attempts to (re)connect the checkpointer.
+#:
+#: **This loop exists because the first version of this module deadlocked**, and the deadlock was
+#: only visible once the service was deployed against a Postgres that started *after* it.
+#: ``/readyz`` deliberately does not open connections - a probe that did would hammer a
+#: dependency every few seconds precisely when it is already unwell - so the graph was only ever
+#: opened by an arriving request. But no request can arrive: Kubernetes keeps an unready pod out
+#: of the Service's endpoints. Readiness waited on traffic, traffic waited on readiness, and the
+#: pod sat at 503 indefinitely with Postgres healthy beside it.
+#:
+#: The fix is a background retry owned by the lifespan, which keeps the probe read-only and
+#: cheap while still converging. Ten seconds because that is well inside a typical rollout
+#: window and far outside anything that would look like load.
+RECONNECT_INTERVAL_S: Final[float] = 10.0
+
 
 class DependencyUnavailable(Exception):
     """Raised when a lazily-opened dependency could not be established.
@@ -197,6 +212,29 @@ class Dependencies:
                 await opener()
             except DependencyUnavailable as exc:
                 log.warning("warmup.deferred", dependency=name, error=str(exc))
+
+    async def reconnect_forever(self) -> None:
+        """Keep trying to open the checkpointer until it succeeds, then stop.
+
+        Owned by the FastAPI lifespan, which cancels it at shutdown. Runs only until the graph is
+        up: once ``/readyz`` can pass, a further failure is a *request's* problem and is reported
+        to that caller, rather than being retried silently in the background forever.
+
+        Exits immediately when the graph is already up, which is the normal case - warmup usually
+        succeeds and this task is then a no-op.
+
+        :returns: Nothing.
+        """
+        while self._graph is None:
+            try:
+                await self.graph()
+            except DependencyUnavailable:
+                await asyncio.sleep(RECONNECT_INTERVAL_S)
+            except asyncio.CancelledError:
+                # Shutdown. Re-raised rather than swallowed: swallowing it would leave the task
+                # un-cancellable and hang the lifespan's shutdown.
+                raise
+        log.info("reconnect.settled")
 
     async def aclose(self) -> None:
         """Unwind everything opened here, in reverse order.

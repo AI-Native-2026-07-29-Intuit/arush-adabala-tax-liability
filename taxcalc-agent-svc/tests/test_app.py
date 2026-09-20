@@ -13,6 +13,7 @@ be testing three other systems and reporting the result against this one.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -23,6 +24,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from taxcalc_agent_svc import __version__
+from taxcalc_agent_svc import runtime as runtime_mod
 from taxcalc_agent_svc.app import create_app
 from taxcalc_agent_svc.runtime import DependencyUnavailable
 from taxcalc_agent_svc.settings import Settings
@@ -298,3 +300,75 @@ def test_an_unreachable_checkpointer_is_a_503_not_a_500(client: TestClient) -> N
     assert resp.status_code == 503
     assert resp.headers["retry-after"]
     assert resp.json()["error"] == "dependency_unavailable"
+
+
+async def test_the_reconnect_loop_converges_once_the_dependency_returns() -> None:
+    """A checkpointer that is down at startup and up a moment later ends with a ready pod.
+
+    **This is the deadlock test.** ``/readyz`` deliberately does not open connections, so without
+    a background retry the graph is only ever opened by an arriving request - and Kubernetes keeps
+    an unready pod out of the Service's endpoints, so no request can arrive. Readiness waits on
+    traffic, traffic waits on readiness. Observed in a real cluster before this loop existed:
+    Postgres healthy, the pod answering 503 indefinitely.
+    """
+    from taxcalc_agent_svc.runtime import Dependencies, DependencyUnavailable
+
+    deps = Dependencies(Settings(postgres_url="postgresql://u:p@localhost:1/x"))
+    attempts = 0
+
+    async def flaky() -> Any:
+        """Fail once, then succeed - a dependency that started late.
+
+        :returns: A stand-in graph.
+        :raises DependencyUnavailable: on the first call.
+        """
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DependencyUnavailable("connection refused")
+        deps._graph = object()
+        return deps._graph
+
+    deps.graph = flaky  # type: ignore[method-assign]
+    # The interval is shortened through the module object so the test does not sit through a real
+    # ten-second backoff; monkeypatch restores it even if the assertion below raises.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(runtime_mod, "RECONNECT_INTERVAL_S", 0.01)
+    try:
+        await asyncio.wait_for(deps.reconnect_forever(), timeout=5)
+    finally:
+        monkeypatch.undo()
+
+    assert attempts >= 2
+    assert deps.graph_ready
+
+
+async def test_the_reconnect_loop_is_a_noop_when_the_graph_is_already_up() -> None:
+    """The normal case: warmup succeeded, so the background task exits immediately."""
+    from taxcalc_agent_svc.runtime import Dependencies
+
+    deps = Dependencies(Settings(postgres_url="postgresql://u:p@localhost:1/x"))
+    deps._graph = object()
+    await asyncio.wait_for(deps.reconnect_forever(), timeout=2)
+    assert deps.graph_ready
+
+
+async def test_the_reconnect_loop_is_cancellable() -> None:
+    """Shutdown must not hang on a dependency that never returns."""
+    from taxcalc_agent_svc.runtime import Dependencies, DependencyUnavailable
+
+    deps = Dependencies(Settings(postgres_url="postgresql://u:p@localhost:1/x"))
+
+    async def never() -> Any:
+        """Always fail.
+
+        :raises DependencyUnavailable: always.
+        """
+        raise DependencyUnavailable("still down")
+
+    deps.graph = never  # type: ignore[method-assign]
+    task = asyncio.create_task(deps.reconnect_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

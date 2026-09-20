@@ -134,10 +134,55 @@ kubectl -n taxcalc-svc get pods -l app=taxcalc-agent-svc \
 **Roll forward rather than back when the change is a prompt or a threshold**: those are
 config, and a revert takes the code with them.
 
-> **Rehearsal record.** Fill this in the first time it is exercised against prod, in the PR that
-> does it: reverted SHA, rolled-back-to SHA, wall-clock time for auto-sync to complete, and the
-> `kubectl` output above showing the prior image. A rollback procedure nobody has run is a
-> procedure nobody knows works — and the first attempt must not be during an incident.
+### Rehearsal record — 2026-09-20, k3d lab cluster
+
+Rehearsed end to end against a real Argo CD (the W6 D2 instance), with the Application differing
+from [`argo-apps/taxcalc-agent-svc.yaml`](argo-apps/taxcalc-agent-svc.yaml) only in `repoURL`
+(an in-cluster git daemon rather than the GitHub config repo) and `project`. Auto-sync, prune,
+self-heal and `ApplyOutOfSyncOnly` are the committed values.
+
+| step | commit | wall clock |
+|---|---|---|
+| baseline, pods on `v1` | `46e836d` | — |
+| roll forward: CI-style tag bump `v1` → `v2` | `922b3e3` | **65 s** to pods on `v2` |
+| **roll back: `git revert` of the bump** | `e6dd102` | **310 s** to pods on `v1` |
+
+**Reverted SHA:** `922b3e3` · **rolled back to:** `v1`, via revert commit `e6dd102`
+**Verification (pod labels carry the prior image):**
+
+```
+$ kubectl -n taxcalc-svc get pods -l app=taxcalc-agent-svc \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+taxcalc-agent-svc-6578c7f79b-z8jt4	taxcalc-agent-svc:v1
+
+$ kubectl -n argocd get app taxcalc-agent-svc
+NAME                SYNC STATUS   HEALTH STATUS
+taxcalc-agent-svc   Synced        Healthy
+# synced revision: e6dd102aade24c26f2246ce3262814f96b6f7747
+```
+
+**The rollback took nearly five times as long as the roll-forward, and that asymmetry is the
+finding.** Both are one commit and one image swap; the difference is entirely Argo CD's polling.
+A bump lands quickly when it happens to arrive just before a poll; a revert pushed just *after*
+one waits out the full `timeout.reconciliation` (180 s by default) before the repo-server even
+notices the commit, plus rollout time. Measured here: 65 s versus 310 s.
+
+**So do not rely on auto-sync during an incident.** Push the revert, then force the refresh
+rather than waiting for it:
+
+```bash
+argocd app get taxcalc-agent-svc --hard-refresh    # skip the poll interval
+argocd app sync taxcalc-agent-svc                  # and the sync interval
+```
+
+Five minutes of unnecessary outage is the difference between a rollback that feels like a tool
+and one that feels like a hostage situation. The numbers above are the *unassisted* path, which
+is what you get if you push and walk away.
+
+**Both images in this rehearsal are the same build under two tags.** That is deliberate: the
+claim being tested is the deploy mechanism — bump, reconcile, revert, verify — not an
+application behaviour change, and using one build keeps the timings about Argo CD rather than
+about container startup differences.
 
 ---
 

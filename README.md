@@ -2655,6 +2655,49 @@ as a direct dependency for the pin to bind at all — `[tool.uv.sources]` applie
 dependencies, so without that line the pin resolves in 28 ms and changes nothing, which is exactly
 what it did on the first attempt.
 
+### The deployment rehearsal, and the deadlock it found
+
+Both GitOps claims were exercised against a real Argo CD rather than asserted. The Application
+deployed differs from [the committed one](taxcalc-agent-svc/argo-apps/taxcalc-agent-svc.yaml)
+only in `repoURL` and `project`; auto-sync, prune, self-heal and `ApplyOutOfSyncOnly` are as
+committed.
+
+```
+$ kubectl -n argocd get app taxcalc-agent-svc
+NAME                SYNC STATUS   HEALTH STATUS
+taxcalc-agent-svc   Synced        Healthy
+
+$ kubectl -n taxcalc-svc exec deploy/taxcalc-agent-svc -- ... /healthz /readyz
+/healthz -> 200 {'status': 'ok', 'service': 'taxcalc-agent-svc', 'version': '0.1.0'}
+/readyz  -> 200 {'graph': 'up', 'mcp': 'down', 'version': '0.1.0'}
+```
+
+That second line is the readiness split working in production conditions: **the pod is Ready
+while the MCP server is unreachable**, because a docs-only question needs no tool.
+
+**And the deployment found a deadlock in the fix above.** `/readyz` deliberately does not open
+connections — a probe that did would hammer a dependency every few seconds precisely when it is
+already unwell — so the graph was only ever opened by an arriving request. But Kubernetes keeps
+an unready pod out of the Service's endpoints, so no request can arrive. Readiness waited on
+traffic, traffic waited on readiness, and the pod sat at 503 indefinitely with Postgres healthy
+beside it. The fix is a background retry owned by the lifespan, which keeps the probe read-only
+and still converges; `tests/test_app.py` pins it with a dependency that fails once and then
+succeeds.
+
+**Rollback, rehearsed and timed** — full record in
+[`RUNBOOK.md`](taxcalc-agent-svc/RUNBOOK.md#rehearsal-record--2026-09-20-k3d-lab-cluster):
+
+| step | commit | wall clock |
+|---|---|---|
+| roll forward: CI-style tag bump `v1` → `v2` | `922b3e3` | **65 s** |
+| roll back: `git revert` of the bump | `e6dd102` | **310 s** |
+
+The asymmetry is the finding. Both are one commit and one image swap; the difference is entirely
+Argo CD's poll interval — a revert pushed just after a poll waits out the full 180 s
+`timeout.reconciliation` before the repo-server even sees the commit. So the runbook now says not
+to rely on auto-sync during an incident: push the revert, then `--hard-refresh` and `sync` rather
+than waiting five minutes for a tool to notice.
+
 ### Four things measured rather than assumed — each one changed the code
 
 Every one of these produces **no exception on the happy path**, which is why they are recorded

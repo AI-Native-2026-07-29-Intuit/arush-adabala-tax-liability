@@ -39,6 +39,7 @@ window before the first byte, where a status code can still be set.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from typing import Final
@@ -120,9 +121,21 @@ def create_app() -> FastAPI:
             cost_ceiling_usd_e5=settings.cost_ceiling_usd_e5,
         )
         await deps.warmup()
+        # A background retry for the checkpointer, and it is not an optimisation - without it the
+        # service deadlocks. /readyz does not open connections by design, so the graph would only
+        # ever be opened by an arriving request; but Kubernetes keeps an unready pod out of the
+        # Service endpoints, so no request can arrive. Readiness waits on traffic, traffic waits
+        # on readiness. Observed in the cluster: Postgres healthy, the pod at 503 forever.
+        reconnect = asyncio.create_task(deps.reconnect_forever())
         try:
             yield
         finally:
+            reconnect.cancel()
+            # Awaited, not just cancelled: cancel() only *requests* cancellation, and a lifespan
+            # that returned here would leave the task to be reaped at interpreter shutdown with
+            # a "Task was destroyed but it is pending" warning - and, worse, mid-connection.
+            with contextlib.suppress(asyncio.CancelledError):
+                await reconnect
             await deps.aclose()
             log.info("lifespan.stop")
 
