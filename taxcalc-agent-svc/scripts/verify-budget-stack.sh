@@ -76,20 +76,38 @@ fi
 echo "   OK: cfn-lint rejects the broken variant, so step 1 is a real gate"
 
 echo
-echo "== 3. what is NOT verified here, and cannot be =="
+echo "== 3. the cap is configured to fire, and denies exactly what it should =="
+# Reproduces IAM's decision procedure offline - an explicit Deny beats any Allow - because no
+# emulator evaluates policy. floci returns UnsupportedOperation for simulate-custom-policy, and
+# the W6 D1 experiment recorded in scripts/oidc-trust-simulate.py showed it issuing credentials
+# for a FORGED token, i.e. never reading the trust policy at all.
+if command -v uv >/dev/null 2>&1; then
+  uv run --project . python scripts/simulate_budget_deny.py
+else
+  python3 scripts/simulate_budget_deny.py
+fi
+
+echo
+echo "== 4. what is NOT verified here, and cannot be =="
 cat <<'EOF'
-   - That AWS accepts the stack. Only a real account can answer that.
-   - That the BudgetAction FIRES at 100% of budget, and that the DENY policy it attaches
-     actually stops llm-proxy invocation. That needs an account and a month of real spend;
-     there is no local path to it, emulated or otherwise.
-   - That BudgetsActionRoleArn / DenyPolicyArn / ServiceRoleName exist in the target account.
-     They are template Parameters, so this file cannot know.
-   See RUNBOOK.md "BudgetAction fired" for the on-call procedure that assumes it does.
+   - That AWS accepts the stack. Only a real account can answer that; the schema check above is
+     the closest offline equivalent.
+   - That the Budgets SERVICE fires the action at 100%. Step 3 checks the configuration that
+     decides whether it would - threshold, approval model, notification type, action type - but
+     AWS's own behaviour is AWS's to guarantee.
+   - That the account's SCPs or permission boundaries do not alter the decision.
+   - That BudgetsActionRoleArn / ServiceRoleName exist in the target account. They are template
+     Parameters, so this file cannot know.
+   AND THE ONE THAT MATTERS MOST: the agent calls api.anthropic.com DIRECTLY, so its model spend
+   never crosses an AWS-controlled surface. The execute-api deny is inert until that traffic is
+   routed through the W3 D1 proxy; today the enforceable statement is the Secrets Manager one,
+   which stops the key being re-read rather than stopping a call in flight. See the template
+   header and RUNBOOK.md "BudgetAction fired".
 EOF
 
 if [ "${FLOCI:-0}" = "1" ]; then
   echo
-  echo "== 4. floci: stack lifecycle only (it validates NO Budgets property - see the header) =="
+  echo "== 5. floci: stack lifecycle only (it validates NO Budgets property - see the header) =="
   export AWS_ENDPOINT_URL="${AWS_ENDPOINT_URL:-http://localhost:4566}"
   export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
   export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"

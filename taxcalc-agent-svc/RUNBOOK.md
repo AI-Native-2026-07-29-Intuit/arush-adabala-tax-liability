@@ -84,19 +84,34 @@ aws budgets describe-budget-actions-for-budget --budget-name taxcalc-agent-anthr
 aws iam list-attached-role-policies --role-name taxcalc-agent-svc-role   # DenyLlmProxyInvoke present
 ```
 
-**Before trusting this section: the template is schema-verified, the *behaviour* is not.**
-`scripts/verify-budget-stack.sh` validates `cfn/agent-svc-budget.yaml` against AWS's published
-resource schemas and proves that gate can fail. Nothing local can show the action actually fires
-or that the DENY policy stops `llm-proxy` — the floci emulator implements no Budgets service and
-reports `CREATE_COMPLETE` even for a template real CloudFormation rejects. So the first time this
-alarm is real, **verify the policy actually attached** before assuming the runbook below worked.
+**What the cap can and cannot stop — read this before the first real firing.** The agent calls
+`api.anthropic.com` **directly**, so no IAM policy can block a call in flight; AWS controls the
+*key*, not the traffic. `DenyLlmSpendPolicy` therefore denies
+`secretsmanager:GetSecretValue` on the Anthropic secret, which means External Secrets Operator
+cannot refresh it and no restarted or newly-scheduled pod obtains one. **A pod already running
+with the key in memory keeps spending** — that is what the per-request `BudgetGuard` and
+`recursion_limit` are for. If you need spend to stop *now*, scale the Deployment to zero or
+rotate the key; the BudgetAction alone will not do it.
+
+`scripts/verify-budget-stack.sh` checks the template against AWS's published schemas, asserts the
+action is configured to fire (100% / ACTUAL / AUTOMATIC / APPLY_IAM_POLICY), and evaluates the
+policy's decisions offline — each with a negative control. What it cannot check is AWS's own
+behaviour, so the first time this alarm is real, **verify the policy actually attached** rather
+than assuming it did.
 
 **Act.** Decide whether the spend was legitimate before restoring service. If it was a runaway,
 find it first — the per-request ceiling should have caught a single runaway request, so a monthly
 breach with no per-request breach means *volume*, not one bad request. To restore:
 ```bash
+# Confirm it actually attached before concluding the cap worked:
+aws iam list-attached-role-policies --role-name taxcalc-agent-svc-role
+
 aws iam detach-role-policy --role-name taxcalc-agent-svc-role \
   --policy-arn arn:aws:iam::<acct>:policy/DenyLlmProxyInvoke
+
+# ESO will not re-sync the key until its next refresh interval; restart the deployment to pick
+# it up rather than waiting, since pods that never had the key stay broken.
+kubectl -n taxcalc-svc rollout restart deploy/taxcalc-agent-svc
 ```
 Then raise `MonthlyBudgetUsd` in `cfn/agent-svc-budget.yaml` through a reviewed change — the
 BudgetAction will re-attach on the next evaluation otherwise, and you will be doing this again in

@@ -2741,9 +2741,48 @@ than merely observed passing. It also fails loudly if the broken variant ever co
 to the template, since a negative control that has silently stopped breaking anything is the
 worst kind of green.
 
-What remains unverified, and is stated in the script's own output rather than buried: that AWS
-accepts the stack, that the action fires at 100%, and that the DENY policy actually stops
-`llm-proxy` invocation.
+**And the reason nothing could verify the DENY policy: it did not exist.** The template
+referenced `arn:aws:iam::123456789012:policy/DenyLlmProxyInvoke` as a parameter default, and that
+policy document was nowhere in this repository — so the hard cap pointed at something nobody had
+written, let alone reviewed. It is now an `AWS::IAM::ManagedPolicy` in the template, which makes
+it a reviewable artefact and makes its decision computable.
+
+**Which surfaced the finding that matters more than any of this.** The agent calls
+`api.anthropic.com` **directly** — `AsyncAnthropic(api_key=...)` in all three node bodies, no base
+URL override — so its model spend never crosses an AWS-controlled surface, and *no IAM policy can
+block an outbound call to a third party*. A cap denying `execute-api:Invoke` on the llm-proxy was
+guarding a path this service does not use. What AWS does control is the **key**: ESO reads it from
+Secrets Manager under the agent's IRSA role, so the enforceable statement is
+`secretsmanager:GetSecretValue`, which stops any restarted or newly-scheduled pod from obtaining
+one. A pod already running keeps spending — which is not a gap in the policy but the reason the
+in-process `BudgetGuard` exists.
+
+[`scripts/simulate_budget_deny.py`](taxcalc-agent-svc/scripts/simulate_budget_deny.py) evaluates
+the decision offline, following the precedent of
+[`scripts/oidc-trust-simulate.py`](scripts/oidc-trust-simulate.py) — reproduce IAM's procedure
+rather than mock it, because *an emulator does not evaluate policy at all*. floci answers
+`UnsupportedOperation` for `simulate-custom-policy`, and the W6 D1 experiment caught it issuing
+working credentials for a **forged** token. Five decisions, three of them negative controls:
+
+```
+== the BudgetAction is configured as a cap, not as a notification ==
+  [ok ] threshold 100% ACTUAL, AUTOMATIC approval, APPLY_IAM_POLICY,
+        attaching the policy this template itself defines
+== the attached policy's decisions ==
+  [ok ] secretsmanager:GetSecretValue -> Deny       THE cap
+  [ok ] execute-api:Invoke            -> Deny       the proxy path, once routed
+  [ok ] secretsmanager:GetSecretValue -> NotDenied  (unrelated secret still readable)
+  [ok ] sqs:ReceiveMessage            -> NotDenied  (unrelated services keep working)
+  [ok ] secretsmanager:DescribeSecret -> NotDenied  (scoped to the VALUE, not metadata)
+```
+
+Both new gates were proven able to fail before being trusted: flipping `ApprovalModel` to
+`MANUAL` reports *"the cap would wait for a human and is therefore advisory"*, and widening the
+deny to `secretsmanager:*` trips the metadata negative control.
+
+What genuinely remains unverified, printed by the script rather than buried: that AWS accepts the
+stack, that the Budgets **service** fires at 100% (the *configuration* that decides whether it
+would is now asserted), and that account SCPs do not alter the decision.
 
 ### Four things measured rather than assumed — each one changed the code
 

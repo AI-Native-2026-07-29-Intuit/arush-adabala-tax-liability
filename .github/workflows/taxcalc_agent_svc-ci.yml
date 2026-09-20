@@ -218,9 +218,14 @@ jobs:
           # can fail, by asserting it rejects the four wrong property names this template
           # originally had. A gate nobody has seen fail is a gate nobody knows works.
           #
-          # FLOCI is deliberately NOT set here. The emulator implements no Budgets service at
-          # all, so it reports CREATE_COMPLETE for the broken template too - a convincing green
-          # tick that means nothing. See the script's header for the measurements.
+          # It also evaluates the attached DENY policy's decisions offline, because no emulator
+          # evaluates policy: floci answers UnsupportedOperation for simulate-custom-policy, and
+          # the W6 D1 experiment found it issuing credentials for a FORGED token - i.e. never
+          # reading the trust policy at all.
+          #
+          # FLOCI is deliberately NOT set here. The emulator implements no Budgets service, so it
+          # reports CREATE_COMPLETE for the broken template too - a convincing green tick that
+          # means nothing. See the script's header for the measurements.
           ./scripts/verify-budget-stack.sh
 
       - name: the console script is declared and the wheel builds

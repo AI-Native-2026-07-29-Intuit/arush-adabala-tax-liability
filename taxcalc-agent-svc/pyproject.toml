@@ -136,6 +136,11 @@ select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20", "SLF", "S"]
 # UI, which is the one place anyone reads it.
 "src/taxcalc_agent_svc/scripts/*.py" = ["T20"]
 "evals/*.py" = ["T20"]
+# The infra verification entrypoints, same reasoning as the packaged scripts above: they report
+# a verdict on stdout and exit with a status code, so a gate whose output only reached a log
+# handler would be invisible in the Actions UI. S105 is for local variables holding example
+# Secrets Manager ARNs - names containing "secret" that are ARNs, not credentials.
+"scripts/*.py" = ["T20", "S105"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"
