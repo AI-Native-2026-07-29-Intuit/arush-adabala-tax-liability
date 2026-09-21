@@ -49,6 +49,16 @@ that the stage needs a GPU or a dedicated inference server to pay for itself - w
 the decision it exists to inform. Lowering the ambition to whatever CPU happens to manage would
 hide that.
 
+**Two backends, one call site, chosen by the ``RERANKER`` environment variable.**
+:func:`rerank_candidates` is the pipeline's only rerank entry point; it dispatches to
+:func:`bge_rerank` (the local cross-encoder described above) or :func:`cohere_rerank` (hosted
+``rerank-3.5``). The two are signature- and contract-compatible on purpose - same tuple shape, same
+soft-failure semantics, same counters - so the choice is genuinely a choice and not a fork in the
+pipeline. The trade is: bge costs 1.1 GB of resident weights, a CPU forward pass per candidate and
+a deadline it can only measure after the fact; Cohere costs a network hop and per-query billing and
+buys a deadline that actually cancels. An unrecognised value raises rather than defaulting - see
+:func:`resolve_reranker` for why that is the opposite of the neighbouring stage flags.
+
 **Input length is capped by tokens, not by document count.** ``max_length=256`` on the model
 plus a character slice on each passage: a cross-encoder's cost is quadratic in sequence length,
 so a single 8 KB chunk costs more than thirty short ones. Capping the candidate *count* alone
@@ -58,9 +68,11 @@ leaves the latency budget at the mercy of one long document.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Final
 
+import httpx
 import numpy as np
 from langsmith import get_current_run_tree, traceable
 from numpy.typing import NDArray
@@ -73,6 +85,36 @@ _LOG: Final[logging.Logger] = logging.getLogger("taxcalc_ai.rerank")
 #: The cross-encoder. A reranker, not an embedder: it consumes ``(query, passage)`` pairs and
 #: emits a scalar relevance score, and it has no usable vector output at all.
 RERANKER_MODEL: Final[str] = "BAAI/bge-reranker-base"
+
+#: Environment variable choosing which reranker the pipeline uses. Unprefixed on purpose, which
+#: is the one deviation from the ``RAG_USE_*`` / ``TAXCALC_*`` naming around it: three processes
+#: read this one decision - this sidecar, the W7 D4 MCP server that embeds it, and the W7 D5 agent
+#: service that sets it - and a per-service prefix would make one decision into three variables
+#: that have to be kept equal by hand. That is precisely the failure this constant closes: the
+#: agent service used to export ``TAXCALC_AI_RERANKER``, nothing here read it, and setting it to
+#: Cohere silently changed nothing at all.
+RERANKER_ENV: Final[str] = "RERANKER"
+
+#: The two accepted values of :data:`RERANKER_ENV`. Short tokens rather than model ids, because
+#: the model id is each backend's implementation detail - Cohere's moves with their releases, and
+#: the local one is a HuggingFace path - while the decision an operator actually makes is "local
+#: encoder or hosted API".
+RERANKER_BGE: Final[str] = "bge"
+RERANKER_COHERE: Final[str] = "cohere"
+
+#: Cohere's reranker, pinned to an exact model rather than a moving alias: a hosted model that
+#: changes under this repository's pinned RAGAS floors turns a vendor release into a CI failure
+#: nobody made and nobody can bisect.
+COHERE_RERANK_MODEL: Final[str] = "rerank-3.5"
+
+#: Cohere's rerank endpoint. v2, which takes ``documents`` as plain strings and returns
+#: ``{index, relevance_score}`` - v1 took a ``documents`` list of objects and is deprecated.
+COHERE_RERANK_URL: Final[str] = "https://api.cohere.com/v2/rerank"
+
+#: Cohere credential. Read straight from the environment rather than threaded through this
+#: module's signatures, for the same reason the pipeline's other clients are: the caller that
+#: selects a backend should not also have to know what that backend authenticates with.
+COHERE_API_KEY_ENV: Final[str] = "COHERE_API_KEY"
 
 #: Joint sequence length the reranker truncates pairs to. Cost is quadratic in this number.
 RERANKER_MAX_LENGTH: Final[int] = 256
@@ -293,3 +335,187 @@ def bge_rerank(
         },
     )
     return [(chunk_id, text, float(score)) for (chunk_id, text, _), score in ranked[:top_k]], False
+
+
+def resolve_reranker(name: str | None = None) -> str:
+    """Normalise a reranker choice to :data:`RERANKER_BGE` or :data:`RERANKER_COHERE`.
+
+    Model ids are accepted alongside the short tokens so that an operator who sets
+    ``RERANKER=rerank-3.5`` gets what they asked for rather than an error about a name that is
+    obviously the thing they meant.
+
+    **An unknown value raises, and that is the opposite of the neighbouring**
+    :func:`~taxcalc_ai.rag.flag_from_env` **- deliberately.** A misspelled ``RAG_USE_RERANK``
+    leaves the pipeline in its intended configuration, so defaulting is harmless there. A
+    misspelled reranker name has no harmless default: silently landing on the local encoder while
+    the operator believes they are paying Cohere is the exact class of bug this whole function
+    exists to remove, and it is invisible in every metric either backend emits. The agent service
+    validates its own value at boot (``Settings.reranker`` is a ``Literal``), so a typo there never
+    reaches a request; reaching this raise means someone set the variable on a process directly.
+
+    :param name: An explicit choice, or ``None`` to read :data:`RERANKER_ENV`.
+    :returns: :data:`RERANKER_BGE` or :data:`RERANKER_COHERE`.
+    :raises ValueError: on any other value.
+    """
+    raw = (name if name is not None else os.environ.get(RERANKER_ENV, RERANKER_BGE)).strip().lower()
+    if raw in {RERANKER_BGE, RERANKER_MODEL.lower(), "bge-reranker-base"}:
+        return RERANKER_BGE
+    if raw in {RERANKER_COHERE, COHERE_RERANK_MODEL}:
+        return RERANKER_COHERE
+    raise ValueError(
+        f"{RERANKER_ENV}={raw!r} is not a reranker; "
+        f"expected {RERANKER_BGE!r} or {RERANKER_COHERE!r}"
+    )
+
+
+@traceable(run_type="chain", name="taxcalc_ai.cohere_rerank")
+def cohere_rerank(
+    query_text: str,
+    candidates: list[tuple[str, str, float]],
+    top_k: int = DEFAULT_RERANK_TOP_K,
+    timeout_ms: int = RERANK_TIMEOUT_MS,
+) -> tuple[list[tuple[str, str, float]], bool]:
+    """Rerank ``candidates`` with Cohere ``rerank-3.5``, falling back to retrieval order on failure.
+
+    The same soft-failure contract as :func:`bge_rerank`, the same counters, and the same return
+    shape - so the two are interchangeable at the call site and the pipeline needs no branch of
+    its own beyond picking one.
+
+    **Here the timeout is real, and that is the one substantive difference from the local path.**
+    ``CrossEncoder.predict`` is a blocking call into PyTorch with no cancellation seam, so
+    :func:`bge_rerank` can only measure the overrun *after* it happens and report it. This is an
+    HTTP request, so ``httpx``' own timeout genuinely abandons it: the 300 ms budget bounds the
+    request's latency rather than merely its visibility. Choosing Cohere therefore buys a hard
+    deadline as well as a better model, and pays for it in per-query cost and a network hop.
+
+    **Every failure degrades rather than raising, including a non-timeout one.** A 429, a 503 or a
+    connection reset all mean the same thing to this stage - no rerank score exists - and the
+    retrieval order is a usable answer, so converting any of them into a failed request would be a
+    self-inflicted outage over a quality improvement. They are all counted as
+    ``rerank_timed_out``, which is the honest reading of that counter: it means "the rerank did not
+    contribute", and the structured log's ``event`` field is what distinguishes a slow vendor from
+    a rejected one.
+
+    :param query_text: The raw question, scored against each passage.
+    :param candidates: MMR's output as ``(chunk_id, chunk_text, score)``.
+    :param top_k: How many candidates to return.
+    :param timeout_ms: The budget, applied as the HTTP timeout.
+    :returns: ``(results, rerank_timed_out)``, exactly as :func:`bge_rerank` returns them - Cohere's
+        ``relevance_score`` in the third position on success, the incoming scores untouched on the
+        fallback path.
+    :raises RuntimeError: if :data:`COHERE_API_KEY_ENV` is unset. The one failure here that is NOT
+        soft: a missing credential is a deployment mistake, not a latency event, and degrading past
+        it would serve local-encoder quality forever while every dashboard says Cohere.
+    """
+    if not candidates:
+        return [], False
+
+    api_key = os.environ.get(COHERE_API_KEY_ENV)
+    if not api_key:
+        raise RuntimeError(
+            f"{RERANKER_ENV}={RERANKER_COHERE} requires {COHERE_API_KEY_ENV} to be set"
+        )
+
+    started = time.perf_counter()
+    # Sliced before sending, for a different reason than bge's token budget: this is billed and
+    # bounded request body, and a 8 KB chunk is 8 KB of upload per candidate per query.
+    documents = [text[:PASSAGE_CHAR_CAP] for _, text, _ in candidates]
+    failure: str | None = None
+    scored: list[tuple[int, float]] = []
+    try:
+        response = httpx.post(
+            COHERE_RERANK_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": COHERE_RERANK_MODEL,
+                "query": query_text,
+                "documents": documents,
+                "top_n": top_k,
+            },
+            timeout=timeout_ms / 1000.0,
+        )
+        response.raise_for_status()
+        body = response.json()
+        scored = [
+            (int(row["index"]), float(row["relevance_score"]))
+            for row in body.get("results", [])
+            # A response naming a document outside the list we sent is a contract violation, and
+            # indexing on it would raise inside the success path. Dropped instead, which degrades
+            # one result rather than the request.
+            if 0 <= int(row.get("index", -1)) < len(candidates)
+        ]
+    except httpx.TimeoutException:
+        failure = "rerank.cohere.timeout"
+    except httpx.HTTPError as exc:  # transport errors and non-2xx alike - see the docstring
+        failure = "rerank.cohere.error"
+        _LOG.warning(
+            failure,
+            extra={"event": failure, "error": type(exc).__name__},
+        )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    # An empty `results` on a 200 is as much a non-contribution as a timeout: returning the
+    # candidates unranked-but-unflagged would claim a rerank that did not happen.
+    timed_out = failure is not None or not scored
+    record_rerank(timed_out)
+    run_tree = get_current_run_tree()
+    if run_tree is not None:
+        run_tree.extra.setdefault("metadata", {})[RERANK_TIMEOUT_ATTRIBUTE] = timed_out
+        run_tree.extra["metadata"]["rerank_elapsed_ms"] = round(elapsed_ms, 2)
+        run_tree.extra["metadata"]["reranker"] = RERANKER_COHERE
+
+    if timed_out:
+        _LOG.warning(
+            "rerank.cohere.fallback",
+            extra={
+                "event": "rerank.cohere.fallback",
+                "cause": failure or "rerank.cohere.empty",
+                "elapsed_ms": round(elapsed_ms, 2),
+                "timeout_ms": timeout_ms,
+                "candidates": len(candidates),
+            },
+        )
+        return list(candidates[:top_k]), True
+
+    # Cohere returns results already ordered by relevance, but sorting anyway rather than trusting
+    # it: the ordering is a documented convenience, not a schema guarantee, and a silently
+    # unsorted top-6 is indistinguishable from a working rerank at every layer above this one.
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    _LOG.info(
+        "rerank.completed",
+        extra={
+            "event": "rerank.completed",
+            "reranker": RERANKER_COHERE,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "candidates": len(candidates),
+            "returned": min(top_k, len(scored)),
+        },
+    )
+    return [(candidates[i][0], candidates[i][1], score) for i, score in scored[:top_k]], False
+
+
+def rerank_candidates(
+    query_text: str,
+    candidates: list[tuple[str, str, float]],
+    top_k: int = DEFAULT_RERANK_TOP_K,
+    timeout_ms: int = RERANK_TIMEOUT_MS,
+    reranker: str | None = None,
+) -> tuple[list[tuple[str, str, float]], bool]:
+    """Rerank with whichever backend :data:`RERANKER_ENV` names.
+
+    The pipeline's only rerank entry point, so that "which reranker" is decided in exactly one
+    place. The two backends are deliberately signature-compatible: this function picks, it does not
+    adapt.
+
+    :param query_text: The raw question.
+    :param candidates: MMR's output as ``(chunk_id, chunk_text, score)``.
+    :param top_k: How many candidates to return.
+    :param timeout_ms: The rerank budget.
+    :param reranker: An explicit backend, bypassing the environment. For tests and for a caller
+        that has already validated the value - which the W7 D5 agent service has, at boot.
+    :returns: ``(results, rerank_timed_out)``.
+    :raises ValueError: on an unrecognised backend name. See :func:`resolve_reranker`.
+    """
+    if resolve_reranker(reranker) == RERANKER_COHERE:
+        return cohere_rerank(query_text, candidates, top_k=top_k, timeout_ms=timeout_ms)
+    return bge_rerank(query_text, candidates, top_k=top_k, timeout_ms=timeout_ms)

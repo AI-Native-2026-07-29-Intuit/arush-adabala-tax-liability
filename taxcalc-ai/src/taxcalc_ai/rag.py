@@ -55,7 +55,7 @@ from .hybrid import (
     rrf_fuse,
     sparse_topk_fts,
 )
-from .rerank import DEFAULT_MMR_K, DEFAULT_RERANK_TOP_K, bge_rerank, mmr_pick
+from .rerank import DEFAULT_MMR_K, DEFAULT_RERANK_TOP_K, mmr_pick, rerank_candidates
 
 _LOG: Final[logging.Logger] = logging.getLogger("taxcalc_ai.rag")
 
@@ -266,7 +266,9 @@ def retrieve_and_generate(
        :func:`taxcalc_ai.hybrid.sparse_topk_fts`, both tenant-pre-filtered.
     3. :func:`taxcalc_ai.hybrid.rrf_fuse` - rank fusion, never score blending.
     4. :func:`taxcalc_ai.rerank.mmr_pick` - 60 candidates down to 20, redundancy removed.
-    5. :func:`taxcalc_ai.rerank.bge_rerank` - 20 down to 6 under a 300 ms soft deadline.
+    5. :func:`taxcalc_ai.rerank.rerank_candidates` - 20 down to 6 under a 300 ms soft deadline, with
+       the backend chosen by ``RERANKER`` (:data:`taxcalc_ai.rerank.RERANKER_ENV`): the local
+       bge cross-encoder, or Cohere ``rerank-3.5``.
 
     Clients are injected rather than constructed here, which is what makes the function
     testable and what makes a caller own its own connection pooling. The three of them
@@ -292,6 +294,18 @@ def retrieve_and_generate(
         ``tenant_id``), ``rerank_timed_out``, and the ``coverage`` diagnostic. The
         ``tenant_id`` on each citation is not decoration - it is what the cache's
         defence-in-depth check reads on every subsequent hit.
+
+        **``usage`` is present only when this call actually generated.** It carries
+        ``input_tokens`` and ``output_tokens`` for the one completion made, and it is absent on
+        a semantic-cache hit, because a cache hit spends no tokens. A caller metering spend
+        should treat "no ``usage`` key" as zero rather than as missing data - see the comment at
+        the assignment on why it is deliberately not part of the cached payload.
+
+        This field exists because the generation call was invisible to every budget in the
+        stack: the W7 D4 MCP server's own observability notes that this pipeline "spends real
+        money the W7 D3 sidecar does not report back", and the W7 D5 agent's per-request
+        ``BudgetGuard`` could not meter the second of the retrieval agent's two Claude calls.
+        Reporting usage here is what lets a caller decide; this module still bills nobody.
     """
     hybrid_on = flag_from_env(RAG_USE_HYBRID_ENV) if use_hybrid is None else use_hybrid
     mmr_on = flag_from_env(RAG_USE_MMR_ENV) if use_mmr is None else use_mmr
@@ -332,7 +346,7 @@ def retrieve_and_generate(
         mmr_pick(q_vec, fused, _MODEL, k=DEFAULT_MMR_K) if mmr_on else fused[:DEFAULT_MMR_K]
     )
     if rerank_on:
-        reranked, timed_out = bge_rerank(query_text, diversified, top_k=DEFAULT_RERANK_TOP_K)
+        reranked, timed_out = rerank_candidates(query_text, diversified, top_k=DEFAULT_RERANK_TOP_K)
     else:
         reranked, timed_out = diversified[:DEFAULT_RERANK_TOP_K], False
 
@@ -363,6 +377,22 @@ def retrieve_and_generate(
         "coverage": coverage(dense, sparse),
     }
     cache_store(r, q_vec, tenant_id, answer)
+
+    # Attached AFTER the store, and the ordering is the whole correctness argument. `usage`
+    # describes one generation call; the cache entry outlives it and is replayed by every
+    # subsequent hit. Stored inside the payload, a cached answer would report the tokens of the
+    # call that first produced it, and a caller billing from this field would charge real money
+    # for a Redis GET - the more effective the cache, the larger the phantom spend. Outside it,
+    # a cache hit returns no `usage` at all, which is the honest answer: nothing was spent.
+    # `getattr` rather than `message.usage`, for the same reason the content block above is
+    # narrowed rather than indexed: a response shape this function cannot read should cost the
+    # caller its usage report, not the answer it already produced.
+    usage = getattr(message, "usage", None)
+    if usage is not None:
+        answer["usage"] = {
+            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        }
 
     _LOG.info(
         "rag.generate.completed",

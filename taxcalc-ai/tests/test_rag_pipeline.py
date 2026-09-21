@@ -61,6 +61,12 @@ SEED: Final[tuple[tuple[str, dict[str, object]], ...]] = (
 )
 
 
+#: Token counts the stub reports, so a test can assert on the exact numbers that reach a
+#: caller's budget rather than on "something non-zero".
+STUB_INPUT_TOKENS: int = 1_200
+STUB_OUTPUT_TOKENS: int = 300
+
+
 class _StubMessages:
     """The ``.messages`` namespace of the Anthropic client, recording what it was asked."""
 
@@ -69,13 +75,19 @@ class _StubMessages:
 
     def create(self, **kwargs: object) -> object:
         """Record the request and return one text block."""
-        from anthropic.types import TextBlock
+        from anthropic.types import TextBlock, Usage
 
         self.calls.append(kwargs)
         return type(
             "_StubMessage",
             (),
-            {"content": [TextBlock(text=STUB_ANSWER, type="text", citations=None)]},
+            {
+                "content": [TextBlock(text=STUB_ANSWER, type="text", citations=None)],
+                # Carried so the pipeline's usage report is exercised rather than skipped by its
+                # tolerant `getattr`. A stub without it would leave `answer["usage"]` untested
+                # and the agent's budget silently unfed.
+                "usage": Usage(input_tokens=STUB_INPUT_TOKENS, output_tokens=STUB_OUTPUT_TOKENS),
+            },
         )()
 
 
@@ -205,7 +217,18 @@ def test_the_full_pipeline_returns_the_documented_payload_and_caches_it(
             use_filter=False,
         )
 
-    assert again == answer
+    # Compared WITHOUT `usage`, because the two are deliberately not equal in that one field:
+    # the generated answer reports the tokens it spent, the cached replay reports none, since a
+    # Redis GET spends none. Caching the usage alongside the answer would make every hit bill
+    # the tokens of the call that first produced it.
+    assert {k: v for k, v in again.items() if k != "usage"} == {
+        k: v for k, v in answer.items() if k != "usage"
+    }
+    assert answer["usage"] == {
+        "input_tokens": STUB_INPUT_TOKENS,
+        "output_tokens": STUB_OUTPUT_TOKENS,
+    }
+    assert "usage" not in again, "a cache hit reported tokens it never spent"
     assert len(client.messages.calls) == 1, "the cache did not serve the repeated question"
 
 
