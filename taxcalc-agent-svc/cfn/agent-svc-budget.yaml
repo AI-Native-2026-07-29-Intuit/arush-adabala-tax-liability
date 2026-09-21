@@ -1,0 +1,191 @@
+# taxcalc-agent-svc/cfn/agent-svc-budget.yaml
+#
+# The monthly Anthropic budget and the hard cap that enforces it.
+#
+# **Why a BudgetAction and not only an alarm.** An alarm notifies; it does not stop anything. The
+# failure this guards is a runaway agent loop discovered on a Saturday - by which time the alarm
+# has fired twelve times into a channel nobody is reading and the spend is already spent. The
+# BudgetAction attaches a DENY policy to the agent's role at 100% of budget, so the spend STOPS
+# rather than being reported. That is a deliberate availability-for-cost trade: at 100% of a
+# monthly budget the service stops answering, and that is the correct outcome, because the
+# alternative is an unbounded bill.
+#
+# **A caveat that has to be read before trusting any of this.** The agent currently calls
+# api.anthropic.com DIRECTLY - `AsyncAnthropic(api_key=...)` in all three node bodies, with no
+# base URL override - so its model spend never traverses an AWS-controlled surface. No IAM policy
+# can block an outbound HTTPS call to a third party. The `execute-api` statement below is
+# therefore inert until that traffic is routed through the W3 D1 proxy, and the enforceable
+# statement today is the Secrets Manager one, which stops the key from being re-read rather than
+# stopping a call in flight. Stated here rather than discovered during an incident.
+#
+# This is the THIRD layer of the same defence, and each catches what the others cannot:
+#   BudgetGuard        per REQUEST, in-process, immediate      - one runaway request
+#   recursion_limit    per RUN, in-process, immediate          - one structural loop
+#   BudgetAction       per MONTH, at AWS, hours of lag         - a slow leak no request exceeds
+# A per-request ceiling cannot see a million cheap requests; this can. It cannot see them
+# quickly, which is why the first two exist.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Monthly Anthropic spend budget for taxcalc-agent-svc, with a BudgetAction that attaches a DENY
+  policy to the service role at 100% of budget.
+
+Parameters:
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 4000
+    MinValue: 1
+    Description: Monthly Anthropic budget in USD.
+  ServiceRoleName:
+    Type: String
+    Default: taxcalc-agent-svc-role
+    Description: The role the DENY policy is attached to when the budget is fully consumed.
+  AnthropicSecretArn:
+    Type: String
+    Default: arn:aws:secretsmanager:us-east-1:123456789012:secret:taxcalc/agent-svc/anthropic-*
+    Description: >-
+      The Secrets Manager secret holding the Anthropic API key, which External Secrets Operator
+      syncs into the cluster (W6 D3: ESO + IRSA). This is the chokepoint the hard cap actually
+      enforces - see DenyLlmSpendPolicy.
+  LlmProxyApiArn:
+    Type: String
+    Default: arn:aws:execute-api:us-east-1:123456789012:*/*/POST/v1/completions
+    Description: >-
+      The API Gateway ARN fronting the W3 D1 llm-proxy, denied alongside the secret. Inert until
+      the agent's model traffic is actually routed through that proxy - see the template header.
+  BudgetsActionRoleArn:
+    Type: String
+    Default: arn:aws:iam::123456789012:role/AWSBudgetsActionExecution
+    Description: >-
+      The role AWS Budgets assumes to attach the policy. Required by the BudgetsAction resource -
+      the service cannot modify IAM on its own authority, which is the correct design.
+  NotificationEmail:
+    Type: String
+    Default: taxcalc-oncall@example.com
+    Description: Where the 80% forecast warning is sent, well before the cap fires.
+
+Resources:
+  # The policy the BudgetAction attaches. Previously this template referenced
+  # `arn:aws:iam::123456789012:policy/DenyLlmProxyInvoke` as a parameter default and **the policy
+  # document existed nowhere in this repository** - so the hard cap pointed at something nobody
+  # had written, let alone reviewed, and there was nothing any tool could verify. Declaring it
+  # here makes the cap a reviewable artefact and lets its decision be evaluated offline (see
+  # scripts/simulate_budget_deny.py).
+  #
+  # WHAT IT DENIES, AND WHY THOSE TWO:
+  #
+  # `secretsmanager:GetSecretValue` on the Anthropic key is the statement that actually bites
+  # today. This service calls api.anthropic.com over HTTPS with an API key, and **no IAM policy
+  # can block an outbound call to a third party**. What AWS does control is where the key comes
+  # from: External Secrets Operator reads it from Secrets Manager under the agent's IRSA role, so
+  # denying that read means ESO cannot refresh it and no restarted or newly-scheduled pod can
+  # obtain one.
+  #
+  # `execute-api:Invoke` on the llm-proxy is the statement that bites once the agent's model
+  # traffic is routed through the W3 D1 proxy rather than straight to Anthropic. It is inert
+  # today, deliberately and visibly, rather than absent - see the header.
+  #
+  # WHAT NEITHER DOES: stop a pod that is already running with the key in memory. That is not a
+  # gap in this policy, it is the reason the per-request BudgetGuard and the recursion_limit
+  # exist in-process. Three layers, each catching what the others cannot.
+  DenyLlmSpendPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: DenyLlmProxyInvoke
+      Description: >-
+        Attached to the agent role by the BudgetAction at 100% of the monthly Anthropic budget.
+        Denies the key read that ESO depends on, and the proxy invocation.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # An explicit Deny, which in IAM beats any Allow anywhere - that is what makes this a
+          # cap rather than a suggestion, and it is why the policy can be attached to a role
+          # whose other policies already grant the read.
+          - Sid: DenyAnthropicKeyRead
+            Effect: Deny
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref AnthropicSecretArn
+          - Sid: DenyLlmProxyInvoke
+            Effect: Deny
+            Action:
+              - execute-api:Invoke
+            Resource: !Ref LlmProxyApiArn
+
+  AgentSvcMonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: taxcalc-agent-anthropic-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        CostFilters:
+          # Tag-scoped, so this budget tracks THIS service rather than the whole account. An
+          # account-wide budget would fire on unrelated spend and attach a DENY policy to a role
+          # that had not overspent - which is worse than no cap, because the outage is caused by
+          # something the on-call cannot connect to the service that went down.
+          TagKeyValue:
+            - 'user:ServiceName$taxcalc-agent-svc'
+      NotificationsWithSubscribers:
+        # A FORECASTED warning at 80%, deliberately before the hard cap. The DENY policy is not
+        # supposed to be the first anyone hears of it: a forecast breach is days of warning, and
+        # a cap that fires without one is an outage nobody had a chance to prevent.
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref NotificationEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref NotificationEmail
+
+  BudgetHardStop:
+    Type: AWS::Budgets::BudgetsAction
+    Properties:
+      BudgetName: taxcalc-agent-anthropic-monthly
+      ActionType: APPLY_IAM_POLICY
+      # `Value`/`Type`, NOT `ActionThresholdValue`/`ActionThresholdType`, and the Subscribers
+      # below take `Type` where the Budget resource above takes `SubscriptionType`. Two sibling
+      # resources in the same service spell the same concepts differently; cfn-lint caught all
+      # four mismatches, and a template that only ever reached `aws cloudformation deploy` would
+      # have found them as a rollback instead.
+      ActionThreshold:
+        Value: 100
+        Type: PERCENTAGE
+      # AUTOMATIC, not MANUAL. A manual approval model means the cap does nothing until a human
+      # approves it - which, on the Saturday this exists for, is the same as having no cap. The
+      # cost of automatic is a self-inflicted outage at 100% of budget; that is the trade being
+      # made knowingly, and RUNBOOK.md documents how to detach the policy to recover.
+      ApprovalModel: AUTOMATIC
+      ExecutionRoleArn: !Ref BudgetsActionRoleArn
+      NotificationType: ACTUAL
+      Subscribers:
+        - Type: EMAIL
+          Address: !Ref NotificationEmail
+      Definition:
+        IamActionDefinition:
+          PolicyArn: !Ref DenyLlmSpendPolicy
+          Roles:
+            - !Ref ServiceRoleName
+    DependsOn: AgentSvcMonthlyBudget
+
+Outputs:
+  DenyPolicyArn:
+    Description: The policy the BudgetAction attaches at 100% of budget.
+    Value: !Ref DenyLlmSpendPolicy
+  BudgetName:
+    Description: The budget the BudgetAction is attached to.
+    Value: taxcalc-agent-anthropic-monthly
+  MonthlyLimitUsd:
+    Description: The monthly ceiling in USD.
+    Value: !Ref MonthlyBudgetUsd

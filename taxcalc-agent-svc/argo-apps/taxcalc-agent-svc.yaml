@@ -1,0 +1,62 @@
+# taxcalc-agent-svc/argo-apps/taxcalc-agent-svc.yaml
+#
+# The Argo CD Application that reconciles agent-svc into the prod EKS cluster.
+#
+# GitOps discipline carried forward from W6 D2: this repository holds the APPLICATION, the config
+# repository holds the MANIFESTS, and CI never runs `kubectl apply`. The merge-to-main job pushes
+# an image and bumps a tag in the config repo; Argo CD notices and reconciles. The difference is
+# not ceremony - a cluster changed by a pipeline has no record of what it should look like, so
+# drift is undetectable and rollback means re-running an old build. A cluster reconciled from git
+# has its desired state under review, and rollback is `git revert`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: taxcalc-agent-svc
+  namespace: argocd
+  finalizers:
+    # Without this, deleting the Application orphans every resource it created: the Deployment,
+    # the Service and the Secret keep running with nothing tracking them, which is how a cluster
+    # accumulates workloads nobody can find the source of.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: acme-platform
+  source:
+    repoURL: https://github.com/uptimecrew/platform-config.git
+    # A branch, not a tag or a SHA. The image tag is what carries the version - bumped in the
+    # config repo by the merge-to-main job - so pinning targetRevision as well would mean two
+    # places to change for one deploy and a guaranteed drift between them.
+    targetRevision: main
+    path: clusters/prod/taxcalc-agent-svc
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: taxcalc-svc
+  syncPolicy:
+    automated:
+      # prune: a resource deleted from git is deleted from the cluster. Without it, git stops
+      # being the source of truth the moment anything is removed - the cluster keeps serving a
+      # Deployment no manifest describes any more.
+      prune: true
+      # selfHeal: a manual `kubectl edit` is reverted. This is the guardrail that makes an
+      # incident-time hotfix VISIBLE: the change survives only until the next reconcile, which
+      # forces the fix back through git where it is reviewed and does not vanish on the next
+      # deploy. See RUNBOOK.md for the documented escape hatch when prod genuinely needs one.
+      selfHeal: true
+    syncOptions:
+      # The namespace is created by the platform layer with its quotas, limits and network
+      # policies attached. Letting this Application create it would produce an unquoted namespace
+      # whenever it happened to sync first - and quotas added later do not retroactively bound
+      # what is already running.
+      - CreateNamespace=false
+      # Only reconcile resources that have actually drifted. Applying every resource on every
+      # sync churns the API server and rewrites resourceVersions on objects nothing changed,
+      # which makes the audit log useless for answering "what actually changed and when".
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  # Keep enough history to roll back through a bad deploy and the one before it, without keeping
+  # so much that the Application object grows unboundedly.
+  revisionHistoryLimit: 10

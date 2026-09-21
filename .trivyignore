@@ -106,3 +106,36 @@ CVE-2026-41856 exp:2026-09-27
 # was 2026-09-11; the vulnerability database moved, the image did not.
 CVE-2026-86145 exp:2026-09-27
 CVE-2026-89161 exp:2026-09-27
+
+# OS package (libpcre2-8-0, base image) - a THIRD HIGH on the same package,
+# added 2026-09-21 during W7 D5. Same package, same installed version and same
+# fix version as the two entries directly above, and re-confirmed rather than
+# inherited, because "same package" is an argument for checking again rather
+# than for skipping the check:
+#
+#   docker buildx imagetools inspect gcr.io/distroless/java-base-debian12:nonroot
+#     -> Digest: sha256:a9930cad62d02853d7f3dede7281c4b916cbf74493c2d8d38564121aad92bf6c
+#
+# Still the exact digest the Dockerfile pins, so there is no rebuilt base to
+# move to. And the floating tag was scanned again, which is the check that
+# turns "bump the digest" from an assumption into a fact:
+#
+#   trivy image gcr.io/distroless/java-base-debian12:latest
+#     -> libpcre2-8-0  CVE-2026-89157  HIGH  fixed  10.42-1 -> 10.42-1+deb12u1
+#
+# Google's newest published build still ships 10.42-1 while Debian's fix is in
+# 10.42-1+deb12u1, so the upgrade is unavailable rather than deferred.
+#
+# NOT a W7 D5 regression: that deliverable adds a Python service and touches no
+# Java Dockerfile and no base image. What it did touch is `.dockerignore`, which
+# is in this workflow's path filter - and THAT is the finding worth recording.
+# This scan last ran green on 2026-09-15 and had not run since, because nothing
+# in six days touched the filtered paths. The CVE was published into that gap.
+# A path-filtered security scan does not watch the image; it watches the diff,
+# so a vulnerability disclosed while the paths are quiet is invisible until an
+# unrelated edit wakes it. Third time this repository has been told that by a
+# red build (2026-09-02, 2026-09-12, today) and the first time it is written
+# down as the pattern rather than as an incident. The fix - a nightly scan of the
+# PINNED DIGEST, which watches the image rather than the diff - landed with this
+# entry as docker.yml's `base-image-watch` job. See SECURITY.md.
+CVE-2026-89157 exp:2026-09-27

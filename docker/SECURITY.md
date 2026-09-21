@@ -497,3 +497,43 @@ this table is re-evaluated on 2026-09-27, "deferred to the next pass" is a
 weaker justification for a public image than it was for a private one - the six
 Boot-BOM-managed patch-release items in particular each need their own `ext[]`
 override and nothing else, so they should be closed rather than renewed.
+
+## Trivy waiver addendum — 2026-09-21 (libpcre2-8-0 a third time, and the gap that hid it)
+
+| CVE | Package | Installed | Fixed in | Why waived | Expires |
+|---|---|---|---|---|---|
+| CVE-2026-89157 | libpcre2-8-0 (base image) | 10.42-1 | 10.42-1+deb12u1 | No rebuilt distroless image exists. `:nonroot` still resolves to the pinned digest `sha256:a9930cad…`, and a fresh scan of the **floating** `:latest` tag shows the same package at the same unpatched 10.42-1 — so the upgrade is unavailable, not deferred. Third CVE on this package under the same conditions as CVE-2026-86145 and CVE-2026-89161. | 2026-09-27 |
+
+**The finding is not the CVE. It is how long it sat unseen.**
+
+This scan last ran green on **2026-09-15**. It did not run again until **2026-09-21**, when a W7
+D5 commit edited `.dockerignore` — a file in this workflow's path filter. The CVE was published
+into those six days, and nothing looked, because nothing in the filtered paths changed.
+
+That is a structural property of path-filtered security scans, not an oversight by anyone: **the
+filter watches the diff, and a base-image CVE is not in the diff.** An image can rot for as long
+as its source files are quiet, and the longer a component is stable the longer its blind spot
+gets — which inverts the intuition that untouched code is safe.
+
+This repository has now been told the same thing by three red builds — 2026-09-02, 2026-09-12
+and today — each time surfacing on a branch that changed nothing in the image. It has been
+recorded as an incident twice; this is the first time it is written down as the pattern.
+
+**The fix is a scheduled scan, not a wider path filter** — and it is now in place. Widening the
+filter would run the whole build on unrelated diffs and still miss a quiet week; a trigger that
+fires on *time* watches the image, which is the thing that actually changes underneath.
+
+`docker.yml` gained a `schedule:` trigger (06:00 UTC daily) and a `base-image-watch` job that:
+
+* scans **the digest the Dockerfile pins**, read out of the Dockerfile rather than restated, so
+  there is no second copy of a digest for someone to forget;
+* honours this `.trivyignore`, so a waived CVE stays waived and anything new goes red;
+* builds nothing — it pulls one digest, so the nightly signal is cheap enough that nobody is
+  tempted to switch it off;
+* and additionally logs a scan of the **floating** `:latest` tag, without failing on it. That is
+  diagnostic: the scan decides whether we are vulnerable, and `:latest` answers the only question
+  that changes what to do about it — whether a rebuilt base exists yet. Every `libpcre2` and
+  `libexpat` waiver in this file turns on that answer, and each one had to be gathered by hand.
+
+`build-scan-smoke` is skipped on the scheduled run, since the nightly question is "did Debian
+publish a fix overnight", not "does the application still boot".

@@ -1,0 +1,363 @@
+# .github/workflows/taxcalc_agent_svc-ci.yml
+# The agent-svc gate (W7 D5 Task 4). Two tiers, split by what they cost and by what they can
+# honestly prove.
+#
+# per-pr        ruff, mypy --strict, the unit suite, the graph-compile and supervisor topology
+#               checks, the budget/deadline/recursion gates, the money and MemorySaver greps, the
+#               OFFLINE trajectory eval, and the Docker/CloudFormation lints. Postgres runs as a
+#               service container - seconds, not minutes - because the checkpointer is the
+#               deliverable and a tier that skipped it would be gating everything except the
+#               thing most likely to break.
+#
+# merge-to-main the container-backed E2E, the image build and push, the config-repo tag bump that
+#               Argo CD reconciles, and the FULL eval with RAGAS scored against real answers.
+#
+# Why the PR tier runs the eval OFFLINE and still means something: routing is decided by the
+# supervisor, and the supervisor is production code. All twenty scenarios exercise the real
+# keyword table, the real list[Send] fan-out and the real reducers - only the answers are canned.
+# So a routing regression fails on the PR tier in seconds, without an Anthropic key. What offline
+# CANNOT prove is answer quality, which is why faithfulness is reported as NOT MEASURED there and
+# the gate says so out loud rather than rendering an unmeasured metric as a green tick.
+name: taxcalc-agent-svc ci
+
+on:
+  # Path-scoped on both triggers, for the reason spelled out at length in python-ci.yml: this is
+  # NOT a required status check, so the filter is safe. A required check that is path-filtered
+  # strands PRs forever waiting on a context that never reports.
+  push:
+    branches: [main]
+    paths:
+      - "taxcalc-agent-svc/**"
+      - "taxcalc-ai/**"
+      - "taxcalc-mcp-server/**"
+      - ".github/workflows/taxcalc_agent_svc-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "taxcalc-agent-svc/**"
+      # Both are path dependencies: a change to either can break this service's import or its
+      # adapters without touching a single file under taxcalc-agent-svc/.
+      - "taxcalc-ai/**"
+      - "taxcalc-mcp-server/**"
+      - ".github/workflows/taxcalc_agent_svc-ci.yml"
+
+concurrency:
+  group: taxcalc-agent-svc-ci-${{ github.ref }}
+  # A PR force-push cancels its own stale run; a push to main is left to finish, since a
+  # cancelled main run leaves the branch with no recorded verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  per-pr:
+    name: ruff + mypy + unit + topology + budgets + offline eval gate
+    # Pinned, not ubuntu-latest: `latest` moves under you, and a gate whose runner image changes
+    # silently is a gate that can go red for reasons unrelated to the diff.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: taxcalc-agent-svc
+
+    services:
+      postgres:
+        # The checkpointer is this deliverable's durability claim, and it cannot be asserted
+        # without a database. A service container costs seconds; Testcontainers inside the job
+        # would pull the same image and add a Docker-in-Docker layer for no extra coverage.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # The official Postgres image starts TWICE - once on a unix socket for its init scripts,
+        # then for real on TCP. Without a health check the job can connect during the gap and see
+        # a mapped port that refuses connections. This repo already hit that race locally; the
+        # options below are what make it not a coin flip.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TAXCALC_AGENT_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Obvious non-secrets. No Anthropic key on this tier by design - every test either stubs
+      # the model or asserts on topology, and a tier that needed a model key could not run on a
+      # fork PR at all.
+      LANGSMITH_API_KEY: dummy-for-tests
+      LANGSMITH_TRACING: "false"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv (pinned)
+        # SHA-pinned, carrying forward the W6 D1 discipline: a mutable tag on a third-party
+        # action is an unreviewed code-execution path into CI.
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Pin Python 3.12 via uv
+        run: uv python install 3.12
+
+      - name: uv sync --frozen (fail on lockfile drift)
+        # --frozen makes uv.lock the source of truth: if pyproject.toml asks for something the
+        # lockfile does not record, this fails rather than silently resolving a dependency set
+        # nobody has tested.
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: mypy --strict
+        # tests/ and evals/ are type-checked too. Untyped tests are where `Any` creeps back in,
+        # and a test that does not type-check may not be exercising the signature it claims to.
+        # evals/ is in the list because the gate's arithmetic decides whether builds pass.
+        run: uv run mypy --strict src/ tests/ evals/
+
+      - name: unit + topology + budgets + deadlines + recursion
+        # The container-backed tests are excluded by MARKER rather than filename, so adding
+        # another e2e file needs no edit here - and a mis-marked test fails loudly on the merge
+        # tier instead of quietly never running.
+        run: uv run pytest -v -m "not e2e" --cov=src --cov-fail-under=70
+
+      - name: checkpointer resume against the service Postgres
+        # The e2e marker, run HERE rather than only on the merge tier: durability is the claim
+        # this deliverable is built on, and it needs a database, not an image registry.
+        run: uv run pytest -v -m e2e
+
+      - name: trajectory eval gate (offline - routing is real, answers are canned)
+        # Named for what it measures, not for a threshold that can move. Faithfulness is NOT
+        # measurable offline - grading a canned answer grades the stub - so it is waived
+        # EXPLICITLY here, and the gate prints a banner saying the metric was declared rather
+        # than measured. That loudness is the W7 D3 lesson: a skip rendered as a green tick is
+        # indistinguishable from a measurement that passed.
+        run: |
+          uv run python -m taxcalc_agent_svc.scripts.eval \
+            --offline --gate --allow-unmeasured-faithfulness
+
+      - name: the eval baseline is committed and current
+        # evals/last_run.json is the cost-per-run baseline the gate compares against. If the run
+        # above changed it, the developer's branch has a cost change they have not committed -
+        # and an uncommitted baseline means the NEXT run compares against a stale number.
+        run: |
+          if ! git diff --quiet -- evals/last_run.json; then
+            echo "::error::evals/last_run.json changed; commit the new cost baseline"
+            git --no-pager diff -- evals/last_run.json
+            exit 1
+          fi
+          echo "cost baseline is current"
+
+      - name: money discipline - cost is an integer in 1e-5 USD minor units
+        working-directory: taxcalc-agent-svc
+        run: |
+          set -uo pipefail
+          status=0
+
+          # (1) The brief's grep, verbatim, over the module that owns the money rule.
+          if grep -RIn ': float ' src/taxcalc_agent_svc/budgets.py ; then
+            echo "::error::budgets.py names the inexact binary type - cost is an int in 1e-5 USD"
+            status=1
+          fi
+
+          # (2) Beyond the brief: a money-shaped field annotated as a binary fraction, anywhere.
+          if grep -REn '\b(amount|total|price|cost|refund|balance|spent|ceiling)[a-z_0-9]*[[:space:]]*:[[:space:]]*float\b' src/ tests/ evals/ ; then
+            echo "::error::a monetary field is annotated float - money is int 1e-5 USD (CLAUDE.md)"
+            status=1
+          fi
+
+          # (3) A bare except swallows KeyboardInterrupt and SystemExit with the bug it was
+          # aimed at. Note this is `except:` exactly - `except Exception:` is a named handler and
+          # is used deliberately twice, each with a comment saying why.
+          if grep -RIn 'except:' src/ tests/ evals/ ; then
+            echo "::error::bare except - name the exceptions being handled"
+            status=1
+          fi
+
+          [ "$status" -eq 0 ] && echo "money discipline holds"
+          exit "$status"
+
+      - name: no in-memory checkpointer in the production path
+        # An in-memory saver makes every durability claim false and is SILENT about it: the graph
+        # runs perfectly and only a pod restart reveals the checkpoints were never anywhere.
+        # Scoped to src/ deliberately - tests/ uses one legitimately, to assert that the graph
+        # carries the checkpointer it was handed without opening a database to do it.
+        run: |
+          if grep -RIn 'MemorySaver' src/ ; then
+            echo "::error::the production path uses an in-memory checkpointer"
+            exit 1
+          fi
+          echo "production path uses AsyncPostgresSaver only"
+
+      - name: no plaintext credentials in the tree
+        working-directory: .
+        run: |
+          # The prefix is ASSEMBLED, never written out. A gate that spells the literal it
+          # searches for is itself a hit for its own search - which is how the equivalent line in
+          # the taxcalc-ai gate first failed the check it describes.
+          NEEDLE="lsv2""_pt_"
+          if grep -rIn "$NEEDLE" --exclude-dir=.git --exclude-dir=.venv taxcalc-agent-svc/ ; then
+            echo "::error::a LangSmith API key appears in the tree"
+            exit 1
+          fi
+          echo "no plaintext LangSmith keys found"
+
+      - name: lint the Dockerfile and verify the CloudFormation budget
+        working-directory: taxcalc-agent-svc
+        run: |
+          docker build --check -f Dockerfile ..
+          uv tool install cfn-lint
+          # Validates the budget template against AWS's OWN published resource schemas - the
+          # artefacts CloudFormation validates against server-side - and then proves that gate
+          # can fail, by asserting it rejects the four wrong property names this template
+          # originally had. A gate nobody has seen fail is a gate nobody knows works.
+          #
+          # It also evaluates the attached DENY policy's decisions offline, because no emulator
+          # evaluates policy: floci answers UnsupportedOperation for simulate-custom-policy, and
+          # the W6 D1 experiment found it issuing credentials for a FORGED token - i.e. never
+          # reading the trust policy at all.
+          #
+          # FLOCI is deliberately NOT set here. The emulator implements no Budgets service, so it
+          # reports CREATE_COMPLETE for the broken template too - a convincing green tick that
+          # means nothing. See the script's header for the measurements.
+          ./scripts/verify-budget-stack.sh
+
+      - name: the wheel builds, and the container's entry point resolves
+        # A packaging mistake breaks the container's start command while every test still passes,
+        # because nothing else in this job imports the module the way the container does.
+        #
+        # TWO entry points, checked separately because they can break independently:
+        #   * `taxcalc-agent-svc`, the console script - what a developer runs, and what the
+        #     wheel publishes.
+        #   * `taxcalc_agent_svc.app:create_app`, the ASGI factory - what the Dockerfile's CMD
+        #     hands uvicorn. Asserted callable here rather than trusted: `--factory` fails at
+        #     container start, after the image has been pushed and the tag bumped.
+        run: |
+          uv build
+          unzip -p dist/*.whl '*/entry_points.txt' | tee /dev/stderr | grep -q 'taxcalc-agent-svc ='
+          python -m zipfile -l dist/*.whl | grep -q taxcalc_agent_svc/graph.py
+          uv run python -c "
+          from taxcalc_agent_svc.app import create_app
+          assert callable(create_app), 'the Dockerfile CMD passes this to uvicorn --factory'
+          print('ASGI factory resolves')
+          "
+
+  merge-to-main:
+    name: full eval + image push + config-repo tag bump
+    if: github.ref == 'refs/heads/main'
+    needs: [per-pr]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: taxcalc-agent-svc
+    permissions:
+      contents: read
+      # OIDC federation to AWS - no long-lived access keys in this repository. W6 D1 discipline.
+      id-token: write
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TAXCALC_AGENT_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Pin Python 3.12 via uv
+        run: uv python install 3.12
+
+      - name: uv sync --frozen
+        run: uv sync --frozen
+
+      - name: full trajectory eval with RAGAS scored on real answers
+        # The tier where faithfulness is actually MEASURED. No --allow-unmeasured-faithfulness
+        # here: on main, an unmeasured metric fails the build, because this is the run whose
+        # verdict anyone downstream will trust.
+        #
+        # The judge is claude-haiku-4-5, reading TAXCALC_AGENT_ANTHROPIC_API_KEY below through
+        # Settings - NOT a bare ANTHROPIC_API_KEY, and not RAGAS's own default evaluator, which
+        # is OpenAI. Both of those would report the metric as unmeasured and fail this step for
+        # a reason that looks nothing like its cause; see trajectory.score_with_ragas.
+        env:
+          TAXCALC_AGENT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TAXCALC_AGENT_MCP_SSE_URL: ${{ secrets.TAXCALC_MCP_SSE_URL }}
+          TAXCALC_AI_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+          TAXCALC_AI_REDIS_URL: ${{ secrets.TAXCALC_AI_REDIS_URL }}
+          LANGSMITH_API_KEY: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+          TAXCALC_AGENT_LANGSMITH_PROJECT: taxcalc-agent-svc-ci
+          LANGSMITH_TRACING: "true"
+        run: uv run python -m taxcalc_agent_svc.scripts.eval --gate
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/taxcalc-agent-svc-deploy
+          aws-region: us-east-1
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076
+
+      - name: Build and push the image
+        # Context is the REPOSITORY ROOT: two path dependencies live beside this project and a
+        # context rooted at taxcalc-agent-svc/ could not see either.
+        working-directory: .
+        run: |
+          IMAGE=123456789012.dkr.ecr.us-east-1.amazonaws.com/taxcalc-agent-svc
+          docker build -f taxcalc-agent-svc/Dockerfile -t "taxcalc-agent-svc:${GITHUB_SHA}" .
+          docker tag "taxcalc-agent-svc:${GITHUB_SHA}" "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+
+
+  bump-config:
+    name: Bump the gitops config (dev overlay)
+    needs: [merge-to-main]
+    if: github.ref == 'refs/heads/main'
+    # REUSES this repository's existing _bump-config workflow rather than shelling out to a
+    # script of its own. That reuse is the point: the config repo's PAT handling, its branch
+    # naming and its PR body already live in one reviewed place, and a second implementation
+    # would be a second thing to keep in step with the config repo's layout - and the first to
+    # silently drift when that layout changes.
+    #
+    # CI pushes an image and bumps a TAG. It never runs `kubectl apply`: Argo CD reconciles from
+    # the config repo, which is what keeps the cluster's desired state under review and makes
+    # rollback a `git revert` rather than a re-run of an old build. See
+    # taxcalc-agent-svc/argo-apps/taxcalc-agent-svc.yaml.
+    uses: ./.github/workflows/_bump-config.yml
+    with:
+      image-name: uptimecrew/taxcalc-agent-svc
+      image-sha: ${{ github.sha }}
+    secrets:
+      # Fine-grained PAT scoped to the config repo only. Deliberately NOT the built-in
+      # GITHUB_TOKEN, which is scoped to this repository and can neither push a branch to nor
+      # open a PR against the config repo.
+      GITOPS_REPO_TOKEN: ${{ secrets.GITOPS_REPO_TOKEN }}
+    # Narrower than merge-to-main on purpose: it pushes no image and assumes no AWS role.
+    permissions:
+      contents: read

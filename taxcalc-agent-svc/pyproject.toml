@@ -1,0 +1,213 @@
+# taxcalc-agent-svc/pyproject.toml
+# The W7 D5 capstone: a FastAPI service hosting a three-node LangGraph whose only tool surface is
+# the W7 D4 MCP server and whose only retriever is the W7 D3 sidecar. Both arrive as path
+# dependencies, for the same reason the MCP server took the sidecar that way - this repository is
+# the registry, and a copied module is a second contract to keep in step.
+[project]
+name = "taxcalc-agent-svc"
+version = "0.1.0"
+description = "agent-svc: three-node LangGraph (retrieval, api, synthesis) wrapping taxcalc-mcp-server."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "anthropic>=0.40",
+    # Declared although `anthropic` already pulls it in: `nodes/synthesis.py` imports it
+    # DIRECTLY, to parse the half-arrived arguments JSON of a streamed tool call, and a direct
+    # import resting on a transitive dependency breaks silently the day that dependency drops it.
+    "jiter>=0.5",
+    # Upper-bounded for the same reason the MCP server bounds `mcp`: everything here is written
+    # against the v1 ClientSession/sse_client contract that taxcalc-mcp-server publishes.
+    "mcp>=1.2,<2",
+    "langgraph>=0.2.40",
+    "langgraph-checkpoint-postgres>=2.0",
+    "psycopg[binary,pool]>=3.2",
+    "langsmith>=0.1.80",
+    "structlog>=24.1",
+    "tenacity>=8.3",
+    # The W7 D3 sidecar + W7 D4 MCP server as path deps (read-only library reuse):
+    "taxcalc-ai",
+    "taxcalc-mcp-server",
+    # Declared explicitly ONLY so the CPU index pin below binds. uv applies [tool.uv.sources] to
+    # direct dependencies, and torch arrives transitively through taxcalc-ai's reranker - so
+    # without this line the pin silently does nothing and the CUDA wheels come back. Nothing in
+    # this package imports torch.
+    "torch",
+]
+
+[project.scripts]
+taxcalc-agent-svc = "taxcalc_agent_svc.app:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "respx>=0.21",
+    "testcontainers[postgres]>=4.7",
+    # RAGAS is a DEV dependency, not a runtime one, and that placement is the claim that the
+    # eval gate scores the service from outside rather than being wired into a request path.
+    # It also keeps its heavyweight transitive graph (datasets, a second LLM client) out of the
+    # production image, which is what the Dockerfile's `--no-dev` install relies on.
+    # Upper-bounded, and the bound is load-bearing. `ragas>=0.2` resolved to 0.4.3, whose
+    # `ragas/llms/base.py` does `from langchain_community.chat_models.vertexai import
+    # ChatVertexAI` - a module langchain-community removed in 0.4. So `import ragas` raised
+    # ImportError, `score_with_ragas` took its "evaluator unavailable" path, and faithfulness
+    # came back None on EVERY run. The gate is built to fail on an unmeasured metric rather than
+    # pass it, so this surfaced as a red merge-to-main rather than a silent green - but the
+    # metric was unmeasurable either way. 0.2.x is also the API this code is written against:
+    # `evaluate(Dataset, metrics=[faithfulness])` with a module-level metric instance.
+    "ragas>=0.2,<0.3",
+    # And the bound that actually fixes the import: `ragas/llms/base.py` (0.2.x AND 0.4.x) does
+    # `from langchain_community.chat_models.vertexai import ChatVertexAI`, and langchain-community
+    # DELETED that module in 0.4. So the breakage is in ragas's dependency, not in ragas - which
+    # is why bounding ragas alone did not fix it. Declared here as a direct dev dependency purely
+    # to carry this upper bound; nothing in this repository imports langchain_community.
+    "langchain-community<0.4",
+    # The evaluator judge. RAGAS builds its own default LLM when `evaluate()` is not given one,
+    # and that default is OpenAI - so a CI job holding only an Anthropic key does not grade
+    # against Claude, it fails on an OpenAI authentication error (or, worse, silently bills a
+    # different provider if an OPENAI_API_KEY happens to be in the environment). taxcalc-ai's
+    # run_ragas.py documents this at length; this project now passes the judge explicitly too.
+    "langchain-anthropic>=0.2",
+]
+
+[tool.uv]
+package = true
+
+# torch arrives transitively, through taxcalc-ai's cross-encoder reranker. On Linux the default
+# PyPI wheel bundles the whole CUDA runtime - and this service runs on CPU nodes and will never
+# see a GPU, so every one of those gigabytes is pulled on every rollout and scanned by every
+# image scanner for nothing. Measured: the image built from the unpinned lock is 9.3 GB, against
+# a 1.2 GB virtualenv on macOS, where PyPI's torch wheel is already CPU-only.
+#
+# `explicit = true` means the index is used ONLY for packages that name it below - without it,
+# every dependency would be resolved against the PyTorch index first, which hosts a partial
+# mirror and would silently change where unrelated packages come from.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+taxcalc-ai = { path = "../taxcalc-ai", editable = true }
+taxcalc-mcp-server = { path = "../taxcalc-mcp-server", editable = true }
+# Scoped to Linux by marker. macOS gets PyPI's wheel, which is already CPU-only and which the
+# PyTorch CPU index does not publish for every version - pinning it unconditionally would break
+# local development on Apple Silicon to fix a Linux-only problem.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taxcalc_agent_svc"]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+strict = true
+python_version = "3.12"
+warn_return_any = true
+warn_unused_ignores = true
+exclude = ["build/", "dist/"]
+
+# langgraph ships py.typed but its `StateGraph.compile()` returns a Pregel whose `invoke` and
+# `astream_events` are typed against `Any`; the checkpointer's `from_conn_string` is a context
+# manager over an untyped alias. Scoped to langgraph alone rather than loosened globally.
+[[tool.mypy.overrides]]
+module = ["langgraph.*"]
+follow_untyped_imports = true
+
+# Same reason as the MCP server: @traceable is an untyped decorator built through **kwargs, so
+# --strict reports every traced node as "untyped decorator". One scoped override beats a
+# `# type: ignore` on each of the five traced callables.
+[[tool.mypy.overrides]]
+module = ["langsmith.*", "ragas.*", "mcp.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
+
+# `datasets` ships no py.typed, so --strict sees `Dataset` as an implicit re-export rather than
+# a public name. ignore_missing_imports alone is not enough for that (the package IS installed);
+# the attribute check is what has to be relaxed, and only for this one library.
+[[tool.mypy.overrides]]
+module = ["datasets", "datasets.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.pydantic-mypy]
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I", "RUF", "T20", "SLF", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "SLF001", "S603", "S607"]
+# The eval entrypoints are operator/CI surfaces: they report a verdict on stdout and exit with a
+# status code. A gate whose output only reached a log handler would be invisible in the Actions
+# UI, which is the one place anyone reads it.
+"src/taxcalc_agent_svc/scripts/*.py" = ["T20"]
+"evals/*.py" = ["T20"]
+# The infra verification entrypoints, same reasoning as the packaged scripts above: they report
+# a verdict on stdout and exit with a status code, so a gate whose output only reached a log
+# handler would be invisible in the Actions UI. S105 is for local variables holding example
+# Secrets Manager ARNs - names containing "secret" that are ARNs, not credentials.
+"scripts/*.py" = ["T20", "S105"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "e2e: spins Docker containers via Testcontainers; runs on the merge-to-main CI tier only",
+]
+testpaths = ["tests"]
+# `evals/` is not a package and is not installed, so the eval harness is only importable when it
+# is on the path. Declared here rather than relied on as a side effect of importing the CI gate:
+# a test that could only import `trajectory` because some earlier import happened to mutate
+# sys.path is a test that breaks when the formatter reorders imports - which it did.
+pythonpath = ["evals", "tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    # Starlette's TestClient reaches anyio through `anyio.abc.BlockingPortal`, an alias anyio has
+    # deprecated. It is raised inside starlette's own import chain, so nothing this project
+    # writes avoids it; the only alternatives are turning the whole error policy off or not
+    # testing the HTTP surface through a client at all. Scoped to the exact message, so every
+    # other DeprecationWarning - including any future anyio or starlette one - still fails the
+    # build. The same waiver, for the same reason, as taxcalc-mcp-server's.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+# Three modules are excluded from the COVERAGE measurement, and each is excluded because CI
+# covers it by EXECUTION rather than by assertion - which is stronger evidence, not weaker.
+#
+#   scripts/smoke.py    invoked twice against a real Postgres by the checkpoint smoke, whose
+#                       verdict is a row count. A unit test of its argument parsing would raise
+#                       the percentage and prove nothing the smoke does not already prove.
+#   scripts/eval.py     run in both CI tiers as the gate itself. Its one piece of real logic -
+#                       `verdict`, which decides whether builds pass - is pure and IS unit
+#                       tested, in tests/test_eval_gate.py. What is omitted is argparse, stdout
+#                       formatting and process exit.
+#   retrievers.py       constructs the sidecar's three clients and nothing else. It cannot be
+#                       unit tested without Postgres, Redis and an API key, and it is exercised
+#                       for real by the merge-tier eval run.
+#
+# Counting them would leave the headline number measuring how much of the ENTRYPOINTS is
+# unit-tested, which is the least interesting question available and the easiest to game.
+omit = [
+    "src/taxcalc_agent_svc/scripts/smoke.py",
+    "src/taxcalc_agent_svc/scripts/eval.py",
+    "src/taxcalc_agent_svc/retrievers.py",
+]

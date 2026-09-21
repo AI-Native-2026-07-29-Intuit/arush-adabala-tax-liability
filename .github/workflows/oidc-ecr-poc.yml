@@ -99,9 +99,21 @@ jobs:
           aws configure set aws_secret_access_key emulator-dummy --profile floci
           aws configure set region "${AWS_REGION}" --profile floci
 
+          # PINNED. This was `floci/floci:latest` and it drifted out from under the
+          # workflow: the last green run was 2026-09-13, and on 2026-09-21 the same
+          # unchanged steps failed twice in a row at `docker login`, with the emulated
+          # ECR registry returning 503. Nothing here had changed - `latest` had.
+          #
+          # 2.0.1 is the version this workflow's behaviour was characterised against,
+          # and every caveat in the header above ("floci returns credentials for a
+          # FORGED token", "describe-images returns empty") is a statement about THAT
+          # build. An emulator whose version floats makes those caveats unverifiable:
+          # the next reader cannot tell whether a quirk is still present, still
+          # worked-around, or long fixed. The tag is multi-arch (linux/amd64 +
+          # linux/arm64), so it pins on this runner and on a laptop alike.
           docker run -d --name floci -p 4566:4566 \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            floci/floci:latest
+            floci/floci:2.0.1
           # Probe with real API calls, not a bare TCP/HTTP hit, and probe EVERY
           # service the bootstrap touches. Measured: floci answers STS within a
           # second while its ECR service is still coming up, so an STS-only
