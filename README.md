@@ -710,7 +710,9 @@ malformed EMF fails *silently* here — CloudWatch accepts a malformed EMF line 
 This machine has no AWS credentials (`aws sts get-caller-identity` → `NoCredentials`) and no dev sandbox account, so the stack was deployed instead against **[floci](https://github.com/floci-io/floci) 2.0.1**, an MIT-licensed local AWS emulator that serves the real AWS wire protocol on port 4566. The whole toolchain points at it with `AWS_ENDPOINT_URL=http://localhost:4566` plus dummy credentials — no code, template or script changes:
 
 ```bash
-docker run -d --name floci -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock floci/floci:latest
+# Pinned, not :latest - the floating tag drifted and broke oidc-ecr-poc on 2026-09-21,
+# and every floci caveat recorded below is a statement about THIS build.
+docker run -d --name floci -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock floci/floci:2.0.1
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1
 export AWS_ENDPOINT_URL=http://localhost:4566
 aws s3 mb s3://taxcalc-sam-artifacts
