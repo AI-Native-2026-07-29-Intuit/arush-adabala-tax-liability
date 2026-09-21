@@ -228,12 +228,25 @@ jobs:
           # means nothing. See the script's header for the measurements.
           ./scripts/verify-budget-stack.sh
 
-      - name: the console script is declared and the wheel builds
-        # A packaging mistake breaks the container's ENTRYPOINT while every test still passes.
+      - name: the wheel builds, and the container's entry point resolves
+        # A packaging mistake breaks the container's start command while every test still passes,
+        # because nothing else in this job imports the module the way the container does.
+        #
+        # TWO entry points, checked separately because they can break independently:
+        #   * `taxcalc-agent-svc`, the console script - what a developer runs, and what the
+        #     wheel publishes.
+        #   * `taxcalc_agent_svc.app:create_app`, the ASGI factory - what the Dockerfile's CMD
+        #     hands uvicorn. Asserted callable here rather than trusted: `--factory` fails at
+        #     container start, after the image has been pushed and the tag bumped.
         run: |
           uv build
           unzip -p dist/*.whl '*/entry_points.txt' | tee /dev/stderr | grep -q 'taxcalc-agent-svc ='
           python -m zipfile -l dist/*.whl | grep -q taxcalc_agent_svc/graph.py
+          uv run python -c "
+          from taxcalc_agent_svc.app import create_app
+          assert callable(create_app), 'the Dockerfile CMD passes this to uvicorn --factory'
+          print('ASGI factory resolves')
+          "
 
   merge-to-main:
     name: full eval + image push + config-repo tag bump
@@ -287,6 +300,11 @@ jobs:
         # The tier where faithfulness is actually MEASURED. No --allow-unmeasured-faithfulness
         # here: on main, an unmeasured metric fails the build, because this is the run whose
         # verdict anyone downstream will trust.
+        #
+        # The judge is claude-haiku-4-5, reading TAXCALC_AGENT_ANTHROPIC_API_KEY below through
+        # Settings - NOT a bare ANTHROPIC_API_KEY, and not RAGAS's own default evaluator, which
+        # is OpenAI. Both of those would report the metric as unmeasured and fail this step for
+        # a reason that looks nothing like its cause; see trajectory.score_with_ragas.
         env:
           TAXCALC_AGENT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TAXCALC_AGENT_MCP_SSE_URL: ${{ secrets.TAXCALC_MCP_SSE_URL }}

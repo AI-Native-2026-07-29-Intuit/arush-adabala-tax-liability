@@ -20,6 +20,20 @@ from langsmith.run_helpers import tracing_context
 
 from taxcalc_agent_svc.nodes import _deadline as _deadline_mod
 from taxcalc_agent_svc.nodes._deadline import DEADLINE_EXCEEDED_KEY, deadline
+from taxcalc_agent_svc.nodes.api import make_api_node
+from taxcalc_agent_svc.nodes.retrieval import make_retrieval_node
+from taxcalc_agent_svc.nodes.synthesis import (
+    DEADLINE_TEXT,
+    REFUSAL_CONFIDENCE,
+    FinalAnswer,
+    make_synthesis_node,
+)
+from taxcalc_agent_svc.settings import (
+    P99_API_S,
+    P99_RETRIEVAL_S,
+    P99_SYNTHESIS_S,
+    Settings,
+)
 
 
 async def _slow_body(_state: dict[str, Any]) -> dict[str, Any]:
@@ -202,3 +216,103 @@ async def test_each_nodes_sentinel_names_its_own_output_channel(
     """
     node = deadline(seconds=0.05, sentinel=sentinel)(_slow_body)
     assert slot in await node({})
+
+
+# ---------------------------------------------- the three budgets, and where they come from
+
+
+def test_the_three_budgets_are_the_lessons_p99_measurements() -> None:
+    """3 / 5 / 8 seconds, pinned as values rather than left in a ``Field`` default.
+
+    The numbers are a measurement, not a preference, and a measurement that lives only inside a
+    default argument is a measurement any tidy-up can retype. Retrieval is the cheapest (a local
+    encoder plus two indexed queries), the api node runs a bounded tool-use loop against a network
+    service, and synthesis pays a generation call - so a future edit that "harmonises" them to one
+    number has to fail this test to do it.
+    """
+    assert (P99_RETRIEVAL_S, P99_API_S, P99_SYNTHESIS_S) == (3.0, 5.0, 8.0)
+    defaults = Settings()
+    assert defaults.deadline_retrieval_s == P99_RETRIEVAL_S
+    assert defaults.deadline_api_s == P99_API_S
+    assert defaults.deadline_synthesis_s == P99_SYNTHESIS_S
+
+
+def _record_deadline(
+    monkeypatch: pytest.MonkeyPatch, module_path: str
+) -> list[tuple[float, dict[str, Any]]]:
+    """Substitute ``deadline`` in one node module, recording what it was decorated with.
+
+    Substituted in the NODE module rather than in ``_deadline``, because that is where the name the
+    factory calls is bound - the node did ``from ... import deadline``, so patching the definition
+    site would leave the factory using the original.
+
+    :param monkeypatch: The patcher.
+    :param module_path: Dotted path of the node module.
+    :returns: A list the decoration appends its ``(seconds, sentinel)`` to.
+    """
+    recorded: list[tuple[float, dict[str, Any]]] = []
+
+    def fake_deadline(seconds: float, sentinel: dict[str, Any]) -> Any:
+        """Record the arguments and wrap nothing.
+
+        :returns: An identity decorator.
+        """
+        recorded.append((seconds, sentinel))
+        return lambda fn: fn
+
+    monkeypatch.setattr(f"{module_path}.deadline", fake_deadline)
+    return recorded
+
+
+def test_each_node_takes_its_budget_from_settings_rather_than_a_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decoration reads its own settings field, and the sentinel names its own channel.
+
+    Two claims in one assertion, and neither is visible from the call site. A literal ``3.0`` at
+    the decoration site agrees with the default and would pass any test that only compared numbers
+    - so the settings here are deliberately NOT the p99 values: a hard-coded budget cannot produce
+    these. That is what makes a deadline tunable per deployment, which matters because a budget
+    needing a code change and a deploy to widen is a budget nobody widens during the incident that
+    wants it widened.
+    """
+    settings = Settings(deadline_retrieval_s=1.25, deadline_api_s=2.5, deadline_synthesis_s=4.75)
+
+    retrieval = _record_deadline(monkeypatch, "taxcalc_agent_svc.nodes.retrieval")
+    api = _record_deadline(monkeypatch, "taxcalc_agent_svc.nodes.api")
+    synthesis = _record_deadline(monkeypatch, "taxcalc_agent_svc.nodes.synthesis")
+
+    make_retrieval_node(settings)
+    make_api_node(settings)
+    make_synthesis_node(settings)
+
+    assert retrieval[0][0] == 1.25
+    assert retrieval[0][1] == {"docs": []}
+    assert api[0][0] == 2.5
+    assert api[0][1] == {"tool_results": {}}
+    assert synthesis[0][0] == 4.75
+    assert set(synthesis[0][1]) == {"answer"}
+
+
+def test_the_synthesis_sentinel_is_a_valid_answer_whose_text_is_exactly_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``[deadline exceeded]`` and nothing appended to it.
+
+    The slot cannot be the bare string - :func:`taxcalc_agent_svc.sse._final_answer_payload` parses
+    ``answer`` as JSON, so a bare marker takes its malformed branch and the client gets a text-only
+    payload with no ``confidence`` to branch on. But the text INSIDE it is the exact marker, so
+    every consumer compares by equality rather than ``startswith``; a prose tail would make each of
+    them a substring match that the next reword breaks.
+    """
+    recorded = _record_deadline(monkeypatch, "taxcalc_agent_svc.nodes.synthesis")
+    make_synthesis_node(Settings())
+
+    answer = FinalAnswer.model_validate_json(recorded[0][1]["answer"])
+    assert answer.text == DEADLINE_TEXT
+    assert answer.text == "[deadline exceeded]"
+    assert answer.citations == []
+    # Not merely below the refusal threshold - zero. The answer is not a low-confidence attempt at
+    # the question; no attempt was made.
+    assert answer.confidence == 0.0
+    assert answer.confidence < REFUSAL_CONFIDENCE

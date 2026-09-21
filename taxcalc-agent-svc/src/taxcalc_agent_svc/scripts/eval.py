@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import importlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -139,6 +140,12 @@ def verdict(summary: dict[str, Any], allow_unmeasured: bool) -> tuple[bool, list
         failures.append(f"trajectory match {traj:.3f} < floor {TRAJECTORY_FLOOR:.2f}")
 
     faith = summary["faithfulness"]
+    # NaN is treated exactly as None. trajectory.py already converts it, and this is the second
+    # line of defence: `float("nan") < 0.85` is False, so a NaN that reached here by any other
+    # route - a hand-edited last_run.json, a future caller, a RAGAS shape not yet seen - would
+    # pass this gate silently. A metric that is not a number was not measured.
+    if faith is not None and math.isnan(float(faith)):
+        faith = None
     if faith is None:
         if not allow_unmeasured:
             failures.append(
@@ -181,8 +188,19 @@ def _report(summary: dict[str, Any], allow_unmeasured: bool) -> int:
         f"regression {summary['cost_regression']:+.1%} (limit {COST_REGRESSION_LIMIT:.0%})"
     )
 
+    errors = [r for r in summary["rows"] if r.get("error")]
+    if errors:
+        # Printed before the mismatches and separately from them: twenty rows that all failed to
+        # RUN is a different diagnosis from twenty rows that ran and routed wrongly, and a reader
+        # looking at a wall of MISMATCH lines would reach the second conclusion.
+        print(f"\n{len(errors)} of {summary['scenarios']} scenarios FAILED TO RUN:")
+        for row in errors[:3]:
+            print(f"  {row['qid']}: {row['error'][:160]}")
+        if len(errors) > 3:
+            print(f"  ... and {len(errors) - 3} more with the same or similar cause")
+
     for row in summary["rows"]:
-        if row["match"] != 1.0:
+        if row["match"] != 1.0 and not row.get("error"):
             print(
                 f"  MISMATCH {row['qid']}: "
                 f"expected {row['expected']} but visited {row['visited']}"

@@ -15,7 +15,10 @@ dependencies = [
     "pydantic-settings>=2.3",
     "httpx>=0.27",
     "anthropic>=0.40",
-    "instructor>=1.4",
+    # Declared although `anthropic` already pulls it in: `nodes/synthesis.py` imports it
+    # DIRECTLY, to parse the half-arrived arguments JSON of a streamed tool call, and a direct
+    # import resting on a transitive dependency breaks silently the day that dependency drops it.
+    "jiter>=0.5",
     # Upper-bounded for the same reason the MCP server bounds `mcp`: everything here is written
     # against the v1 ClientSession/sse_client contract that taxcalc-mcp-server publishes.
     "mcp>=1.2,<2",
@@ -51,7 +54,27 @@ dev = [
     # eval gate scores the service from outside rather than being wired into a request path.
     # It also keeps its heavyweight transitive graph (datasets, a second LLM client) out of the
     # production image, which is what the Dockerfile's `--no-dev` install relies on.
-    "ragas>=0.2",
+    # Upper-bounded, and the bound is load-bearing. `ragas>=0.2` resolved to 0.4.3, whose
+    # `ragas/llms/base.py` does `from langchain_community.chat_models.vertexai import
+    # ChatVertexAI` - a module langchain-community removed in 0.4. So `import ragas` raised
+    # ImportError, `score_with_ragas` took its "evaluator unavailable" path, and faithfulness
+    # came back None on EVERY run. The gate is built to fail on an unmeasured metric rather than
+    # pass it, so this surfaced as a red merge-to-main rather than a silent green - but the
+    # metric was unmeasurable either way. 0.2.x is also the API this code is written against:
+    # `evaluate(Dataset, metrics=[faithfulness])` with a module-level metric instance.
+    "ragas>=0.2,<0.3",
+    # And the bound that actually fixes the import: `ragas/llms/base.py` (0.2.x AND 0.4.x) does
+    # `from langchain_community.chat_models.vertexai import ChatVertexAI`, and langchain-community
+    # DELETED that module in 0.4. So the breakage is in ragas's dependency, not in ragas - which
+    # is why bounding ragas alone did not fix it. Declared here as a direct dev dependency purely
+    # to carry this upper bound; nothing in this repository imports langchain_community.
+    "langchain-community<0.4",
+    # The evaluator judge. RAGAS builds its own default LLM when `evaluate()` is not given one,
+    # and that default is OpenAI - so a CI job holding only an Anthropic key does not grade
+    # against Claude, it fails on an OpenAI authentication error (or, worse, silently bills a
+    # different provider if an OPENAI_API_KEY happens to be in the environment). taxcalc-ai's
+    # run_ragas.py documents this at length; this project now passes the judge explicitly too.
+    "langchain-anthropic>=0.2",
 ]
 
 [tool.uv]
@@ -105,7 +128,7 @@ follow_untyped_imports = true
 # --strict reports every traced node as "untyped decorator". One scoped override beats a
 # `# type: ignore` on each of the five traced callables.
 [[tool.mypy.overrides]]
-module = ["langsmith.*", "ragas.*", "instructor.*", "mcp.*"]
+module = ["langsmith.*", "ragas.*", "mcp.*"]
 ignore_missing_imports = true
 follow_untyped_imports = true
 

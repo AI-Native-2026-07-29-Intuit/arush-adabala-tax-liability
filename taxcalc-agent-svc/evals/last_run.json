@@ -22,10 +22,9 @@
       "answer": "offline: what is the policy on taxpayer returns",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "what is the policy on taxpayer returns"
+      "contexts": [],
+      "question": "what is the policy on taxpayer returns",
+      "error": ""
     },
     {
       "qid": "docs-only-02",
@@ -41,10 +40,9 @@
       "answer": "offline: how do i claim a home office deduction",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "how do i claim a home office deduction"
+      "contexts": [],
+      "question": "how do i claim a home office deduction",
+      "error": ""
     },
     {
       "qid": "docs-only-03",
@@ -60,10 +58,9 @@
       "answer": "offline: what is the standard deduction for a sole trader",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "what is the standard deduction for a sole trader"
+      "contexts": [],
+      "question": "what is the standard deduction for a sole trader",
+      "error": ""
     },
     {
       "qid": "docs-only-04",
@@ -79,10 +76,9 @@
       "answer": "offline: which rule governs late filing penalties",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "which rule governs late filing penalties"
+      "contexts": [],
+      "question": "which rule governs late filing penalties",
+      "error": ""
     },
     {
       "qid": "docs-only-05",
@@ -98,10 +94,9 @@
       "answer": "offline: where in the docs is the mileage allowance defined",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "where in the docs is the mileage allowance defined"
+      "contexts": [],
+      "question": "where in the docs is the mileage allowance defined",
+      "error": ""
     },
     {
       "qid": "docs-only-06",
@@ -117,10 +112,9 @@
       "answer": "offline: how do i register for VAT",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "how do i register for VAT"
+      "contexts": [],
+      "question": "how do i register for VAT",
+      "error": ""
     },
     {
       "qid": "docs-only-07",
@@ -136,10 +130,9 @@
       "answer": "offline: what is the policy on amended returns",
       "answer_substring_hit": true,
       "cost_usd_e5": 420,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "what is the policy on amended returns"
+      "contexts": [],
+      "question": "what is the policy on amended returns",
+      "error": ""
     },
     {
       "qid": "api-only-01",
@@ -156,7 +149,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "what is the status of order ord-synth-9001"
+      "question": "what is the status of order ord-synth-9001",
+      "error": ""
     },
     {
       "qid": "api-only-02",
@@ -173,7 +167,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "show me order ord-synth-9002"
+      "question": "show me order ord-synth-9002",
+      "error": ""
     },
     {
       "qid": "api-only-03",
@@ -190,7 +185,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "refund ord-synth-9003 for 10.00"
+      "question": "refund ord-synth-9003 for 10.00",
+      "error": ""
     },
     {
       "qid": "api-only-04",
@@ -207,7 +203,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "has order ord-synth-9004 shipped"
+      "question": "has order ord-synth-9004 shipped",
+      "error": ""
     },
     {
       "qid": "api-only-05",
@@ -224,7 +221,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "what is the status of my latest filing"
+      "question": "what is the status of my latest filing",
+      "error": ""
     },
     {
       "qid": "api-only-06",
@@ -241,7 +239,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "issue a refund of 25.00 on ord-synth-9005"
+      "question": "issue a refund of 25.00 on ord-synth-9005",
+      "error": ""
     },
     {
       "qid": "api-only-07",
@@ -258,7 +257,8 @@
       "answer_substring_hit": true,
       "cost_usd_e5": 500,
       "contexts": [],
-      "question": "list the line items on order ord-synth-9006"
+      "question": "list the line items on order ord-synth-9006",
+      "error": ""
     },
     {
       "qid": "both-01",
@@ -276,10 +276,9 @@
       "answer": "offline: look up order ord-synth-9001 and tell me the refund policy",
       "answer_substring_hit": true,
       "cost_usd_e5": 620,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "look up order ord-synth-9001 and tell me the refund policy"
+      "contexts": [],
+      "question": "look up order ord-synth-9001 and tell me the refund policy",
+      "error": ""
     },
     {
       "qid": "both-02",
@@ -297,10 +296,9 @@
       "answer": "offline: what is the status of ord-synth-9007 and which rule covers it",
       "answer_substring_hit": true,
       "cost_usd_e5": 620,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "what is the status of ord-synth-9007 and which rule covers it"
+      "contexts": [],
+      "question": "what is the status of ord-synth-9007 and which rule covers it",
+      "error": ""
     },
     {
       "qid": "both-03",
@@ -318,10 +316,9 @@
       "answer": "offline: how do i refund order ord-synth-9008",
       "answer_substring_hit": true,
       "cost_usd_e5": 620,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "how do i refund order ord-synth-9008"
+      "contexts": [],
+      "question": "how do i refund order ord-synth-9008",
+      "error": ""
     },
     {
       "qid": "both-04",
@@ -339,10 +336,9 @@
       "answer": "offline: check order ord-synth-9009 against the deduction policy",
       "answer_substring_hit": true,
       "cost_usd_e5": 620,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "check order ord-synth-9009 against the deduction policy"
+      "contexts": [],
+      "question": "check order ord-synth-9009 against the deduction policy",
+      "error": ""
     },
     {
       "qid": "both-05",
@@ -360,10 +356,9 @@
       "answer": "offline: what is the refund policy and the status of ord-synth-9010",
       "answer_substring_hit": true,
       "cost_usd_e5": 620,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "what is the refund policy and the status of ord-synth-9010"
+      "contexts": [],
+      "question": "what is the refund policy and the status of ord-synth-9010",
+      "error": ""
     },
     {
       "qid": "both-06",
@@ -381,10 +376,9 @@
       "answer": "offline: show the docs for refunds and the status of order ord-synth-9011",
       "answer_substring_hit": true,
       "cost_usd_e5": 620,
-      "contexts": [
-        "doc-1"
-      ],
-      "question": "show the docs for refunds and the status of order ord-synth-9011"
+      "contexts": [],
+      "question": "show the docs for refunds and the status of order ord-synth-9011",
+      "error": ""
     }
   ]
 }

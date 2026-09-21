@@ -129,6 +129,26 @@ class BudgetGuard:
         usage = getattr(resp, "usage", None)
         if usage is None:
             return
-        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
-        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
-        self._spent += (in_tok * PRICE_IN_E5_PER_KTOK + out_tok * PRICE_OUT_E5_PER_KTOK) // 1000
+        self.record_usage(
+            int(getattr(usage, "input_tokens", 0) or 0),
+            int(getattr(usage, "output_tokens", 0) or 0),
+        )
+
+    def record_usage(self, input_tokens: int, output_tokens: int) -> None:
+        """Add a token count to the tally directly.
+
+        The counterpart to :meth:`record_call` for a call whose response this process never
+        holds. The W7 D3 retrieval pipeline is the case that needs it: it constructs its own
+        client, generates, and hands back a result dictionary, so the only thing that crosses
+        back into the agent is a pair of numbers. Requiring a response *object* here would have
+        left the retrieval agent's second Claude call unbillable and pushed callers into
+        fabricating a stub object with a ``usage`` attribute just to satisfy the signature.
+
+        Both methods land on the same arithmetic, so a repricing is still one edit in one place.
+
+        :param input_tokens: Prompt tokens billed.
+        :param output_tokens: Completion tokens billed.
+        """
+        self._spent += (
+            input_tokens * PRICE_IN_E5_PER_KTOK + output_tokens * PRICE_OUT_E5_PER_KTOK
+        ) // 1000

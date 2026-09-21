@@ -14,6 +14,21 @@ target/
 **/node_modules
 .gradle/
 
+# Python build/dev artefacts. `**/.venv` is the load-bearing one: the Python projects here are
+# COPYed wholesale into their images (taxcalc-agent-svc needs taxcalc-ai and taxcalc-mcp-server
+# present, because its path dependencies install editable), and without this line each image
+# also carries whatever host virtualenv happened to be sitting in those directories - measured
+# at 1.7 GB of macOS-built wheels inside a linux/amd64 image, where they are dead weight that
+# every pull, every rollout and every CVE scan pays for.
+**/.venv
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/__pycache__
+**/.coverage
+**/dist
+**/*.egg-info
+
 # IDE / OS junk
 .idea/
 .vscode/

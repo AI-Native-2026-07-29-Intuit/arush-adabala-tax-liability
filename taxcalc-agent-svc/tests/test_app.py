@@ -16,12 +16,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langsmith import Client
+from langsmith.run_helpers import tracing_context
 
 from taxcalc_agent_svc import __version__
 from taxcalc_agent_svc import runtime as runtime_mod
@@ -372,3 +375,67 @@ async def test_the_reconnect_loop_is_cancellable() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# ------------------------------------------------------------------ the trace header
+
+
+def test_the_trace_header_is_empty_when_tracing_is_off(client: TestClient) -> None:
+    """Present but empty, so the client branches on a value rather than on a missing header.
+
+    Empty and not fabricated: a "view trace" link built from an id no run ever had costs the
+    reader a click and a moment of doubt before they conclude tracing is simply off.
+    """
+    with tracing_context(enabled=False):
+        resp = client.post(
+            "/v1/chat/stream",
+            json={"question": "q", "tenant_id": "tenant-a", "thread_id": "t1"},
+        )
+    assert resp.headers["x-langsmith-trace-id"] == ""
+
+
+def test_the_trace_header_carries_a_real_run_id_when_tracing_is_on(
+    client: TestClient, offline_langsmith_client: Client
+) -> None:
+    """The deep link the module docstring promises, actually populated.
+
+    This header was hard-coded to the empty string, alongside a ``current_trace_id()`` helper
+    nothing called - so the documented "view trace" link never appeared under any configuration.
+    The value has to be chosen before the first frame, because the root run does not exist until
+    the stream is iterated and the headers are long gone by then.
+    """
+    with tracing_context(enabled="local", client=offline_langsmith_client):
+        resp = client.post(
+            "/v1/chat/stream",
+            json={"question": "q", "tenant_id": "tenant-a", "thread_id": "t1"},
+        )
+    assert resp.status_code == 200
+    assert uuid.UUID(resp.headers["x-langsmith-trace-id"]).version == 4
+
+
+# --------------------------------------------------------------- the MCP bearer, actually sent
+
+
+def test_the_bearer_jwt_reaches_the_mcp_transport() -> None:
+    """`bearer_jwt` was declared, documented as forwarded, and read by nothing.
+
+    taxcalc-mcp-server's SSE transport refuses an unauthenticated connection with 401 before the
+    session is established - measured against it running locally - so an agent that sent no
+    header could never call a tool in any deployment that enforces auth. The setting existing
+    made that look configured.
+    """
+    from pydantic import SecretStr
+
+    from taxcalc_agent_svc.runtime import Dependencies
+    from taxcalc_agent_svc.settings import Settings
+
+    deps = Dependencies(Settings(bearer_jwt=SecretStr("tok-123")))
+    assert deps._auth_headers() == {"Authorization": "Bearer tok-123"}
+
+
+def test_no_token_sends_no_header_rather_than_an_empty_bearer() -> None:
+    """An empty `Bearer ` is rejected by the server; no header at all is the local-dev case."""
+    from taxcalc_agent_svc.runtime import Dependencies
+    from taxcalc_agent_svc.settings import Settings
+
+    assert Dependencies(Settings())._auth_headers() is None

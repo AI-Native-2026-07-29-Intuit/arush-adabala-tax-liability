@@ -99,6 +99,66 @@ policy's decisions offline — each with a negative control. What it cannot chec
 behaviour, so the first time this alarm is real, **verify the policy actually attached** rather
 than assuming it did.
 
+#### Stack verification record — 2026-09-20, floci 2.0.1 emulator
+
+The done-when command, run against the **floci emulator** (`AWS_ENDPOINT_URL=http://localhost:4566`)
+rather than an AWS account, via `FLOCI=1 ./scripts/verify-budget-stack.sh`:
+
+```
+$ aws cloudformation describe-stacks --stack-name taxcalc-agent-anthropic-monthly \
+    --query 'Stacks[0].[StackName,StackStatus]' --output text
+taxcalc-agent-anthropic-monthly	CREATE_COMPLETE
+
+$ aws cloudformation describe-stack-resources --stack-name taxcalc-agent-anthropic-monthly \
+    --query 'StackResources[].[LogicalResourceId,ResourceType,ResourceStatus]' --output text
+DenyLlmSpendPolicy       AWS::IAM::ManagedPolicy        CREATE_COMPLETE
+AgentSvcMonthlyBudget    AWS::Budgets::Budget           CREATE_COMPLETE
+BudgetHardStop           AWS::Budgets::BudgetsAction    CREATE_COMPLETE
+```
+
+**Read the next three paragraphs before quoting that CREATE_COMPLETE anywhere.** It is an
+emulator's answer, and this stack is the artefact whose emulator answer is least worth having.
+
+*floci implements no Budgets service at all.* `aws budgets describe-budgets` returns
+`UnknownOperationException: Unknown operation: AWSBudgetServiceGateway.DescribeBudgets`, so
+`AWS::Budgets::*` is an opaque passthrough: the properties are stored and success is reported for
+anything. Re-measured today — the same broken variant `cfn-lint` rejects (the four property names
+called out in the `BudgetsAction` comment) deploys to **`CREATE_COMPLETE` on floci**. Step 5b of
+the script is that negative control, and it runs on every `FLOCI=1` invocation so the claim stays
+dated rather than inherited.
+
+*And a new finding, sharper than the old one.* floci **does** implement IAM, so the DENY policy is
+created for real and can be read back — and what comes back is:
+
+```json
+{"Sid": "DenyAnthropicKeyRead", "Effect": "Deny",
+ "Action": ["secretsmanager:GetSecretValue"],
+ "Resource": {"Ref": "AnthropicSecretArn"}}
+```
+
+The intrinsic was never resolved. Real CloudFormation substitutes the parameter value before IAM
+sees the document; floci stored the template fragment verbatim and called the stack complete. On
+AWS that policy is malformed — `Resource` takes an ARN string or a list of them, never an object.
+So the emulator reported `CREATE_COMPLETE` for a managed policy AWS would have rejected: this
+repository's recurring lesson in its fourth instance, **floci's most confident answer was its
+wrongest**. The stack `Outputs` *did* resolve their `!Ref`s, which is exactly the kind of partial
+fidelity that makes a green emulator run read as a verified one.
+
+*One trap worth writing down*, because it produced a convincing false negative on the first
+attempt: `ManagedPolicyName` is fixed at `DenyLlmProxyInvoke`, and floci's IAM **does** enforce
+unique managed-policy names. Deploying the negative control while the good stack is still up
+rolls it back on a name collision — which reads exactly like "floci rejected the broken template"
+and is nothing of the kind. Step 5b deletes the good stack first and restores it afterwards for
+that reason alone.
+
+**What is therefore established about this stack:** it is well-formed YAML whose parameters,
+`!Ref`s, `DependsOn` and `Outputs` resolve, whose resource lifecycle completes, and whose
+properties are valid against **AWS's own published resource provider schemas** (step 1,
+`cfn-lint`, proven to be a real gate by step 2's negative control) — plus an offline reproduction
+of IAM's decision procedure (step 3). What remains unestablished: that AWS accepts the stack, and
+that the Budgets service fires the action at 100%. Only an account and a month of real spend
+answers those.
+
 **Act.** Decide whether the spend was legitimate before restoring service. If it was a runaway,
 find it first — the per-request ceiling should have caught a single runaway request, so a monthly
 breach with no per-request breach means *volume*, not one bad request. To restore:
@@ -116,6 +176,21 @@ kubectl -n taxcalc-svc rollout restart deploy/taxcalc-agent-svc
 Then raise `MonthlyBudgetUsd` in `cfn/agent-svc-budget.yaml` through a reviewed change — the
 BudgetAction will re-attach on the next evaluation otherwise, and you will be doing this again in
 an hour.
+
+#### If the api node is failing every request, check the bearer first
+
+`TAXCALC_AGENT_BEARER_JWT` is what the agent presents to the MCP server. Unset, the SSE transport
+is refused with **401 before the session is established**, and `/readyz` reports `mcp: down`
+forever with a configuration that otherwise looks complete:
+
+```bash
+kubectl -n taxcalc-svc logs deploy/taxcalc-agent-svc | grep mcp.open
+# mcp.open.failed ... -> the token is missing, wrong, or expired
+# mcp.open.ok      ... -> the transport is up; look further down
+```
+
+Docs-only questions keep working throughout, which is what makes this easy to miss: the service
+looks healthy, answers most traffic, and silently cannot use a single tool.
 
 ### 5. Argo CD `OutOfSync`
 
@@ -206,6 +281,25 @@ claim being tested is the deploy mechanism — bump, reconcile, revert, verify �
 application behaviour change, and using one build keeps the timings about Argo CD rather than
 about container startup differences.
 
+**Re-verified 2026-09-20**, on the same lab cluster, after today's trajectory and Dockerfile
+changes:
+
+```
+$ kubectl -n argocd get application taxcalc-agent-svc \
+    -o jsonpath='{.status.sync.status}{"\t"}{.status.health.status}{"\t"}{.status.sync.revision}'
+Synced	Healthy	e6dd102aade24c26f2246ce3262814f96b6f7747
+
+$ kubectl -n taxcalc-svc get pods -l app=taxcalc-agent-svc \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+taxcalc-agent-svc-6578c7f79b-z8jt4	taxcalc-agent-svc:v1
+```
+
+Still parked on the rolled-back revision, which is the point: nothing has quietly rolled forward
+since. Read through `kubectl` rather than `argocd app get` — the CLI could not complete a gRPC
+handshake through a `kubectl port-forward` on this host, and the Application CR carries the same
+two fields the CLI prints. Prefer `argocd app get` where the CLI works; it also shows per-resource
+sync state, which the jsonpath above does not.
+
 ---
 
 ## In-flight requests during a restart
@@ -260,10 +354,17 @@ web service's image. Recorded as a documented trade-off rather than smuggled int
   point, so this is one function body, not a topology change.
 - **Per-tenant rate limits and cost ceilings**, also in `supervisor()` — a tenant on a small plan
   should get a smaller `cost_usd_e5` ceiling, decided before any worker runs.
-- **Rehearse the rollback** and fill in the record above.
-- **Move retrieval behind the network.** 4.48 GB of the image is a machine-learning stack this
-  service links but barely uses; calling the W7 D3 sidecar over HTTP would take the agent image
-  to roughly the size of the FastAPI app it actually is.
+- **Rehearse the rollback on the PROD Argo CD instance.** The record above is a k3d lab cluster
+  whose Application differs from the committed one only in `repoURL` and `project`; the 180 s
+  reconciliation asymmetry it measured is worth re-checking where the config repo is really
+  GitHub and the repo-server is really polling it.
+- **Deploy the budget stack to a real account.** Everything verified so far is schema-level plus
+  an emulator that implements no Budgets service — see the stack verification record above.
+- **Move retrieval behind the network.** 1.2 GB of the 1.63 GB image is a machine-learning stack
+  this service links but barely uses; calling the W7 D3 sidecar over HTTP would take the agent
+  image to roughly the size of the FastAPI app it actually is. (It was 4.51 GB until
+  `.dockerignore` learned to exclude `**/.venv` — the path dependencies are copied in wholesale,
+  host virtualenvs and all.)
 
 ### Day 60 — scope expansion
 

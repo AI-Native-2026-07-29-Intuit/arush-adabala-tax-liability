@@ -100,6 +100,12 @@ class Dependencies:
         self._session: ClientSession | None = None
         self._graph_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
+        # The MCP transport is NOT unwound through `self._stack`, and that separation is the
+        # whole point of these three fields - see `_serve_session`.
+        self._session_task: asyncio.Task[None] | None = None
+        self._session_up: asyncio.Event = asyncio.Event()
+        self._session_closing: asyncio.Event = asyncio.Event()
+        self._session_error: BaseException | None = None
 
     @property
     def settings(self) -> Settings:
@@ -162,6 +168,26 @@ class Dependencies:
             log.info("graph.open.ok")
             return self._graph
 
+    def _auth_headers(self) -> dict[str, Any] | None:
+        """Build the Authorization header the MCP server requires.
+
+        ``bearer_jwt`` was a **dead setting** until this method existed: declared in Settings,
+        documented as "forwarded to the MCP server, which forwards it to the W3 D1 services",
+        and read by nothing. ``sse_client`` was called with a URL and no headers, so the agent
+        presented no credential at all - and taxcalc-mcp-server's SSE transport refuses an
+        unauthenticated connection with 401 *before* the session is established. Measured against
+        that server run locally: ``GET /sse -> 401``, body ``missing bearer token``. Every tool
+        call the api node makes was therefore unreachable in any deployment where that server
+        enforces auth, and the readiness probe would have reported the MCP dependency down
+        forever with a configuration that looked complete.
+
+        :returns: The header mapping, or ``None`` when no token is configured - which leaves the
+            unauthenticated local case (a server started with no JWKS and no bearer requirement)
+            working exactly as it did, rather than sending an empty bearer it would reject.
+        """
+        token = self._settings.bearer_jwt.get_secret_value()
+        return {"Authorization": f"Bearer {token}"} if token else None
+
     async def session(self) -> ClientSession:
         """Return the MCP client session, opening it on first use.
 
@@ -173,30 +199,69 @@ class Dependencies:
         async with self._session_lock:
             if self._session is not None:
                 return self._session
-            try:
+            # Opened INSIDE a long-lived task of its own, and closed from that same task.
+            #
+            # This used to enter `sse_client` straight onto `self._stack`, from whichever task
+            # first needed a tool - which, because the session is opened lazily, is a LangGraph
+            # NODE task. That task finishes when the node returns. `aclose()` then tried to
+            # unwind the transport from the lifespan's task at shutdown, and anyio refused:
+            #
+            #     RuntimeError: Attempted to exit cancel scope in a different task than it was
+            #     entered in
+            #
+            # Measured by running the eval suite against a live MCP server: every scenario
+            # succeeded and teardown raised. In the service that lands in the lifespan's
+            # shutdown path, so a pod that had served even one tool call could not shut down
+            # cleanly - and the laziness that causes it is deliberate and worth keeping, so the
+            # fix is ownership rather than eagerness.
+            self._session_task = asyncio.create_task(self._serve_session())
+            await self._session_up.wait()
+            if self._session_error is not None:
+                exc = self._session_error
+                raise DependencyUnavailable(f"MCP server unavailable: {exc}") from exc
+            # Narrowing for the type checker: `_serve_session` either published a session
+            # before setting `_session_up`, or published an error that the branch above
+            # re-raised - so `None` is unreachable here. The attribute's declared type still
+            # admits it, and an assert states that fact rather than hiding it behind a cast.
+            assert self._session is not None  # noqa: S101
+            return self._session
+
+    async def _serve_session(self) -> None:
+        """Hold the MCP transport open for the process's lifetime, in one task.
+
+        Enter and exit happen here, in the same task, which is what anyio's cancel scopes
+        require - see the comment in :meth:`session`. The task parks on
+        ``_session_closing`` rather than returning, because returning would unwind the very
+        transport its callers are still holding.
+
+        :returns: Nothing. Failures are published on ``_session_error`` for :meth:`session` to
+            raise in the caller's own context, where they belong.
+        """
+        try:
+            async with contextlib.AsyncExitStack() as stack:
                 async for attempt in AsyncRetrying(
                     stop=stop_after_attempt(OPEN_ATTEMPTS),
                     wait=wait_exponential(multiplier=0.5, max=4),
                     reraise=True,
                 ):
                     with attempt:
-                        read, write = await self._stack.enter_async_context(
-                            sse_client(self._settings.mcp_sse_url)
+                        read, write = await stack.enter_async_context(
+                            sse_client(self._settings.mcp_sse_url, headers=self._auth_headers())
                         )
-                        session = await self._stack.enter_async_context(
-                            ClientSession(read, write)
-                        )
+                        session = await stack.enter_async_context(ClientSession(read, write))
                         await session.initialize()
                         self._session = session
-            except Exception as exc:
-                log.warning("mcp.open.failed", url=self._settings.mcp_sse_url, error=str(exc))
-                raise DependencyUnavailable(f"MCP server unavailable: {exc}") from exc
-            log.info("mcp.open.ok", url=self._settings.mcp_sse_url)
-            # Narrowing for the type checker: the retry above either assigned `_session` or
-            # re-raised, so `None` is unreachable here - but the attribute's declared type still
-            # admits it, and an assert states that fact rather than hiding it behind a cast.
-            assert self._session is not None  # noqa: S101
-            return self._session
+                log.info("mcp.open.ok", url=self._settings.mcp_sse_url)
+                self._session_up.set()
+                await self._session_closing.wait()
+        except Exception as exc:
+            log.warning("mcp.open.failed", url=self._settings.mcp_sse_url, error=str(exc))
+            self._session_error = exc
+        finally:
+            self._session = None
+            # Set unconditionally: a caller waiting on this event must be released whether the
+            # transport came up or failed, or `session()` blocks forever on a dead dependency.
+            self._session_up.set()
 
     async def warmup(self) -> None:
         """Best-effort eager connect at startup, so a healthy deploy pays no first-request cost.
@@ -239,6 +304,18 @@ class Dependencies:
     async def aclose(self) -> None:
         """Unwind everything opened here, in reverse order.
 
+        The MCP transport is closed by *asking its own task to finish* rather than by unwinding
+        it from here - see :meth:`_serve_session`. Everything else (the checkpointer pool) was
+        entered on ``self._stack`` from this same task and unwinds normally.
+
         :returns: Nothing.
         """
+        if self._session_task is not None:
+            self._session_closing.set()
+            # Shielded from the caller's own cancellation: a lifespan shutdown that is itself
+            # being cancelled must still let the transport close, or the socket leaks and the
+            # server is left holding a half-open SSE stream.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(self._session_task)
+            self._session_task = None
         await self._stack.aclose()

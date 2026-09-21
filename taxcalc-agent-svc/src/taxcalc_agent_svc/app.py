@@ -47,6 +47,7 @@ from typing import Final
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from langsmith.run_helpers import LangSmithExtra
 from pydantic import BaseModel, ConfigDict, Field
 
 from taxcalc_agent_svc import __version__
@@ -54,7 +55,7 @@ from taxcalc_agent_svc.budgets import BudgetExceeded, BudgetGuard
 from taxcalc_agent_svc.graph import run_config
 from taxcalc_agent_svc.runtime import Dependencies, DependencyUnavailable
 from taxcalc_agent_svc.settings import Settings
-from taxcalc_agent_svc.sse import TRACE_HEADER, event_stream
+from taxcalc_agent_svc.sse import TRACE_HEADER, event_stream, new_trace_id
 
 log: Final[structlog.stdlib.BoundLogger] = structlog.get_logger("taxcalc-agent-svc")
 
@@ -201,14 +202,33 @@ def create_app() -> FastAPI:
         # lifespan's mistake moved one layer down. The api node resolves it on demand.
         guard = BudgetGuard(settings.cost_ceiling_usd_e5)
         cfg = run_config(req.thread_id, settings, guard=guard, session=deps.session)
-        stream = event_stream(graph, req.question, req.tenant_id, req.thread_id, cfg)
+        # Minted here, not read from inside the stream. The header must be on the response before
+        # the first frame is yielded, and the root run does not exist until the generator is first
+        # iterated - which is after the headers have gone out. So the caller chooses the id and
+        # tells `@traceable` to use it, rather than asking afterwards for a value that cannot yet
+        # exist. Empty when tracing is off; see `new_trace_id`.
+        trace_id = new_trace_id()
+        # `project_name` overrides the module-level default with the validated setting, so a
+        # deployment that points at another project moves the root run - and with it every node
+        # span nested underneath - rather than splitting the trace across two projects.
+        extra: LangSmithExtra = {"project_name": settings.langsmith_project}
+        if trace_id:
+            extra["run_id"] = trace_id
+        stream = event_stream(
+            graph,
+            req.question,
+            req.tenant_id,
+            req.thread_id,
+            cfg,
+            langsmith_extra=extra,
+        )
         return StreamingResponse(
             stream,
             media_type="text/event-stream",
             headers={
                 # Empty when tracing is off. Set unconditionally so the client can branch on
                 # presence rather than on the service's configuration, which it cannot see.
-                TRACE_HEADER: "",
+                TRACE_HEADER: trace_id,
                 # Without this an intermediary proxy will happily buffer the whole stream and
                 # deliver it as one blob at the end, which is a working request that looks
                 # exactly like a hung one for its entire duration.

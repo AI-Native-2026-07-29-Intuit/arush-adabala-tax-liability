@@ -52,7 +52,14 @@ def _clients() -> tuple[Any, psycopg.Connection[TupleRow], redis.Redis]:
     if not _CLIENTS:
         from anthropic import Anthropic
 
-        _CLIENTS["anthropic"] = Anthropic()
+        # Tagged `retrieval`, exactly like the rewrite client in the retrieval node - because
+        # this is the retrieval agent's OTHER Claude call. The W7 D3 pipeline generates its
+        # answer text with this client, so a retrieval-agent request bills two completions to
+        # the proxy, and only one of them used to say whose it was. The untagged half landed in
+        # whatever bucket the proxy uses for unlabelled traffic, which made
+        # `retrieval_cost_per_request` an undercount and its alarm threshold a number tuned
+        # against the smaller of the two calls.
+        _CLIENTS["anthropic"] = Anthropic(default_headers={"X-Agent": "retrieval"})
         _CLIENTS["conn"] = psycopg.connect(os.environ[PG_DSN_ENV])
         _CLIENTS["redis"] = redis.from_url(os.environ[REDIS_URL_ENV])
     conn = _CLIENTS["conn"]

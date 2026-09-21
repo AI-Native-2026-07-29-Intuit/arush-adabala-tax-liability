@@ -8,9 +8,9 @@
                              |-> synthesis_agent -> END
       \\-> api_agent       -'
 
-Every node wraps ``@traceable`` over ``@deadline``; every compile pins a ``recursion_limit``; the
-``PostgresSaver`` checkpointer persists state after every super-step so cross-pod and
-cross-restart resume works.
+Every node wraps ``@traceable`` over ``@deadline``; every call site pins a ``recursion_limit``
+through :func:`run_config`; the ``AsyncPostgresSaver`` checkpointer persists state after every
+super-step so cross-pod and cross-restart resume works.
 
 **The supervisor is a single policy point, and naming it that is the design.** It is a plain
 function today doing keyword routing, which looks like something that belongs inline in a
@@ -38,10 +38,16 @@ nodes write to the same state in the same super-step. Without the reducers in
 :mod:`taxcalc_agent_svc.state` the second write erases the first, silently. That is not a
 hypothetical: it is the default channel behaviour, and it produces no error at all.
 
-**``recursion_limit`` is pinned explicitly on compile AND on every call site.** LangGraph's
-default happens to be 25 today, which is exactly why it is written down: a default that moves in
-a minor release moves this service's runaway protection with it, and the whole point of the limit
-is that it does not change without someone deciding it should.
+**``recursion_limit`` is pinned explicitly on every call site, because there is nowhere else to
+pin it.** It is a *config* knob, not a compile-time one: ``StateGraph.compile()`` takes
+``checkpointer``, ``cache``, ``store``, ``interrupt_before``, ``interrupt_after``, ``debug``,
+``name`` and ``transformers``, and no recursion limit among them - so a graph cannot carry its
+own ceiling, and a caller that omits it silently inherits the library's default. That default
+happens to be 25 today, which is exactly why the value is written down: a default that moves in a
+minor release moves this service's runaway protection with it, and the whole point of the limit
+is that it does not change without someone deciding it should. :func:`run_config` is therefore
+the single place the ceiling is applied, which is why every call site builds its config through
+it rather than assembling a dict by hand.
 """
 
 from __future__ import annotations
@@ -195,8 +201,11 @@ def run_config(
         checkpointer appears to work, costs its writes, and resumes nothing.
 
     ``recursion_limit``
-        Pinned from settings on every call, not only on compile, so a future feedback edge cannot
-        burn thousands of tokens against a default that moved in a library release.
+        Pinned from settings on every call, because a call is the only place it CAN be pinned -
+        ``StateGraph.compile()`` accepts no recursion limit, so a compiled graph carries no
+        ceiling of its own and a caller that omits it inherits the library's default. Setting it
+        here means a future feedback edge cannot burn thousands of tokens against a default that
+        moved in a library release.
 
     ``budget_guard`` / ``mcp_session``
         The per-request dependencies. Keyword-only and required rather than optional: a node that

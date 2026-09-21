@@ -71,8 +71,11 @@ failures.
   defaulting to `retrieval_agent` — a router that does not understand the question should ground
   it, not guess.
 
-- **`recursion_limit` on compile only.** Pinned on every call site too, since the limit's whole
-  purpose is that it does not move when a library default does.
+- **`recursion_limit` on compile.** Not expressible: `StateGraph.compile()` takes
+  `checkpointer`, `cache`, `store`, `interrupt_before`, `interrupt_after`, `debug`, `name` and
+  `transformers` — no recursion limit. It is a config knob, so it is pinned at every call site
+  instead, via `run_config`, since the limit's whole purpose is that it does not move when a
+  library default does.
 
 ### 2. Instructor-typed FinalAnswer with a refusal path
 
@@ -178,6 +181,40 @@ caught it by failing.
   unless `--allow-unmeasured-faithfulness` is passed, which prints a banner saying the metric was
   declared rather than measured. This is the W7 D3 lesson applied directly; that repository has
   already been bitten once by a skip rendering as a green tick.
+
+- **And one deviation that was mine, not Claude's, corrected after review.** The prompt asked for
+  a match on the expected *sequence*; the first implementation shipped `set(expected).issubset(
+  set(actual))`, which is a strictly weaker claim wearing the same name. It passes a graph that
+  reached synthesis before its evidence arrived - the right node names in an impossible order -
+  and a trajectory eval that cannot see that is checking the destination while calling itself a
+  check on the path. Now an ordered subsequence: gaps allowed, so a fourth node does not fail
+  twenty rows, but order enforced. The ordering is fair to assert because it is deterministic -
+  `supervisor()` appends its `Send` list in a fixed order and LangGraph applies each task's
+  writes at fan-in in task order, not completion order - and it is pinned by
+  `test_the_expected_nodes_must_run_IN_ORDER` plus a repeated-node case that a single shared
+  iterator gets right and a naive `in` check does not. Worth recording because it is the failure
+  mode this journal keeps documenting in Claude's output, found this time in mine: code that
+  type-checks, lints, passes its tests and quietly asserts less than it says it does.
+
+- **And the faithfulness half of this gate had never run at all.** Three stacked defects, found
+  by asking whether the done-when command actually passes rather than whether the code looks
+  right: `import ragas` raised (its dependency `langchain-community` deleted the module ragas
+  imports), so the metric was `None` on every run; with that fixed the default judge is OpenAI,
+  not the Anthropic key CI holds; and with THAT fixed, a failing judge makes RAGAS return `nan`
+  rather than raise - and `nan < 0.85` is `False`, so the gate would have printed `GATE PASSED`
+  with an unmeasured metric. Full detail in `PR_BODY.md`. The transcript above is Claude's
+  `float(ragas_scores["faithfulness"])` with no path for an evaluator that could not run; the
+  shipped version had that path and still could not tell that the evaluator had not run.
+
+- **Then running it for real found four more, three of them mine and one in the service.** The
+  eval passed document IDs to RAGAS as the "contexts" an answer should be grounded in (a metric
+  that would have failed the build for a regression that never happened); it passed
+  `session=None`, so the thirteen tool-routed scenarios could never run and offline mode hid it;
+  `bearer_jwt` was declared, documented as forwarded to the MCP server, and read by nothing, so
+  the transport was refused with 401; and the MCP session was unwound at shutdown from a task
+  other than the one that opened it, which anyio refuses - a service that had served one tool
+  call could not shut down cleanly. None of the four is visible in a diff, in a type check, or
+  in a unit suite. All four were visible within ten minutes of running the thing.
 
 ---
 

@@ -17,12 +17,42 @@ from trajectory import (
     FAITHFULNESS_FLOOR,
     TRAJECTORY_FLOOR,
     Scenario,
+    _mean_faithfulness,
     cost_regression,
     load_scenarios,
     trajectory_match,
 )
 
 from taxcalc_agent_svc.scripts.eval import verdict
+
+
+class _FrameResult:
+    """The `EvaluationResult` shape: scores reachable only through `to_pandas()`.
+
+    Hand-rolled rather than built with pandas so this test states exactly which surface
+    `_mean_faithfulness` depends on - `.to_pandas().columns` and a `.mean()` on the column.
+    """
+
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def to_pandas(self) -> Any:
+        """:returns: An object exposing `columns` and a mean-able `faithfulness` column."""
+        return self
+
+    @property
+    def columns(self) -> list[str]:
+        """:returns: The column names."""
+        return ["faithfulness"]
+
+    def __getitem__(self, key: str) -> Any:
+        """:returns: The column, which only needs to answer `.mean()`."""
+        assert key == "faithfulness"
+        return self
+
+    def mean(self) -> float:
+        """:returns: The column mean."""
+        return self._value
 
 
 def _summary(**over: Any) -> dict[str, Any]:
@@ -66,13 +96,37 @@ def test_a_missing_node_scores_zero_not_a_fraction() -> None:
 
 
 def test_an_extra_node_still_matches() -> None:
-    """Subset, not equality: a graph that grows a node should not fail twenty scenarios.
+    """Subsequence, not equality: a graph that grows a node should not fail twenty scenarios.
 
     A topology change that does MORE work on the way to the same answer is not a regression; one
     that stops visiting an expected node is. Equality would conflate them.
     """
     actual = ("retrieval_agent", "guardrail_agent", "synthesis_agent")
     assert trajectory_match(actual, ("retrieval_agent", "synthesis_agent")) == 1.0
+
+
+def test_the_expected_nodes_must_run_IN_ORDER() -> None:
+    """Subsequence, not subset: the same nodes in the wrong order is a routing regression.
+
+    This is the case a subset match cannot see, and it is not a hypothetical one - a graph that
+    reached synthesis before its evidence arrived would visit exactly the expected node names and
+    answer from nothing. A trajectory eval that scored that 1.0 would be checking the destination
+    while calling itself a check on the path.
+    """
+    actual = ("synthesis_agent", "retrieval_agent")
+    assert trajectory_match(actual, ("retrieval_agent", "synthesis_agent")) == 0.0
+
+
+def test_a_repeated_node_does_not_satisfy_two_expectations() -> None:
+    """Each expected node is matched against what remains AFTER the previous one.
+
+    Without that, one visit to a node could satisfy every expectation naming it, and a graph
+    stuck in a single-node loop would score a clean 1.0 on a two-node trajectory.
+    """
+    assert trajectory_match(("retrieval_agent",), ("retrieval_agent", "retrieval_agent")) == 0.0
+    assert (
+        trajectory_match(("retrieval_agent", "retrieval_agent"), ("retrieval_agent",) * 2) == 1.0
+    )
 
 
 # ------------------------------------------------------------------------------ cost regression
@@ -137,6 +191,37 @@ def test_an_unmeasured_faithfulness_fails_by_default() -> None:
     assert "NOT MEASURED" in failures[0]
 
 
+def test_a_nan_faithfulness_fails_rather_than_passing() -> None:
+    """The sharpest edge in the gate, pinned.
+
+    RAGAS does not raise when its judge fails - it catches per job and returns `nan`. And
+    `float("nan") < 0.85` is **False**, so before this check an evaluator that answered nothing
+    at all produced a PASSING gate: the exact failure this module exists to prevent, hiding
+    inside the metric it was written to protect. Measured against a deliberately invalid key.
+    """
+    passed, failures = verdict(_summary(faithfulness=float("nan")), allow_unmeasured=False)
+    assert not passed
+    assert "NOT MEASURED" in failures[0]
+
+
+def test_a_nan_faithfulness_is_unmeasured_at_the_source_too() -> None:
+    """Converted where RAGAS's result is read, so `last_run.json` records None rather than NaN.
+
+    Two layers on purpose: JSON has no NaN literal, so a NaN that reached the summary would be
+    serialised as the bare token `NaN` and read back by anything stricter than Python's json as
+    a parse error.
+    """
+    nan = float("nan")
+    # The three result shapes RAGAS has returned across versions, each carrying a dead score.
+    assert _mean_faithfulness({"faithfulness": nan}) is None
+    assert _mean_faithfulness({"faithfulness": [nan, nan]}) is None
+    assert _mean_faithfulness(_FrameResult(nan)) is None
+    # And a real score still reads through all three.
+    assert _mean_faithfulness({"faithfulness": 0.91}) == 0.91
+    assert _mean_faithfulness({"faithfulness": [0.9, 1.0]}) == pytest.approx(0.95)
+    assert _mean_faithfulness(_FrameResult(0.91)) == pytest.approx(0.91)
+
+
 def test_an_unmeasured_faithfulness_can_be_waived_deliberately() -> None:
     """The escape hatch exists for fork PRs with no secrets - and only when asked for."""
     passed, _ = verdict(
@@ -182,6 +267,12 @@ def test_several_regressions_are_all_reported() -> None:
 
 def test_the_committed_suite_has_twenty_rows() -> None:
     """The brief's size, asserted so a truncated file cannot quietly shrink the gate."""
+    assert len(load_scenarios()) == 20
+
+
+def test_the_suite_cannot_be_mutated_through_the_loader() -> None:
+    """An eval that could pop a failing scenario off its own suite can make itself pass."""
+    load_scenarios().clear()
     assert len(load_scenarios()) == 20
 
 
@@ -233,6 +324,6 @@ def test_the_supervisor_routes_every_committed_scenario_as_expected() -> None:
 
 
 def test_scenario_is_constructible_directly() -> None:
-    """The dataclass is usable without the JSONL, for an ad-hoc one-off run."""
+    """The dataclass is usable outside the committed suite, for an ad-hoc one-off run."""
     sc = Scenario("q1", "question", "tenant-a", ("retrieval_agent",), "sub")
     assert sc.qid == "q1"

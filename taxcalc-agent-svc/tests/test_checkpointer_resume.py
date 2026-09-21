@@ -20,9 +20,12 @@ across the minutes or hours a human takes to answer, which is precisely what is 
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 import pytest
@@ -241,3 +244,209 @@ async def test_a_different_thread_id_does_not_resume(
         await closer.__aexit__(None, None, None)
 
     assert lengths[0] == lengths[1], "a fresh thread must not inherit another thread's state"
+
+
+# ------------------------------------------------------------------ killed mid-graph
+
+
+#: Marker the crashed child writes into ``visited_nodes`` and nothing else ever writes.
+#:
+#: The evidence in :func:`test_a_run_killed_mid_graph_resumes_from_its_last_checkpoint` rests on
+#: this string being unforgeable by the surviving process: the restarted run installs its own
+#: stubs, none of which emit it, so finding it in the second run's state can only mean the state
+#: came out of Postgres - written by a process that no longer exists.
+PRECRASH_MARKER: Final[str] = "retrieval_agent_precrash"
+
+#: The question that routes to retrieval ALONE - "deduction" and "rule" are docs keywords and
+#: nothing in it is an API keyword. A single-worker fan-out makes the super-step boundary
+#: unambiguous: retrieval completes and is checkpointed, then synthesis starts and hangs, so the
+#: kill below lands in a state that is genuinely mid-graph rather than merely mid-request.
+DOCS_ONLY_QUESTION: Final[str] = "what is the home office deduction rule"
+
+#: The child process. A real ``sys.executable`` subprocess rather than a thread or a task,
+#: because SIGKILL is the point: a thread cannot be killed without its cooperation, and a
+#: cooperative shutdown is precisely the scenario a durability test must NOT use - it would let
+#: the checkpointer flush on the way out and prove nothing about a pod that simply stopped.
+_CHILD_SOURCE: Final[str] = '''
+import asyncio
+import sys
+
+dsn, thread_id, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+
+from taxcalc_agent_svc.budgets import BudgetGuard
+from taxcalc_agent_svc.graph import build_taxcalc_agent_graph, run_config
+from taxcalc_agent_svc.nodes import retrieval, synthesis
+from taxcalc_agent_svc.settings import Settings
+
+
+async def fake_retrieval(state, config, settings):
+    """Complete immediately, leaving a marker only this process can write."""
+    return {
+        "docs": [{"chunk_id": "chunk-doc-1-p0", "doc_id": "doc-1", "score": 0.9}],
+        "cost_usd_e5": 11,
+        "visited_nodes": [marker],
+    }
+
+
+async def hang(state, config, settings):
+    """Never return. The parent kills this process while control is parked here."""
+    await asyncio.sleep(300)
+    raise AssertionError("the parent was supposed to kill this process")
+
+
+retrieval._retrieval = fake_retrieval
+synthesis._synthesis = hang
+
+
+async def main():
+    # deadline_synthesis_s at its maximum: the node decorators would otherwise time the hang out
+    # and return the sentinel, completing the graph cleanly - which is the one outcome this test
+    # must not get.
+    settings = Settings(postgres_url=dsn, deadline_synthesis_s=120.0)
+    graph, _closer = await build_taxcalc_agent_graph(settings)
+    await graph.ainvoke(
+        {"question": sys.argv[4], "tenant_id": "tenant-a", "thread_id": thread_id},
+        config=run_config(thread_id, settings, guard=BudgetGuard(), session=None),
+    )
+
+
+asyncio.run(main())
+'''
+
+
+def _blob_contains(dsn: str, thread_id: str, needle: bytes) -> bool:
+    """Has anything containing ``needle`` been persisted for this thread yet?
+
+    Read straight out of ``checkpoint_blobs`` rather than through the saver, because the question
+    is specifically "did this reach the DATABASE" - resolving it through an in-process
+    ``AsyncPostgresSaver`` would let a cache answer for the disk. The blob is msgpack, which
+    encodes strings literally, so a substring search over the bytes is a sound membership test
+    without depending on LangGraph's serialisation format staying put.
+
+    :param dsn: The Postgres DSN.
+    :param thread_id: The thread to inspect.
+    :param needle: The bytes to look for.
+    :returns: Whether any blob for this thread contains it.
+    """
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT blob FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
+        return any(row[0] is not None and needle in bytes(row[0]) for row in cur.fetchall())
+
+
+@pytest.fixture(scope="module")
+def crashed_mid_graph(postgres_dsn: str, tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """Start a run, wait until it has checkpointed, then ``os.kill`` it mid-graph.
+
+    Module-scoped, and that is load-bearing rather than an optimisation. A function-scoped version
+    of this fixture crashed a *second* child under the same ``thread_id``, and its wait loop then
+    found the FIRST child's marker already in the table and returned immediately - killing a
+    process that had not finished importing, let alone run a node. Every assertion still passed,
+    including the one on the SIGKILL exit code, because a child that is still starting up is
+    nonetheless a child that is alive. One crash, shared by both tests, cannot make that mistake.
+
+    **SIGKILL, not SIGTERM, and not a context manager exiting.** The claim under test is that the
+    checkpoint on disk is sufficient on its own, and every gentler shutdown weakens it: a process
+    given the chance to clean up may flush something on the way out, so a test that passes after
+    a graceful stop cannot distinguish "the state was durable" from "the state was saved during
+    shutdown". SIGKILL cannot be caught, blocked or handled - the process stops between two
+    instructions with nothing flushed and no ``finally`` run, which is the closest a test gets to
+    a pod that was evicted.
+
+    The kill is timed on the DATABASE, not on a sleep. Polling until retrieval's marker is
+    actually in ``checkpoint_blobs`` means the process is killed at a known point in the graph -
+    after one node committed, while the next is still running - rather than at whatever point a
+    hard-coded delay happened to land on a loaded CI runner, which is how a durability test
+    quietly becomes a test of nothing on a slow day.
+
+    :yields: The thread id the killed run was checkpointing under.
+    """
+    thread_id = "capstone-hitl-1-crash"
+    script = tmp_path_factory.mktemp("crash") / "crash_child.py"
+    script.write_text(_CHILD_SOURCE)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(script), postgres_dsn, thread_id, PRECRASH_MARKER, DOCS_ONLY_QUESTION]
+    )
+    try:
+        needle = PRECRASH_MARKER.encode()
+        assert not _blob_contains(postgres_dsn, thread_id, needle), (
+            "this thread already carries the marker before the child ran - the wait below would "
+            "return instantly and kill a process that had done nothing"
+        )
+        deadline_at = time.monotonic() + 90.0
+        while not _blob_contains(postgres_dsn, thread_id, needle):
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"the child exited (rc={proc.returncode}) before checkpointing; it was "
+                    "supposed to hang in synthesis until killed"
+                )
+            if time.monotonic() > deadline_at:
+                raise AssertionError("the child never persisted a checkpoint")
+            time.sleep(0.25)
+
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=30)
+        # -SIGKILL, asserted: a child that had already died of its own accord would leave a
+        # different code here, and the test below would then be resuming a run that exited
+        # normally - which proves nothing.
+        assert proc.returncode == -signal.SIGKILL, f"unexpected child exit {proc.returncode}"
+        yield thread_id
+    finally:
+        if proc.poll() is None:  # pragma: no cover - only on an assertion above
+            proc.kill()
+            proc.wait(timeout=30)
+
+
+async def test_a_run_killed_mid_graph_resumes_from_its_last_checkpoint(
+    postgres_dsn: str, crashed_mid_graph: str, offline_nodes: None
+) -> None:
+    """The restarted process continues the dead one's graph instead of starting over.
+
+    This is the deliverable's durability story in full: a run is killed *while the graph is
+    executing*, a fresh process with a fresh ``AsyncPostgresSaver`` re-issues on the same
+    ``thread_id``, and the state it comes back with contains work the dead process did.
+
+    :data:`PRECRASH_MARKER` is what makes that airtight. This process's stubs
+    (:func:`offline_nodes`) never emit it, so its presence in the second run's ``visited_nodes``
+    cannot be explained by anything the second run computed. It was read from Postgres, and the
+    only thing that ever wrote it is a pid that no longer exists.
+
+    The synthesis node - which was mid-flight when the kill landed and therefore never committed
+    - runs to completion here, so what is demonstrated is resumption, not merely recall.
+    """
+    settings = Settings(postgres_url=postgres_dsn)
+
+    graph, closer = await build_taxcalc_agent_graph(settings)
+    try:
+        resumed = await graph.ainvoke(
+            {
+                "question": DOCS_ONLY_QUESTION,
+                "tenant_id": "tenant-a",
+                "thread_id": crashed_mid_graph,
+            },
+            config=run_config(crashed_mid_graph, settings, guard=BudgetGuard(), session=None),
+        )
+    finally:
+        await closer.__aexit__(None, None, None)
+
+    assert PRECRASH_MARKER in resumed["visited_nodes"], (
+        "the restarted run did not read the killed process's checkpoint"
+    )
+    # The interrupted node completed after the restart: resumption, not just a state read.
+    assert "synthesis_agent" in resumed["visited_nodes"]
+    assert resumed["answer"]
+
+
+async def test_the_killed_run_left_its_work_in_postgres_and_nowhere_else(
+    postgres_dsn: str, crashed_mid_graph: str
+) -> None:
+    """The negative control: the evidence is on disk, not in this process's memory.
+
+    Without this, the test above could pass on a checkpointer that had somehow retained the state
+    in process - exactly the failure mode a durability claim exists to rule out. The marker is
+    read back through a plain psycopg connection that has never touched a saver, and nothing in
+    this process emits :data:`PRECRASH_MARKER`, so a row carrying it can only have been written
+    by the child that was killed.
+    """
+    assert _blob_contains(postgres_dsn, crashed_mid_graph, PRECRASH_MARKER.encode())
+    assert _count_checkpoints(postgres_dsn, crashed_mid_graph) > 0

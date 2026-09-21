@@ -13,6 +13,12 @@ words retrieves nothing useful. One cheap Claude call turns it into a standalone
 rewrite is best-effort: a failed or empty rewrite falls back to the original question rather than
 failing the node, because a slightly worse query beats no retrieval at all.
 
+**The reranker is chosen here and acted on three modules away.** ``RERANKER`` selects the local
+bge cross-encoder or Cohere ``rerank-3.5``; this node exports it, and
+:func:`taxcalc_ai.rerank.rerank_candidates` dispatches on it. Both halves matter, and the earlier
+version of this node had only the first: it exported a differently-named variable nothing read, so
+selecting Cohere changed the environment and not the retrieval.
+
 **The pipeline is synchronous, so it runs on a worker thread.** ``asyncio.to_thread`` keeps an
 80 MB cross-encoder forward pass off the event loop. Calling it inline would block every other
 in-flight request on this pod for the duration of one rerank - which, under the SSE transport, is
@@ -36,6 +42,7 @@ from anthropic import AsyncAnthropic
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 
+from taxcalc_agent_svc.budgets import BudgetGuard
 from taxcalc_agent_svc.deps import AgentNode, budget_guard
 from taxcalc_agent_svc.nodes._deadline import deadline
 from taxcalc_agent_svc.settings import Settings
@@ -56,13 +63,18 @@ _REWRITE_SYSTEM: Final[str] = (
     "text and nothing else - no preamble, no quotes, no explanation."
 )
 
-#: Environment variable naming the reranker the sidecar should use. Set from
-#: :attr:`~taxcalc_agent_svc.settings.Settings.reranker` at call time rather than read by the
-#: sidecar from an env var nobody validates, so the value is checked once at process boot.
-RERANKER_ENV: Final[str] = "TAXCALC_AI_RERANKER"
+#: Environment variable naming the reranker the sidecar should use. The literal name
+#: :data:`taxcalc_ai.rerank.RERANKER_ENV` reads - unprefixed, and duplicated here rather than
+#: imported because importing ``taxcalc_ai.rerank`` pulls ``sentence_transformers`` in at module
+#: scope, which is the whole reason the pipeline import below is deferred. The duplication is
+#: gated: ``tests/test_nodes.py`` asserts this constant equals the sidecar's, so the two names
+#: cannot drift into the dead write this replaced.
+RERANKER_ENV: Final[str] = "RERANKER"
 
 
-async def rewrite_query(question: str, client: AsyncAnthropic, settings: Settings) -> str:
+async def rewrite_query(
+    question: str, client: AsyncAnthropic, settings: Settings, guard: BudgetGuard
+) -> str:
     """Rewrite a conversational question into a standalone retrieval query.
 
     Best-effort by contract. Any failure - a refusal, an empty reply, a transport error - returns
@@ -70,9 +82,21 @@ async def rewrite_query(question: str, client: AsyncAnthropic, settings: Setting
     optimisation ahead of retrieval did not work would be trading a slightly worse answer for no
     answer, which is never the right trade for a step whose only purpose is to improve recall.
 
+    **The guard is passed in so the call can be BILLED, not merely permitted.** An earlier version
+    took only the client, so this call was checked against the ceiling and then never added to it:
+    retrieval spend stayed at zero for the life of the request, the node reported
+    ``cost_usd_e5: 0``, and on a docs-only question - retrieval into synthesis, no tool leg - the
+    tally never left zero and the dollar ceiling could not fire at all. A budget that is checked
+    but not fed is a budget that only ever reads zero.
+
+    Best-effort applies to the *rewrite*, not to the accounting. The call is recorded before the
+    reply is inspected, so a response that arrives and is then discarded as unusable is still paid
+    for in the tally - because it was paid for at Anthropic.
+
     :param question: The user's question.
     :param client: The tagged Anthropic client.
     :param settings: Validated configuration.
+    :param guard: The request's cost ceiling, updated with this call's usage.
     :returns: The rewritten query, or ``question`` unchanged if the rewrite produced nothing
         usable.
     """
@@ -85,6 +109,9 @@ async def rewrite_query(question: str, client: AsyncAnthropic, settings: Setting
         )
     except Exception:  # the rewrite is optional by contract - see the docstring
         return question
+    # Before the reply is parsed, and outside the try: a call that reached Anthropic costs money
+    # whether or not its text turns out to be usable, and `record_call` cannot raise.
+    guard.record_call(resp)
     # getattr rather than `b.text`: the SDK's content union has a dozen block types and only
     # TextBlock carries `.text`. Filtering on `.type` narrows it at runtime but not for the
     # type checker, and a cast would assert something the SDK does not guarantee.
@@ -95,6 +122,31 @@ async def rewrite_query(question: str, client: AsyncAnthropic, settings: Setting
     ]
     rewritten = " ".join(parts).strip()
     return rewritten or question
+
+
+def _record_pipeline_usage(result: dict[str, Any], guard: BudgetGuard) -> None:
+    """Bill the pipeline's generation call to this request's guard.
+
+    The pipeline constructs its own Anthropic client and returns a dictionary, so its completion
+    never passes through this process as a response object - which is exactly why it went
+    unbilled. :func:`taxcalc_ai.rag.retrieve_and_generate` now reports ``usage`` for the call it
+    made, and this reads it.
+
+    **A missing ``usage`` means zero, not unknown.** The pipeline omits the key on a semantic
+    cache hit, where no completion happened and nothing should be charged. Treating the absence
+    as an error would fail the cheapest possible request; treating it as an unknown to estimate
+    would invent spend that did not occur.
+
+    :param result: The pipeline's raw result.
+    :param guard: The request's cost ceiling.
+    """
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return
+    guard.record_usage(
+        int(usage.get("input_tokens", 0) or 0),
+        int(usage.get("output_tokens", 0) or 0),
+    )
 
 
 def shape_docs(result: dict[str, Any], top_k: int) -> list[dict[str, Any]]:
@@ -164,11 +216,12 @@ async def _retrieval(
 
     spent_before = guard.spent_usd_e5
     guard.check_or_raise()
-    query = await rewrite_query(state["question"], client, settings)
+    query = await rewrite_query(state["question"], client, settings, guard)
 
-    # Set for the sidecar, which reads its reranker choice from the environment. Assigned here
-    # rather than at import so the value comes from validated settings and a test can drive the
-    # node with a different reranker without reaching into os.environ itself.
+    # Set for the sidecar, which reads its reranker choice from this variable - see RERANKER_ENV.
+    # Assigned here rather than at import so the value comes from settings that were validated at
+    # boot: by the time the sidecar reads it, "bge" or "cohere" is the only thing it can say, and
+    # a Cohere selection has already been checked to have a credential behind it.
     os.environ[RERANKER_ENV] = settings.reranker
 
     # to_thread because the pipeline is synchronous CPU work - see the module docstring. The
@@ -177,7 +230,12 @@ async def _retrieval(
     # for a schema test require both.
     from taxcalc_agent_svc.retrievers import run_pipeline
 
+    # Checked again, because the pipeline GENERATES. Its answer text is a second paid Claude
+    # call - the retrieval agent makes two - and a ceiling verified once before the cheap rewrite
+    # is a ceiling that never guards the expensive half.
+    guard.check_or_raise()
     result = await asyncio.to_thread(run_pipeline, query, state["tenant_id"], TOP_K)
+    _record_pipeline_usage(result, guard)
 
     return {
         "docs": shape_docs(result, TOP_K),

@@ -114,7 +114,19 @@ async def open_session(config: RunnableConfig | None) -> Any:
     """
     candidate = mcp_session(config)
     if callable(candidate):
-        return await candidate()
+        candidate = await candidate()
+    if candidate is None:
+        # An explicitly-supplied None bypasses `mcp_session`'s KeyError - the key IS present,
+        # its value is just unusable - and then surfaces as
+        # `AttributeError: 'NoneType' object has no attribute 'list_tools'` three frames deeper,
+        # which is the exact failure that function's own docstring warns about. Measured: the
+        # eval harness passed `session=None`, and all thirteen tool-routed scenarios failed with
+        # that AttributeError rather than with anything naming the cause.
+        raise KeyError(
+            "no MCP session was supplied for this run: the api node cannot invent one. Pass a "
+            "live session or a zero-argument async provider (Dependencies.session) in the "
+            "config's configurable, not None."
+        )
     return candidate
 
 

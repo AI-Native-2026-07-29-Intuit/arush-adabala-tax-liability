@@ -16,6 +16,9 @@
 #   * `aws cloudformation deploy` of a template with FOUR WRONG PROPERTY NAMES that real
 #     CloudFormation rejects outright                -> also CREATE_COMPLETE
 #   * `aws cloudformation validate-template` on that same broken template -> accepted, silently
+#   * the DENY policy read back out of floci's IAM -> `"Resource": {"Ref": "AnthropicSecretArn"}`,
+#     i.e. the intrinsic was never resolved. Real CloudFormation substitutes the parameter before
+#     IAM sees the document; floci stored the template fragment and called it CREATE_COMPLETE.
 #
 # floci implements no Budgets service at all, so its CloudFormation treats AWS::Budgets::* as an
 # opaque passthrough: it stores the properties and reports success for anything. A green floci
@@ -112,24 +115,84 @@ if [ "${FLOCI:-0}" = "1" ]; then
   export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
   export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
   export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-  STACK="taxcalc-agent-budget-verify"
+  # The stack name from the deliverable's done-when line, so the command in RUNBOOK.md is the
+  # command this script runs rather than a near-miss of it.
+  STACK="${STACK:-taxcalc-agent-anthropic-monthly}"
+  NEGCTL="${STACK}-negctl"
 
   aws cloudformation delete-stack --stack-name "$STACK" >/dev/null 2>&1 || true
   aws cloudformation deploy --stack-name "$STACK" --template-file "$TEMPLATE" \
-      --parameter-overrides MonthlyBudgetUsd=4000 >/dev/null
+      --parameter-overrides MonthlyBudgetUsd=4000 --capabilities CAPABILITY_NAMED_IAM >/dev/null
   STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
       --query 'Stacks[0].StackStatus' --output text)
   echo "   stack status: $STATUS"
   [ "$STATUS" = "CREATE_COMPLETE" ] || { echo "   FAIL: stack did not reach CREATE_COMPLETE"; exit 1; }
 
-  # The Outputs are the one thing floci genuinely exercises: they prove !Ref resolution and
+  # The Outputs are one of two things floci genuinely exercises: they prove !Ref resolution and
   # parameter plumbing, which a YAML parse alone does not.
-  echo "   outputs (proves !Ref + parameter resolution):"
+  echo "   outputs (proves !Ref + parameter resolution in Outputs):"
   aws cloudformation describe-stacks --stack-name "$STACK" \
       --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output text | sed 's/^/     /'
 
-  echo "   reminder: floci reports CREATE_COMPLETE for the BROKEN template too."
+  # The other is IAM, which floci does implement - so the DENY policy is created for real and can
+  # be read back. AND THE READ-BACK IS THE POINT. On floci 2.0.1 the policy document comes back
+  # with its intrinsics UNRESOLVED:
+  #
+  #     "Resource": {"Ref": "AnthropicSecretArn"}
+  #
+  # Real CloudFormation substitutes the parameter value before IAM ever sees the document; floci
+  # stores the template fragment verbatim. So floci's "CREATE_COMPLETE" covers a managed policy
+  # that, on AWS, would be malformed - `Resource` must be an ARN string or a list of them, never
+  # an object. A green deploy here is not evidence the policy is valid; it is evidence that the
+  # emulator did not look.
+  echo "   the DENY policy, read back out of floci's IAM:"
+  POLICY_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+      --query 'Stacks[0].Outputs[?OutputKey==`DenyPolicyArn`].OutputValue' --output text)
+  POLICY_VERSION=$(aws iam get-policy --policy-arn "$POLICY_ARN" \
+      --query 'Policy.DefaultVersionId' --output text)
+  aws iam get-policy-version --policy-arn "$POLICY_ARN" --version-id "$POLICY_VERSION" \
+      --query 'PolicyVersion.Document' --output json | sed 's/^/     /'
+  if aws iam get-policy-version --policy-arn "$POLICY_ARN" --version-id "$POLICY_VERSION" \
+      --query 'PolicyVersion.Document' --output json | grep -q '"Ref"'; then
+    echo "     ^ NOTE: the Refs above are UNRESOLVED. floci stored the template fragment, not the"
+    echo "       policy AWS would have created. Do not quote this read-back as proof the policy"
+    echo "       is well-formed - step 3 is what checks the DECISION, offline and on our terms."
+  fi
+
+  echo
+  echo "== 5b. NEGATIVE CONTROL on floci: it accepts the template cfn-lint rejects =="
+  # The control that makes step 5 honest. Run with $STACK DELETED FIRST, and that ordering is not
+  # incidental: ManagedPolicyName is fixed at DenyLlmProxyInvoke, floci's IAM does enforce unique
+  # managed policy names, and leaving the good stack up makes this deploy roll back on a NAME
+  # COLLISION. Which reads exactly like "floci rejected the broken template" and is not that at
+  # all - a false negative that would retire a control still worth having.
+  BROKEN="$WORK/broken.yaml"
   aws cloudformation delete-stack --stack-name "$STACK" >/dev/null 2>&1 || true
+  sleep 5
+  aws cloudformation delete-stack --stack-name "$NEGCTL" >/dev/null 2>&1 || true
+  aws cloudformation deploy --stack-name "$NEGCTL" --template-file "$BROKEN" \
+      --parameter-overrides MonthlyBudgetUsd=4000 --capabilities CAPABILITY_NAMED_IAM >/dev/null 2>&1 || true
+  NEG_STATUS=$(aws cloudformation describe-stacks --stack-name "$NEGCTL" \
+      --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo ABSENT)
+  echo "   broken template on floci: $NEG_STATUS   (cfn-lint: REJECTED, step 2)"
+  if [ "$NEG_STATUS" = "CREATE_COMPLETE" ]; then
+    echo "   As expected: floci implements no Budgets service, so AWS::Budgets::* is an opaque"
+    echo "   passthrough and four wrong property names deploy clean. This is why step 1, not"
+    echo "   step 5, is the gate."
+  else
+    echo "   floci reported '$NEG_STATUS' rather than CREATE_COMPLETE. Check WHY before claiming"
+    echo "   the emulator has learned to validate Budgets - a name collision looks identical."
+  fi
+  aws cloudformation delete-stack --stack-name "$NEGCTL" >/dev/null 2>&1 || true
+  sleep 5
+
+  # Leave the good stack deployed: the done-when line is
+  #   aws cloudformation describe-stacks --stack-name taxcalc-agent-anthropic-monthly
+  # and it should answer CREATE_COMPLETE after this script has run.
+  aws cloudformation deploy --stack-name "$STACK" --template-file "$TEMPLATE" \
+      --parameter-overrides MonthlyBudgetUsd=4000 --capabilities CAPABILITY_NAMED_IAM >/dev/null
+  echo "   restored: $(aws cloudformation describe-stacks --stack-name "$STACK" \
+      --query 'Stacks[0].StackStatus' --output text)"
 fi
 
 echo
