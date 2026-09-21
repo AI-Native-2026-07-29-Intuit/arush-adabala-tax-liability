@@ -25,11 +25,17 @@ summing it has no way to tell "this tool cost nothing" from "this line predates 
 instrumentation", and a missing key in a time series reads as a gap rather than as a zero. So
 every ``end`` line carries the number. That alone would be misleading, though, because a zero
 means two very different things here - ``orders.get_order`` spends nothing, while
-``rag.retrieve_and_generate`` spends real money the W7 D3 sidecar does not report back - and a
-total that treats the second as free is wrong in the direction that matters. ``cost_source``
-names which zero it is, so the dashboard sums :data:`COST_SOURCE_PROXY` lines and counts
-:data:`COST_SOURCE_UNPRICED` ones as the known blind spot rather than as spend that did not
-happen.
+``rag.retrieve_and_generate`` spends real money - and a total that treats the second as free is
+wrong in the direction that matters. ``cost_source`` names which zero it is, so the dashboard
+sums :data:`COST_SOURCE_PROXY` lines and counts :data:`COST_SOURCE_UNPRICED` ones as the known
+blind spot rather than as spend that did not happen.
+
+That blind spot is now narrower than it was, and for a reason worth recording: the W7 D3 sidecar
+used not to report its generation cost at all, and :func:`taxcalc_ai.rag.retrieve_and_generate`
+now returns a ``usage`` block carrying the call's ``input_tokens`` and ``output_tokens`` (absent
+on a semantic-cache hit, where nothing was spent). **This server does not yet read it**, so
+``rag.retrieve_and_generate`` still emits :data:`COST_SOURCE_UNPRICED` - the number is available
+and simply not consumed here. Pricing it is a change to this module, not to the sidecar.
 
 **Why the tenant cross-check lives here.** The bearer's ``tenant_id`` claim and the tenant a
 tool was *asked* to act on are two different facts, and every tool has both. Comparing them in
