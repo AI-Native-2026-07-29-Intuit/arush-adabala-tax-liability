@@ -244,7 +244,9 @@ self-heal and `ApplyOutOfSyncOnly` are the committed values.
 | roll forward: CI-style tag bump `v1` → `v2` | `922b3e3` | **65 s** to pods on `v2` |
 | **roll back: `git revert` of the bump** | `e6dd102` | **310 s** to pods on `v1` |
 
-**Reverted SHA:** `922b3e3` · **rolled back to:** `v1`, via revert commit `e6dd102`
+**Reverted SHA:** `922b3e3` (the tag bump) · **rolled back to:** `46e836d`, the baseline
+commit whose manifest pins `v1`, reached via revert commit `e6dd102`
+**Argo CD auto-sync completed:** 310 s after the revert was pushed (unassisted; see below)
 **Verification (pod labels carry the prior image):**
 
 ```

@@ -14,6 +14,24 @@ on:
       - ".hadolint.yaml"
       - "docker/**"
       - ".github/workflows/docker.yml"
+  # A SCHEDULED scan, and the reason it exists is worth stating where it is configured.
+  #
+  # Every other trigger on this workflow is path-filtered, which means it watches the DIFF. A
+  # base-image CVE is never in the diff: the image rots underneath a source tree nobody is
+  # editing, so the more stable a component is the longer its blind spot gets - the opposite of
+  # the intuition that untouched code is safe.
+  #
+  # Measured, three times. This scan last ran green on 2026-09-15 and did not run again until a
+  # W7 D5 commit touched `.dockerignore` on 2026-09-21; CVE-2026-89157 was published into those
+  # six quiet days and nothing looked. The same thing happened on 2026-09-02 and 2026-09-12,
+  # each time surfacing on a branch that changed nothing in the image.
+  #
+  # Widening the path filter does NOT fix this - it would run the whole build on unrelated diffs
+  # and still miss a quiet week. What closes the gap is a trigger that fires on TIME rather than
+  # on change, which is what this is. 06:00 UTC daily: before the working day in every timezone
+  # this team sits in, so a finding is waiting rather than arriving mid-afternoon.
+  schedule:
+    - cron: "0 6 * * *"
   push:
     branches: [main]
     paths:
@@ -44,8 +62,62 @@ jobs:
           config: .hadolint.yaml
           failure-threshold: warning
 
+  # The scheduled half: scan the PINNED BASE IMAGE, without building anything.
+  #
+  # Separate from build-scan-smoke deliberately. That job builds the application image, needs
+  # Postgres and Mongo service containers, and takes five minutes - all of which is the right
+  # cost for a code change and the wrong cost for "has Debian published a fix overnight". This
+  # job pulls one digest and scans it, so the nightly signal is cheap enough that nobody is
+  # tempted to turn it off.
+  #
+  # It scans the digest the Dockerfile PINS rather than the floating tag. The pin is what
+  # actually ships, so it is what a waiver has to be justified against - and `.trivyignore`'s
+  # entries are written in exactly those terms. The floating tag is checked too, below, because
+  # the question a waiver turns on is not "are we vulnerable" but "is there a rebuilt base to
+  # move to", and only :latest answers that.
+  base-image-watch:
+    name: nightly base-image CVE scan (pinned digest)
+    if: github.event_name == 'schedule'
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the digest the Dockerfile pins
+        id: pin
+        run: |
+          # Read it out of the Dockerfile rather than restating it here: a second copy of a
+          # digest is a second thing to forget to update, and this job exists precisely to
+          # notice things nobody updated.
+          BASE=$(grep -oE 'gcr\.io/distroless/java-base-debian12:nonroot@sha256:[0-9a-f]{64}' Dockerfile | head -1)
+          [ -n "$BASE" ] || { echo "::error::could not find the pinned runtime base in Dockerfile"; exit 1; }
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "scanning $BASE"
+
+      - name: Trivy scan - pinned base, honouring .trivyignore
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.pin.outputs.base }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+
+      - name: Is there a rebuilt base to move to?
+        # Never fails the job. This is DIAGNOSTIC: the scan above decides whether we are
+        # vulnerable, and this answers the only question that changes what to do about it - is
+        # Google publishing a fixed build yet. Every libpcre2/libexpat waiver in .trivyignore
+        # turns on that answer, and each one had to be gathered by hand. Now it is in the log.
+        if: always()
+        run: |
+          trivy image --quiet --severity HIGH,CRITICAL --scanners vuln \
+            gcr.io/distroless/java-base-debian12:latest || true
+          echo "Above: the FLOATING tag. If a finding here shows a fixed version that the pinned"
+          echo "digest lacks, the waiver is no longer 'no rebuilt base exists' - bump the pin."
+
   build-scan-smoke:
     runs-on: blacksmith-2vcpu-ubuntu-2204
+    # Skipped on the nightly run: base-image-watch covers that, without a build.
+    if: github.event_name != 'schedule'
     needs: hadolint
     # Only Postgres and MongoDB are service containers here: both are opened
     # eagerly during Spring context refresh (Flyway migration, and Mongo's
