@@ -369,6 +369,30 @@ jobs:
           uv run python -m taxcalc_agent_svc.scripts.eval \
             --offline --gate --allow-unmeasured-faithfulness
 
+  # The publish half, split out of merge-to-main and GATED ON AWS EXISTING.
+  #
+  # It used to be three more steps on the eval job, which meant a push to main failed at
+  # assume-role every time - `role-to-assume` names account 123456789012, a placeholder, and no
+  # AWS account is issued for this org. serverless.yml already learned this exact lesson and
+  # carries the guard to prove it: "Before this guard existed, the deploy job ran anyway and
+  # failed at assume-role on every push to main." This workflow reintroduced the same defect and
+  # is now fixed the same way, by the same convention, reading the same repository variable.
+  #
+  # Splitting it also separates two verdicts that were being reported as one. An eval regression
+  # and an unprovisioned registry are different problems for different people, and bundling them
+  # meant the eval's result was invisible whenever AWS was absent - which is always, here.
+  publish:
+    name: build + push the image to ECR
+    needs: [merge-to-main]
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # OIDC federation to AWS - no long-lived keys. W6 D1 discipline.
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
         with:
@@ -388,11 +412,34 @@ jobs:
           docker tag "taxcalc-agent-svc:${GITHUB_SHA}" "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:${GITHUB_SHA}"
 
+  # Runs exactly when `publish` does not, so a push to main always carries a visible REASON
+  # rather than an unexplained "skipped" box. Same shape as serverless.yml's
+  # deploy-sandbox-unconfigured, deliberately: a second way of saying the same thing would be a
+  # second thing to keep in step.
+  publish-unconfigured:
+    name: Image push skipped (AWS not configured)
+    needs: [merge-to-main]
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Explain why the image was not pushed
+        run: |
+          echo "::warning::vars.AWS_DEPLOY_ROLE_ARN is unset, so the ECR push and" \
+               "the config-repo tag bump were skipped. This is expected: no AWS" \
+               "account is issued for this org. The eval gate above still ran and" \
+               "still gates this merge. To enable the push: create the deploy role," \
+               "then 'gh variable set AWS_DEPLOY_ROLE_ARN --body <role-arn>' and" \
+               "point the role-to-assume in publish at it. No workflow change is" \
+               "needed beyond that ARN."
 
   bump-config:
     name: Bump the gitops config (dev overlay)
-    needs: [merge-to-main]
-    if: github.ref == 'refs/heads/main'
+    # Follows the IMAGE, so it is gated on the same variable: bumping a tag to a SHA that was
+    # never pushed would point Argo CD at an image that does not exist, and the failure would
+    # surface in the cluster rather than here.
+    needs: [publish]
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
     # REUSES this repository's existing _bump-config workflow rather than shelling out to a
     # script of its own. That reuse is the point: the config repo's PAT handling, its branch
     # naming and its PR body already live in one reviewed place, and a second implementation
