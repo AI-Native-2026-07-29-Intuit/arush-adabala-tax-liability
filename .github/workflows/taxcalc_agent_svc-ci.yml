@@ -296,17 +296,58 @@ jobs:
       - name: uv sync --frozen
         run: uv sync --frozen
 
+      - name: is the measured eval runnable here?
+        # This gate needs FOUR things that are not part of the repository: an Anthropic key for
+        # the judge, a reachable MCP server, a reachable Redis, and a LangSmith key. When any is
+        # absent the eval cannot MEASURE anything - and the failure it produces says nothing
+        # about answer quality, which is the one thing this gate exists to protect.
+        #
+        # That is exactly the failure this workflow shipped with, and it turned main red on the
+        # very commit that introduced it: the step demanded `secrets.ANTHROPIC_API_KEY`, which
+        # does not exist here (the repository's key is TAXCALC_AI_ANTHROPIC_API_KEY), plus an
+        # MCP endpoint and a Redis that exist in no environment a GitHub runner can reach. A
+        # red build for missing infrastructure is indistinguishable, at a glance, from a red
+        # build for a regression - and this PR spent its whole length arguing that an unmeasured
+        # metric must never be confused with a measured one. It cuts both ways.
+        #
+        # So the presence check is explicit and its verdict is printed. Same discipline as
+        # taxcalc_mcp_server-ci.yml's LangSmith step: SKIP loudly and by name, never fail
+        # silently and never pass silently.
+        id: capability
+        env:
+          ANTHROPIC: ${{ secrets.TAXCALC_AI_ANTHROPIC_API_KEY }}
+          MCP: ${{ secrets.TAXCALC_MCP_SSE_URL }}
+          REDIS: ${{ secrets.TAXCALC_AI_REDIS_URL }}
+          LANGSMITH: ${{ secrets.TAXCALC_AI_LANGSMITH_API_KEY }}
+        run: |
+          missing=""
+          [ -n "$ANTHROPIC" ] || missing="$missing TAXCALC_AI_ANTHROPIC_API_KEY"
+          [ -n "$MCP" ]       || missing="$missing TAXCALC_MCP_SSE_URL"
+          [ -n "$REDIS" ]     || missing="$missing TAXCALC_AI_REDIS_URL"
+          [ -n "$LANGSMITH" ] || missing="$missing TAXCALC_AI_LANGSMITH_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "runnable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=RAGAS faithfulness DECLARED, not MEASURED::\
+          Absent:$missing. Trajectory and cost-per-run were still gated on the PR tier; answer \
+          quality was NOT checked on this run. Provision these to turn the gate on."
+            echo "faithfulness: DECLARED, NOT MEASURED - absent:$missing"
+          else
+            echo "runnable=true" >> "$GITHUB_OUTPUT"
+            echo "all four present - faithfulness will be MEASURED"
+          fi
+
       - name: full trajectory eval with RAGAS scored on real answers
         # The tier where faithfulness is actually MEASURED. No --allow-unmeasured-faithfulness
-        # here: on main, an unmeasured metric fails the build, because this is the run whose
-        # verdict anyone downstream will trust.
+        # here: when this runs at all, an unmeasured metric fails the build, because this is the
+        # run whose verdict anyone downstream will trust.
         #
         # The judge is claude-haiku-4-5, reading TAXCALC_AGENT_ANTHROPIC_API_KEY below through
         # Settings - NOT a bare ANTHROPIC_API_KEY, and not RAGAS's own default evaluator, which
         # is OpenAI. Both of those would report the metric as unmeasured and fail this step for
         # a reason that looks nothing like its cause; see trajectory.score_with_ragas.
+        if: steps.capability.outputs.runnable == 'true'
         env:
-          TAXCALC_AGENT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TAXCALC_AGENT_ANTHROPIC_API_KEY: ${{ secrets.TAXCALC_AI_ANTHROPIC_API_KEY }}
           TAXCALC_AGENT_MCP_SSE_URL: ${{ secrets.TAXCALC_MCP_SSE_URL }}
           TAXCALC_AI_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
           TAXCALC_AI_REDIS_URL: ${{ secrets.TAXCALC_AI_REDIS_URL }}
@@ -314,6 +355,19 @@ jobs:
           TAXCALC_AGENT_LANGSMITH_PROJECT: taxcalc-agent-svc-ci
           LANGSMITH_TRACING: "true"
         run: uv run python -m taxcalc_agent_svc.scripts.eval --gate
+
+      - name: trajectory + cost gate, which need no credentials at all
+        # The half that is ALWAYS measurable, and which the old shape threw away by bundling it
+        # with the half that is not. Routing is decided by the supervisor and the supervisor is
+        # production code, so all twenty scenarios exercise the real keyword table, the real
+        # list[Send] fan-out and the real reducers - offline, on every merge. Only the answers
+        # are canned, which is why faithfulness is waived HERE and only here.
+        #
+        # Runs when the measured eval could not, so a merge is never left with no eval verdict.
+        if: steps.capability.outputs.runnable != 'true'
+        run: |
+          uv run python -m taxcalc_agent_svc.scripts.eval \
+            --offline --gate --allow-unmeasured-faithfulness
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
