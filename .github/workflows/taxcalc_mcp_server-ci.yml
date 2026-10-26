@@ -102,7 +102,7 @@ jobs:
       - name: Install uv (pinned)
         # SHA-pinned, carrying forward the W6 D1 discipline: a mutable tag on a third-party
         # action is an unreviewed code-execution path into CI.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.13"
           enable-cache: true
@@ -314,7 +314,7 @@ jobs:
         run: ./gradlew -p taxcalc-orders bootJar
 
       - name: Install uv (pinned)
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.13"
           enable-cache: true
@@ -436,7 +436,7 @@ jobs:
             replay-p95-${{ runner.os }}-
 
       - name: Install uv (pinned)
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.13"
           enable-cache: true
