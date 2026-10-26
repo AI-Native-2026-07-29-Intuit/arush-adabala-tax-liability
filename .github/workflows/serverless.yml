@@ -42,7 +42,7 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+      - uses: aws-actions/setup-sam@341eee193f458fa5aae5d52c94b0c5cf3a1c5a52 # v3
         with:
           use-installer: true
 
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: sam-build, path: .aws-sam/build }
 
-      - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+      - uses: aws-actions/setup-sam@341eee193f458fa5aae5d52c94b0c5cf3a1c5a52 # v3
         with: { use-installer: true }
 
       # OIDC federated auth: GitHub mints a short-lived OIDC token, AWS STS
